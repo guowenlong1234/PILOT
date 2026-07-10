@@ -23,6 +23,9 @@ from vlnce_baselines.models.encoders.resnet_encoders import (
     VlnResnetDepthEncoder,
     CLIPEncoder,
 )
+from vlnce_baselines.models.encoders.rae_dinov2_encoder import (
+    RaeDinov2ClsEncoder,
+)
 from vlnce_baselines.models.policy import ILPolicy
 
 from vlnce_baselines.waypoint_pred.TRM_net import BinaryDistPredictor_TRM
@@ -138,7 +141,19 @@ class ETP(Net):
         #         device,
         #         spatial_output=model_config.spatial_output,
         #     )
-        self.rgb_encoder = CLIPEncoder(self.device)
+        rgb_encoder_type = str(model_config.RGB_ENCODER.type).lower()
+        if rgb_encoder_type == "clip":
+            self.rgb_encoder = CLIPEncoder(self.device)
+        elif rgb_encoder_type == "rae_dinov2":
+            self.rgb_encoder = RaeDinov2ClsEncoder(
+                model_config.RGB_ENCODER.model_dir,
+                model_config.RGB_ENCODER.stat_path,
+                self.device,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported RGB encoder: {model_config.RGB_ENCODER.type}"
+            )
         self.space_pool_rgb = nn.Sequential(nn.AdaptiveAvgPool2d((1,1)), nn.Flatten(start_dim=2))
     
         self.pano_img_idxes = np.arange(0, 12, dtype=np.int64)        # 逆时针
@@ -195,7 +210,10 @@ class ETP(Net):
             obs_view12['depth'] = depth_batch
             obs_view12['rgb'] = rgb_batch
             depth_embedding = self.depth_encoder(obs_view12)  # torch.Size([bs, 128, 4, 4])
-            rgb_embedding = self.rgb_encoder(obs_view12)      # torch.Size([bs, 2048, 7, 7])
+            raw_rgb_embedding = self.rgb_encoder(obs_view12)
+            rgb_embedding = self.vln_bert.img_embeddings.project_rgb(
+                raw_rgb_embedding
+            )
 
             ''' waypoint prediction ----------------------------- '''
             waypoint_heatmap_logits = waypoint_predictor(

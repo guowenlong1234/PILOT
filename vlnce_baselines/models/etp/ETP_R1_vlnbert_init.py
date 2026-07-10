@@ -29,6 +29,20 @@ def get_vlnbert_models(config=None, dropout_rate=0.1):
                 new_ckpt_weights['bert.' + k] = v
             else:
                 new_ckpt_weights[k] = v
+
+    rgb_encoder_type = str(config.RGB_ENCODER.type).lower()
+    projection_key = 'bert.img_embeddings.rgb_projection.0.weight'
+    has_rae_projection = projection_key in new_ckpt_weights
+    if rgb_encoder_type == 'rae_dinov2' and not has_rae_projection:
+        raise ValueError(
+            'RAE/DINOv2 pretrained checkpoint is missing required key '
+            f'{projection_key}'
+        )
+    if rgb_encoder_type == 'clip' and has_rae_projection:
+        raise ValueError(
+            'CLIP cannot load a RAE/DINOv2 pretrained checkpoint containing '
+            f'{projection_key}'
+        )
     
     cfg_name = 'bert_config/xlm-roberta-base'
     vis_config = PretrainedConfig.from_pretrained(cfg_name)
@@ -36,7 +50,10 @@ def get_vlnbert_models(config=None, dropout_rate=0.1):
     vis_config.type_vocab_size = 2
 
     vis_config.max_action_steps = 100
-    vis_config.image_feat_size = 512
+    vis_config.rgb_encoder_type = config.RGB_ENCODER.type
+    vis_config.raw_image_feat_size = config.RGB_ENCODER.raw_output_size
+    vis_config.image_feat_size = config.RGB_ENCODER.output_size
+    vis_config.projection_hidden_size = config.RGB_ENCODER.projection_hidden_size
     vis_config.use_depth_embedding = config.use_depth_embedding
     vis_config.depth_feat_size = 128
     vis_config.angle_feat_size = 4
