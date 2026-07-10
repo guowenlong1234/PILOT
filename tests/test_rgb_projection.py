@@ -1,7 +1,27 @@
+from pathlib import Path
+import subprocess
+import sys
+
 import pytest
 import torch
 
 from model_components.rgb_projection import build_rgb_projection
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_projection_module_imports_from_pretraining_workdir():
+    result = subprocess.run(
+        [sys.executable, "-c", "import model_components"],
+        cwd=ROOT / "pretrain_src" / "pretrain_src",
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout
 
 
 def test_rae_projection_has_expected_layers_and_output_shape():
@@ -33,16 +53,57 @@ def test_clip_projection_is_identity_and_returns_same_tensor():
     assert projection(features) is features
 
 
-def test_rae_projection_rejects_wrong_dimensions():
-    with pytest.raises(ValueError, match="768"):
-        build_rgb_projection("rae_dinov2", 512, 512, 768)
+@pytest.mark.parametrize(
+    ("parameter_name", "bad_value"),
+    (
+        ("raw_size", 512),
+        ("output_size", 513),
+        ("hidden_size", 769),
+    ),
+)
+def test_rae_projection_reports_wrong_dimension_values(parameter_name, bad_value):
+    dimensions = {
+        "raw_size": 768,
+        "output_size": 512,
+        "hidden_size": 768,
+    }
+    dimensions[parameter_name] = bad_value
+
+    with pytest.raises(ValueError, match=rf"{parameter_name}={bad_value}"):
+        build_rgb_projection("rae_dinov2", **dimensions)
 
 
 def test_clip_projection_rejects_wrong_dimensions():
-    with pytest.raises(ValueError, match="512"):
+    with pytest.raises(ValueError, match="raw_size=768"):
         build_rgb_projection("clip", 768, 512, 768)
 
 
 def test_projection_rejects_unknown_encoder_type():
     with pytest.raises(ValueError, match="Unsupported RGB encoder type"):
         build_rgb_projection("unknown", 768, 512, 768)
+
+
+@pytest.mark.parametrize(
+    ("parameter_name", "bad_value"),
+    (
+        ("raw_size", 768.9),
+        ("output_size", 512.1),
+        ("hidden_size", True),
+    ),
+)
+def test_projection_rejects_dimensions_that_are_not_exact_integers(
+    parameter_name,
+    bad_value,
+):
+    dimensions = {
+        "raw_size": 768,
+        "output_size": 512,
+        "hidden_size": 768,
+    }
+    dimensions[parameter_name] = bad_value
+
+    with pytest.raises(
+        ValueError,
+        match=rf"{parameter_name}.*{bad_value}",
+    ):
+        build_rgb_projection("rae_dinov2", **dimensions)
