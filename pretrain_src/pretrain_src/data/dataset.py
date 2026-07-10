@@ -37,9 +37,7 @@ def _normalize_hdf5_attr(value):
 
 
 def _metadata_value_matches(got, expected):
-    if isinstance(expected, bool):
-        return isinstance(got, bool) and got == expected
-    return got == expected
+    return type(got) is type(expected) and got == expected
 
 class ReverieTextPathData(object):
     def __init__(
@@ -107,7 +105,8 @@ class ReverieTextPathData(object):
                 if not _metadata_value_matches(got, expected):
                     raise ValueError(
                         f'DINO HDF5 metadata mismatch for {key}: '
-                        f'expected {expected!r}, got {got!r}'
+                        f'expected {expected!r} ({type(expected).__name__}), '
+                        f'got {got!r} ({type(got).__name__})'
                     )
 
     def _validate_view_features(self, key, view_fts):

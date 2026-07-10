@@ -17,6 +17,7 @@ from transformers import PretrainedConfig
 from pretrain_src.pretrain_src.data.dataset import (
     R2RTextPathData,
     ReverieTextPathData,
+    _metadata_value_matches,
 )
 from pretrain_src.pretrain_src.model.vilmodel import ImageEmbeddings
 
@@ -292,6 +293,10 @@ def test_raw_image_feature_size_defaults_to_legacy_image_size(tmp_path):
         ("vfov", 90),
         ("latent_normalized", np.bool_(False)),
         ("latent_normalized", 1),
+        ("feature_dim", 768.0),
+        ("num_views", 36.0),
+        ("image_size", 224.0),
+        ("vfov", 60.0),
     ),
 )
 def test_rae_metadata_mismatch_fails_before_other_dataset_files_are_opened(
@@ -320,8 +325,16 @@ def test_rae_metadata_mismatch_fails_before_other_dataset_files_are_opened(
         )
 
 
-def test_rae_metadata_accepts_structured_numpy_boolean(tmp_path):
+def test_rae_metadata_accepts_normalized_structured_scalar_types(tmp_path):
     metadata = dict(EXPECTED_RAE_METADATA)
+    metadata["feature_extractor"] = np.bytes_(
+        "rae_dinov2_with_registers_base_cls"
+    )
+    metadata["feature_dim"] = np.int64(768)
+    metadata["dtype"] = np.bytes_("float32")
+    metadata["num_views"] = np.int64(36)
+    metadata["image_size"] = np.int64(224)
+    metadata["vfov"] = np.int64(60)
     metadata["latent_normalized"] = np.bool_(True)
     img_path, dep_path, cands_path, connectivity_dir, anno_path = (
         _write_minimal_dataset_files(tmp_path, metadata=metadata)
@@ -339,6 +352,20 @@ def test_rae_metadata_accepts_structured_numpy_boolean(tmp_path):
     )
 
     assert dataset.raw_image_feat_size == 768
+
+
+@pytest.mark.parametrize(
+    ("got", "expected"),
+    (
+        (True, 1),
+        (1, True),
+    ),
+)
+def test_metadata_comparison_does_not_mix_boolean_and_integer_types(
+    got,
+    expected,
+):
+    assert not _metadata_value_matches(got, expected)
 
 
 def test_train_r2r_passes_encoder_type_and_raw_size_to_all_datasets():
