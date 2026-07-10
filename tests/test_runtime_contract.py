@@ -44,15 +44,20 @@ def test_runtime_wrapper_preserves_system_egl_environment_contract():
     assert "LD_PRELOAD" in script
 
 
-def _runtime_environment(*, ld_preload: str) -> dict[str, str]:
+def _runtime_environment(
+    *, ld_preload: str, system_gl_dispatch: str | None = None
+) -> dict[str, str]:
     initial_ld_library_path = "/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
     environment = os.environ.copy()
+    environment.pop("ETPR1_SYSTEM_GL_DISPATCH", None)
     environment.update(
         {
             "LD_LIBRARY_PATH": initial_ld_library_path,
             "LD_PRELOAD": ld_preload,
         }
     )
+    if system_gl_dispatch is not None:
+        environment["ETPR1_SYSTEM_GL_DISPATCH"] = system_gl_dispatch
     result = subprocess.run(
         [str(ROOT / "scripts" / "etpr1_rae_runtime_exec.sh"), "env"],
         cwd=ROOT,
@@ -85,3 +90,49 @@ def test_runtime_wrapper_does_not_duplicate_existing_gl_dispatch_preload():
     )
 
     assert environment["LD_PRELOAD"] == f"{system_gl_dispatch} {existing_preload}"
+
+
+def test_runtime_wrapper_does_not_duplicate_colon_separated_gl_dispatch():
+    system_gl_dispatch = "/lib/x86_64-linux-gnu/libGLdispatch.so.0"
+    existing_preload = "/lib/x86_64-linux-gnu/libm.so.6"
+    original_preload = f"{system_gl_dispatch}:{existing_preload}"
+
+    environment = _runtime_environment(ld_preload=original_preload)
+
+    assert environment["LD_PRELOAD"] == original_preload
+    assert environment["LD_PRELOAD"].split(":").count(system_gl_dispatch) == 1
+
+
+def test_runtime_wrapper_honors_custom_gl_dispatch_without_duplication():
+    custom_gl_dispatch = "/lib/x86_64-linux-gnu/libm.so.6"
+    existing_preload = "/lib/x86_64-linux-gnu/libGLdispatch.so.0"
+    original_preload = f"{existing_preload}:{custom_gl_dispatch}"
+
+    environment = _runtime_environment(
+        ld_preload=original_preload,
+        system_gl_dispatch=custom_gl_dispatch,
+    )
+
+    assert environment["LD_PRELOAD"] == original_preload
+    assert environment["LD_PRELOAD"].split(":").count(custom_gl_dispatch) == 1
+
+
+def test_runtime_wrapper_prepends_custom_gl_dispatch_override():
+    custom_gl_dispatch = "/lib/x86_64-linux-gnu/libm.so.6"
+    existing_preload = "/lib/x86_64-linux-gnu/libGLdispatch.so.0"
+
+    environment = _runtime_environment(
+        ld_preload=existing_preload,
+        system_gl_dispatch=custom_gl_dispatch,
+    )
+
+    assert environment["LD_PRELOAD"] == f"{custom_gl_dispatch} {existing_preload}"
+
+
+def test_runtime_wrapper_does_not_treat_gl_dispatch_path_prefix_as_same_token():
+    system_gl_dispatch = "/lib/x86_64-linux-gnu/libGLdispatch.so.0"
+    similar_preload = f"{system_gl_dispatch}.backup"
+
+    environment = _runtime_environment(ld_preload=similar_preload)
+
+    assert environment["LD_PRELOAD"] == f"{system_gl_dispatch} {similar_preload}"

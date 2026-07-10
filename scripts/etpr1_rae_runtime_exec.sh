@@ -105,7 +105,9 @@ export GLOG_minloglevel="${GLOG_minloglevel:-2}"
 # with the host NVIDIA GL stack. Prefer the system dispatcher when present.
 SYSTEM_GL_DISPATCH=${ETPR1_SYSTEM_GL_DISPATCH:-/lib/x86_64-linux-gnu/libGLdispatch.so.0}
 if [ -f "${SYSTEM_GL_DISPATCH}" ]; then
-    case " ${LD_PRELOAD:-} " in
+    PRELOAD_TOKENS=${LD_PRELOAD:-}
+    PRELOAD_TOKENS=${PRELOAD_TOKENS//:/ }
+    case " ${PRELOAD_TOKENS} " in
         *" ${SYSTEM_GL_DISPATCH} "*) ;;
         *) export LD_PRELOAD="${SYSTEM_GL_DISPATCH}${LD_PRELOAD:+ ${LD_PRELOAD}}" ;;
     esac
