@@ -99,7 +99,18 @@ export ETPR1_RUNTIME_ACTIVE=1
 export ETPR1_RUNTIME_ROOT="${RUNTIME_ROOT}"
 export ETPR1_RUNTIME_PREFIX="${RUNTIME_PREFIX}"
 export ETPR1_LEGACY_CLIP_ROOT="${LEGACY_CLIP_ROOT}"
+export MAGNUM_LOG="${MAGNUM_LOG:-quiet}"
+export GLOG_minloglevel="${GLOG_minloglevel:-2}"
+# Habitat-Sim's EGL path can fail if conda's libGLdispatch is loaded together
+# with the host NVIDIA GL stack. Prefer the system dispatcher when present.
+SYSTEM_GL_DISPATCH=${ETPR1_SYSTEM_GL_DISPATCH:-/lib/x86_64-linux-gnu/libGLdispatch.so.0}
+if [ -f "${SYSTEM_GL_DISPATCH}" ]; then
+    case " ${LD_PRELOAD:-} " in
+        *" ${SYSTEM_GL_DISPATCH} "*) ;;
+        *) export LD_PRELOAD="${SYSTEM_GL_DISPATCH}${LD_PRELOAD:+ ${LD_PRELOAD}}" ;;
+    esac
+fi
 export PYTHONPATH="${REPO_ROOT}:${LEGACY_CLIP_ROOT}:${RUNTIME_SITE_PACKAGES}:${RUNTIME_HABITAT_BASELINES}"
-export LD_LIBRARY_PATH="${RUNTIME_LIB}"
+export LD_LIBRARY_PATH="${RUNTIME_LIB}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 exec "$@"
