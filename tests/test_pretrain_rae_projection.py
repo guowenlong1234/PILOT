@@ -472,6 +472,13 @@ def test_rae_launch_script_uses_runtime_wrapper_from_nested_workdir(tmp_path):
     environment = os.environ.copy()
     environment.pop("PYTHONPATH", None)
     environment.pop("ETPR1_RUNTIME_ACTIVE", None)
+    environment["LD_LIBRARY_PATH"] = ":".join(
+        (
+            str(ROOT / ".runtime" / "etpr1_habitat" / "prefix" / "lib"),
+            "/usr/local/nvidia/lib",
+            "/usr/local/nvidia/lib64",
+        )
+    )
     environment["PATH"] = f"{tmp_path}:{environment['PATH']}"
     environment["CAPTURE_PATH"] = str(capture_path)
 

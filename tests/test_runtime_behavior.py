@@ -12,6 +12,7 @@ WRAPPER = ROOT / "scripts" / "etpr1_rae_runtime_exec.sh"
 INSPECTOR = ROOT / "scripts" / "inspect_etpr1_runtime.py"
 RUNTIME_ROOT = ROOT / ".runtime" / "etpr1_habitat"
 RUNTIME_PREFIX = RUNTIME_ROOT / "prefix"
+RUNTIME_LIB = RUNTIME_PREFIX / "lib"
 HABITAT_LAB_SOURCE = Path("/home/a6000/gwl/_deps/habitat-lab-v0.3.3")
 HABITAT_SIM_SOURCE = Path("/home/a6000/gwl/_deps/habitat-sim-v0.3.3")
 
@@ -32,6 +33,13 @@ def _runtime_env():
     env = os.environ.copy()
     env["ETPR1_RUNTIME_ROOT"] = str(RUNTIME_ROOT)
     env["ETPR1_RUNTIME_PREFIX"] = str(RUNTIME_PREFIX)
+    env["LD_LIBRARY_PATH"] = ":".join(
+        (
+            str(RUNTIME_LIB),
+            "/usr/local/nvidia/lib",
+            "/usr/local/nvidia/lib64",
+        )
+    )
     return env
 
 

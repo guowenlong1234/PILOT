@@ -113,6 +113,33 @@ if [ -f "${SYSTEM_GL_DISPATCH}" ]; then
     esac
 fi
 export PYTHONPATH="${REPO_ROOT}:${LEGACY_CLIP_ROOT}:${RUNTIME_SITE_PACKAGES}:${RUNTIME_HABITAT_BASELINES}"
-export LD_LIBRARY_PATH="${RUNTIME_LIB}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
+INHERITED_LD_LIBRARY_PATH=${LD_LIBRARY_PATH-}
+if [ "${LD_LIBRARY_PATH+x}" = x ]; then
+    case ":${INHERITED_LD_LIBRARY_PATH}:" in
+        *"::"*) fail "empty inherited LD_LIBRARY_PATH entry is forbidden" ;;
+    esac
+fi
+
+keep_nvidia_lib=0
+keep_nvidia_lib64=0
+IFS=: read -r -a inherited_library_entries <<< "${INHERITED_LD_LIBRARY_PATH}"
+for entry in "${inherited_library_entries[@]}"; do
+    case "${entry}" in
+        "${RUNTIME_LIB}") ;;
+        /usr/local/nvidia/lib) keep_nvidia_lib=1 ;;
+        /usr/local/nvidia/lib64) keep_nvidia_lib64=1 ;;
+        *) fail "forbidden inherited LD_LIBRARY_PATH entry: ${entry}" ;;
+    esac
+done
+
+runtime_library_entries=("${RUNTIME_LIB}")
+if [ "${keep_nvidia_lib}" -eq 1 ]; then
+    runtime_library_entries+=(/usr/local/nvidia/lib)
+fi
+if [ "${keep_nvidia_lib64}" -eq 1 ]; then
+    runtime_library_entries+=(/usr/local/nvidia/lib64)
+fi
+export LD_LIBRARY_PATH=$(IFS=:; printf '%s' "${runtime_library_entries[*]}")
 
 exec "$@"
