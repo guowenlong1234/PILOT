@@ -43,6 +43,12 @@ def test_non_git_source_uses_deterministic_controlled_manifest(tmp_path):
     excluded = tmp_path / "data" / "logs" / "huge.log"
     excluded.parent.mkdir(parents=True)
     excluded.write_text("first ignored payload\n", encoding="utf-8")
+    task_log = tmp_path / ".task2_logs" / "runtime.log"
+    task_log.parent.mkdir()
+    task_log.write_text("first task log\n", encoding="utf-8")
+    bert_weight = tmp_path / "bert_config" / "model" / "pytorch_model.bin"
+    bert_weight.parent.mkdir(parents=True)
+    bert_weight.write_bytes(b"first model asset")
 
     manifest = tmp_path / "source.manifest"
     first = resolve_source_identity(
@@ -51,6 +57,8 @@ def test_non_git_source_uses_deterministic_controlled_manifest(tmp_path):
         manifest_path=manifest,
     )
     excluded.write_text("second ignored payload\n", encoding="utf-8")
+    task_log.write_text("second task log\n", encoding="utf-8")
+    bert_weight.write_bytes(b"second model asset")
     second = resolve_source_identity(
         tmp_path,
         requested_commit="another-label",
@@ -62,6 +70,8 @@ def test_non_git_source_uses_deterministic_controlled_manifest(tmp_path):
     assert first["manifest_sha256"] == second["manifest_sha256"]
     assert "scripts/run.py" in manifest.read_text()
     assert "data/logs/huge.log" not in manifest.read_text()
+    assert ".task2_logs/runtime.log" not in manifest.read_text()
+    assert "bert_config/model/pytorch_model.bin" not in manifest.read_text()
 
 
 def test_smoke_script_persists_stage_statuses_and_final_summary():

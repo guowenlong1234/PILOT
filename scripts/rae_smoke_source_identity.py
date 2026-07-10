@@ -7,7 +7,13 @@ from pathlib import Path
 import subprocess
 
 
-EXCLUDED_TOP_LEVEL = {".git", ".runtime", "data", "pretrained"}
+EXCLUDED_TOP_LEVEL = {
+    ".git",
+    ".runtime",
+    ".task2_logs",
+    "data",
+    "pretrained",
+}
 EXCLUDED_PREFIXES = {
     ("pretrain_src", "datasets"),
     ("pretrain_src", "img_features"),
@@ -45,6 +51,8 @@ def _controlled_source_files(project_root, manifest_path):
         if any(part in EXCLUDED_PARTS for part in parts):
             continue
         if path.suffix in {".pyc", ".pyo"}:
+            continue
+        if parts[0] == "bert_config" and path.suffix == ".bin":
             continue
         if path.name in {"source_manifest.sha256", "source_identity.json"}:
             continue
