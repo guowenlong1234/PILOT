@@ -1,4 +1,6 @@
+import copy
 from pathlib import Path
+import pickle
 import re
 import subprocess
 import sys
@@ -119,6 +121,24 @@ def test_real_task_config_converts_to_modern_habitat_shape(
     assert not task_config.is_frozen()
     task_config.freeze()
     assert task_config.is_frozen()
+
+    serialized_config = pickle.loads(pickle.dumps(task_config))
+    copied_config = copy.deepcopy(task_config)
+    expected_fields = OmegaConf.to_container(task_config, resolve=True)
+
+    for restored_config in (serialized_config, copied_config):
+        assert OmegaConf.is_config(restored_config)
+        assert OmegaConf.to_container(restored_config, resolve=True) == expected_fields
+        assert OmegaConf.is_readonly(restored_config)
+        assert restored_config.is_frozen()
+
+        restored_config.defrost()
+        restored_config.seed += 1
+        assert not OmegaConf.is_readonly(restored_config)
+        assert not restored_config.is_frozen()
+        restored_config.freeze()
+        assert OmegaConf.is_readonly(restored_config)
+        assert restored_config.is_frozen()
 
 
 def test_rxr_task_config_supplies_modern_forward_action_default():

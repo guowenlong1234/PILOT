@@ -16,6 +16,32 @@ import cv2
 import os
 
 
+def _legacy_defrost(config_node):
+    OmegaConf.set_readonly(config_node, False)
+
+
+def _legacy_freeze(config_node):
+    OmegaConf.set_readonly(config_node, True)
+
+
+def _legacy_is_frozen(config_node):
+    return bool(OmegaConf.is_readonly(config_node))
+
+
+def _install_legacy_freeze_api():
+    from omegaconf import DictConfig, ListConfig
+
+    legacy_methods = {
+        "defrost": _legacy_defrost,
+        "freeze": _legacy_freeze,
+        "is_frozen": _legacy_is_frozen,
+    }
+    for config_type in (DictConfig, ListConfig):
+        for method_name, method in legacy_methods.items():
+            if not hasattr(config_type, method_name):
+                setattr(config_type, method_name, method)
+
+
 def _to_omegaconf_compatible(value):
     if hasattr(value, "items"):
         return {
@@ -25,31 +51,6 @@ def _to_omegaconf_compatible(value):
     if isinstance(value, (list, tuple)):
         return [_to_omegaconf_compatible(child) for child in value]
     return value
-
-
-def _attach_legacy_freeze_api(config_node):
-    if not OmegaConf.is_config(config_node):
-        return
-
-    object.__setattr__(
-        config_node,
-        "defrost",
-        lambda node=config_node: OmegaConf.set_readonly(node, False),
-    )
-    object.__setattr__(
-        config_node,
-        "freeze",
-        lambda node=config_node: OmegaConf.set_readonly(node, True),
-    )
-    object.__setattr__(
-        config_node,
-        "is_frozen",
-        lambda node=config_node: bool(OmegaConf.is_readonly(node)),
-    )
-
-    children = config_node.values() if OmegaConf.is_dict(config_node) else config_node
-    for child in children:
-        _attach_legacy_freeze_api(child)
 
 
 def _config_type(value, default):
@@ -75,6 +76,7 @@ def _lowercase_fields(source, mapping):
 
 
 def _task_config_for_habitat(config):
+    _install_legacy_freeze_api()
     legacy = _to_omegaconf_compatible(config.TASK_CONFIG)
     environment_legacy = legacy.get("ENVIRONMENT", {})
     iterator_legacy = environment_legacy.get("ITERATOR_OPTIONS", {})
@@ -344,7 +346,6 @@ def _task_config_for_habitat(config):
     )
     task_config = OmegaConf.create(modern)
     OmegaConf.set_readonly(task_config, True)
-    _attach_legacy_freeze_api(task_config)
     return task_config
 
 
