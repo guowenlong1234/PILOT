@@ -67,7 +67,7 @@ cd /home/a6000/gwl/ETP-R1
 - `/home/a6000/gwl/dino_cwp`：其他实验工程，除非用户明确授权，否则只读。
 - `/home/a6000/gwl/miniconda3/envs/raenwm`：ETPNav 正在使用的环境，禁止修改。
 - `gwl-etpnav`：ETPNav 容器，禁止停止、删除、重建或用于本项目实验。
-- 不得终止不属于本项目的 `torchrun`、`run.py`、`train.py` 或 Docker 进程。
+- 默认不得终止不属于本项目的 `torchrun`、`run.py`、`train.py` 或 Docker 进程。只有用户针对当前任务中的具体进程明确说明可以停止时，才允许停止；该授权只对当次明确指定的进程有效，不能延伸到后续任务或其他进程。
 
 ## GPU 使用约定
 
@@ -83,7 +83,7 @@ ssh 4090 'nvidia-smi; docker ps --format "{{.Names}}|{{.Status}}"'
 ssh 4090 'docker exec gwl-etpnav bash -lc "ps -eo pid,ppid,stat,etime,cmd | grep -E '\''torchrun|run.py|train.py'\'' | grep -v grep || true"'
 ```
 
-- 如果 ETPNav 正在占用 GPU，不并行启动本项目的全量特征生成、预训练、SFT、GRPO 或完整评测，也不得擅自结束 ETPNav；应等待资源释放或向用户说明现场情况。
+- 如果 ETPNav 正在占用 GPU，不并行启动本项目的全量特征生成、预训练、SFT、GRPO 或完整评测，也不得擅自结束 ETPNav；应等待资源释放或向用户说明现场情况。只有用户明确授权停止该具体任务时，才能按上一节的授权边界处理。
 - 轻量 CPU 检查也必须在新容器中执行，但不得因为“只是检查”而修改现有 ETPNav 环境。
 
 ## 代码同步与产物位置

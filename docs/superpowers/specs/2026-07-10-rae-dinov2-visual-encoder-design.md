@@ -43,7 +43,7 @@ last_verified_date: 2026-07-10
 
 本机 `etpnav` 环境是 Python 3.7、PyTorch 1.9.1、Transformers 4.12.5，不包含 `Dinov2WithRegistersModel`，只保留为旧 CLIP 链路的只读参考，不承担本次实现和验证。
 
-2026-07-10 已只读核验测评机：有线地址为 `10.10.10.2`，GPU 为 RTX 4090 24GB，根分区可用约 335GB。远端 `raenwm` 环境是 Python 3.11.15、PyTorch 2.2.2+cu121、Transformers 4.49.0，包含 `Dinov2WithRegistersModel`。现有 `gwl-etpnav` 容器中仍有 ETPNav 评测进程使用该环境，不能修改或中断。
+2026-07-10 已只读核验测评机：有线地址为 `10.10.10.2`，GPU 为 RTX 4090 24GB，根分区可用约 335GB。远端 `raenwm` 环境是 Python 3.11.15、PyTorch 2.2.2+cu121、Transformers 4.49.0，包含 `Dinov2WithRegistersModel`。核验时 `gwl-etpnav` 容器中有 ETPNav 评测进程使用该环境；用户随后针对该具体任务明确授权停止，进程已正常退出，容器保持运行。以后仍然默认禁止停止 ETPNav，除非用户再次针对具体进程明确授权。
 
 ## 4. 总体方案选择
 
@@ -171,7 +171,7 @@ scripts/etpr1_rae_runtime_exec.sh
 
 设计时测评机根分区可用约 335GB，远端 `raenwm` 环境约 7.4GB，全量 float32 DINO CLS HDF5 原始数据约 1.2GB，空间足够。
 
-测评机只有一张 RTX 4090。启动特征生成、训练或完整评测前必须检查 ETPNav 是否仍占用 GPU；不得终止它，也不得与它并行启动本项目重型任务。新实验使用独立输出目录并限制 checkpoint 保留数量，不为每个 checkpoint 重复保存冻结 DINO 权重。
+测评机只有一张 RTX 4090。启动特征生成、训练或完整评测前必须检查 ETPNav 是否仍占用 GPU；不得擅自终止它，也不得与它并行启动本项目重型任务。只有用户针对具体进程明确授权时才能停止，授权不能延伸到其他任务。新实验使用独立输出目录并限制 checkpoint 保留数量，不为每个 checkpoint 重复保存冻结 DINO 权重。
 
 ## 6. RAE/DINOv2 编码语义
 
@@ -571,7 +571,7 @@ DINOv2-B/14 的视觉 token 数多于 CLIP ViT-B/32，在线编码预计更慢�
 
 以下条件全部满足才算替换完成：
 
-- 测评机现有 `gwl-etpnav` 容器、远端 `raenwm` 环境和正在运行的 ETPNav 未被修改或中断。
+- 测评机现有 `gwl-etpnav` 容器、远端 `raenwm` 环境和 ETPNav 任务未被擅自修改或中断；如用户针对具体进程明确授权停止，则只按当次授权执行。
 - 测评机新容器 `gwl-etpr1-rae` 与新环境 `etpr1_rae` 能独立运行 ETP-R1 和远端 RAE/DINOv2。
 - 本机未创建新环境、未生成特征、未运行任何测试或实验。
 - encoder-only CLS 与 RAENWM 原始链路通过数值一致性测试。
