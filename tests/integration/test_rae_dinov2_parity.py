@@ -1,3 +1,4 @@
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -7,74 +8,92 @@ import textwrap
 import torch
 import torch.nn.functional as F
 
-ETPNAV_ROOT = Path("/home/a6000/gwl/ETPNav")
+DINO_CWP_ROOT = Path("/home/a6000/gwl/dino_cwp")
 ETPR1_ROOT = Path("/home/a6000/gwl/ETP-R1")
 MODEL_DIR = Path(
     "/home/a6000/gwl/ETP-R1/pretrained/rae_dinov2_with_registers_base"
 )
 STAT_PATH = MODEL_DIR / "stat.pt"
+REFERENCE_CONFIG = DINO_CWP_ROOT / (
+    "dino_cwp/nwm/raenwm_core/RAE/configs/stage1/pretrained/DINOv2-B.yaml"
+)
+REFERENCE_MODEL_DIR = Path(
+    "/home/a6000/gwl/RAE-NWM/raenwm/models/encoders/"
+    "dinov2-with-registers-base"
+)
+REFERENCE_STAT_PATH = Path(
+    "/home/a6000/gwl/RAE-NWM/raenwm/models/stats/"
+    "dinov2/wReg_base/imagenet1k/stat.pt"
+)
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 REFERENCE_SCRIPT = textwrap.dedent(
     r"""
-    import importlib.util
+    import inspect
     import sys
     from pathlib import Path
 
     import torch
-    from transformers import AutoImageProcessor
 
-    etpnav_root = Path(sys.argv[1]).resolve()
-    etpr1_root = Path(sys.argv[2]).resolve()
-    model_dir = Path(sys.argv[3]).resolve()
-    stat_path = Path(sys.argv[4]).resolve()
-    image_path = Path(sys.argv[5]).resolve()
-    output_path = Path(sys.argv[6]).resolve()
+    dino_cwp_root = Path(sys.argv[1]).resolve()
+    reference_config = Path(sys.argv[2]).resolve()
+    etpr1_root = Path(sys.argv[3]).resolve()
+    model_dir = Path(sys.argv[4]).resolve()
+    stat_path = Path(sys.argv[5]).resolve()
+    image_path = Path(sys.argv[6]).resolve()
+    output_path = Path(sys.argv[7]).resolve()
 
-    assert sys.dont_write_bytecode, "reference import must not write ETPNav bytecode"
+    assert sys.dont_write_bytecode, "reference import must not write bytecode"
     sys.path.insert(0, str(etpr1_root))
     from vlnce_baselines.models.encoders.rae_dinov2_encoder import (
         RaeDinov2ClsEncoder,
     )
 
-    reference_file = (
-        etpnav_root / "vlnce_baselines/common/rae_visual_encoder.py"
-    )
-    spec = importlib.util.spec_from_file_location(
-        "etpnav_rae_visual_encoder_reference",
-        reference_file,
-    )
-    reference_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(reference_module)
-    Dinov2withNorm = reference_module.Dinov2withNorm
+    sys.path.insert(0, str(dino_cwp_root))
+    from dino_cwp.nwm import rae_visual_encoder as reference_module
+    from dino_cwp.nwm.raenwm_core.RAE.src.stage1.rae import RAE
 
     rgb = torch.load(image_path, map_location="cpu")
     device = torch.device("cuda:0")
-    pixels = rgb.permute(0, 3, 1, 2).contiguous()
-    pixels = pixels.to(device=device, dtype=torch.float32).div(255.0)
-    processor = AutoImageProcessor.from_pretrained(
-        model_dir,
-        local_files_only=True,
+    reference_params = reference_module.load_rae_stage1_params(
+        reference_config
     )
-    image_mean = torch.tensor(processor.image_mean, device=device).view(1, 3, 1, 1)
-    image_std = torch.tensor(processor.image_std, device=device).view(1, 3, 1, 1)
-    pixels = (pixels - image_mean) / image_std
+    reference_rae = reference_module._build_rae_stage1(
+        reference_params
+    ).to(device).eval()
+    assert isinstance(reference_rae, RAE)
+    _patch_latents, reference = reference_module.encode_rae_rgb_with_cls(
+        reference_rae,
+        rgb,
+        device=device,
+        size=224,
+    )
 
-    encoder = Dinov2withNorm(str(model_dir), normalize=True).to(device).eval()
-    with torch.no_grad():
-        _patch_tokens, cls = encoder.encode_with_cls(pixels)
-        cls = cls.float()
-
-    stats = torch.load(stat_path, map_location="cpu")
-    var = stats["var"].float().to(device).mean(dim=(1, 2)).unsqueeze(0)
-    mean = stats.get("mean")
-    if mean is not None:
-        mean = mean.float().to(device).mean(dim=(1, 2)).unsqueeze(0)
-    else:
-        mean = 0.0
-    cls = (cls - mean) / torch.sqrt(var + 1e-5)
-    if not torch.isfinite(cls).all():
-        raise FloatingPointError("reference RAE CLS contains NaN or infinity")
+    protected_package = (dino_cwp_root / "dino_cwp").resolve()
+    source_paths = {
+        "reference_wrapper": Path(
+            inspect.getsourcefile(reference_module.encode_rae_rgb_with_cls)
+        ).resolve(),
+        "reference_rae": Path(inspect.getsourcefile(RAE)).resolve(),
+        "reference_stat_for_shape": Path(
+            inspect.getsourcefile(RAE._stat_for_shape)
+        ).resolve(),
+        "reference_normalize_latent": Path(
+            inspect.getsourcefile(RAE._normalize_latent)
+        ).resolve(),
+    }
+    for name, source_path in source_paths.items():
+        assert source_path.is_relative_to(protected_package), (
+            f"{name} was imported from unexpected path {source_path}"
+        )
 
     production_encoder = RaeDinov2ClsEncoder(
         model_dir=model_dir,
@@ -82,10 +101,13 @@ REFERENCE_SCRIPT = textwrap.dedent(
         device=device,
     )
     actual = production_encoder({"rgb": rgb})
+    with torch.autocast(device_type="cuda", dtype=torch.float16):
+        autocast_actual = production_encoder({"rgb": rgb})
     torch.save(
         {
-            "reference": cls.cpu(),
+            "reference": reference.cpu(),
             "actual": actual.cpu(),
+            "autocast_actual": autocast_actual.cpu(),
             "encoder_training": production_encoder.training,
             "backbone_training": production_encoder.backbone.training,
             "all_backbone_parameters_frozen": all(
@@ -104,21 +126,37 @@ REFERENCE_SCRIPT = textwrap.dedent(
         },
         output_path,
     )
-    print(f"reference_file={reference_file}")
+    for name, source_path in source_paths.items():
+        print(f"{name}={source_path}")
     """
 )
 
 
-def test_production_encoder_matches_etpnav_rae_reference(tmp_path):
-    assert ETPNAV_ROOT.is_dir(), f"missing read-only ETPNav reference: {ETPNAV_ROOT}"
-    for asset_name in (
-        "config.json",
-        "preprocessor_config.json",
-        "model.safetensors",
-        "stat.pt",
-    ):
-        assert (MODEL_DIR / asset_name).is_file(), (
-            f"missing ETP-R1 RAE/DINOv2 asset: {MODEL_DIR / asset_name}"
+def test_production_encoder_matches_full_rae_reference(tmp_path):
+    assert DINO_CWP_ROOT.is_dir(), (
+        f"missing read-only full RAE reference: {DINO_CWP_ROOT}"
+    )
+    assert REFERENCE_CONFIG.is_file(), (
+        f"missing full RAE reference config: {REFERENCE_CONFIG}"
+    )
+    reference_assets = {
+        "config.json": REFERENCE_MODEL_DIR / "config.json",
+        "preprocessor_config.json": (
+            REFERENCE_MODEL_DIR / "preprocessor_config.json"
+        ),
+        "model.safetensors": REFERENCE_MODEL_DIR / "model.safetensors",
+        "stat.pt": REFERENCE_STAT_PATH,
+    }
+    for asset_name, reference_asset in reference_assets.items():
+        production_asset = MODEL_DIR / asset_name
+        assert reference_asset.is_file(), (
+            f"missing read-only RAE-NWM asset: {reference_asset}"
+        )
+        assert production_asset.is_file(), (
+            f"missing ETP-R1 RAE/DINOv2 asset: {production_asset}"
+        )
+        assert _sha256(reference_asset) == _sha256(production_asset), (
+            f"reference and production {asset_name} hashes differ"
         )
     assert torch.cuda.is_available(), "real RAE/DINOv2 parity requires CUDA"
 
@@ -143,7 +181,8 @@ def test_production_encoder_matches_etpnav_rae_reference(tmp_path):
             sys.executable,
             "-c",
             REFERENCE_SCRIPT,
-            str(ETPNAV_ROOT),
+            str(DINO_CWP_ROOT),
+            str(REFERENCE_CONFIG),
             str(ETPR1_ROOT),
             str(MODEL_DIR),
             str(STAT_PATH),
@@ -158,11 +197,15 @@ def test_production_encoder_matches_etpnav_rae_reference(tmp_path):
         check=False,
     )
     assert result.returncode == 0, result.stdout
-    assert str(ETPNAV_ROOT / "vlnce_baselines") in result.stdout
+    assert str(DINO_CWP_ROOT / "dino_cwp/nwm/rae_visual_encoder.py") in result.stdout
+    assert str(
+        DINO_CWP_ROOT / "dino_cwp/nwm/raenwm_core/RAE/src/stage1/rae.py"
+    ) in result.stdout
 
     outputs = torch.load(reference_path, map_location="cpu")
     reference = outputs["reference"].float()
     actual = outputs["actual"].float()
+    autocast_actual = outputs["autocast_actual"].float()
 
     assert outputs["encoder_training"] is False
     assert outputs["backbone_training"] is False
@@ -171,8 +214,13 @@ def test_production_encoder_matches_etpnav_rae_reference(tmp_path):
     assert outputs["final_layernorm_has_weight"] is False
     assert outputs["final_layernorm_has_bias"] is False
     assert reference.shape == actual.shape == (1, 768)
+    assert autocast_actual.shape == actual.shape
+    assert outputs["autocast_actual"].dtype == torch.float32
+    torch.testing.assert_close(autocast_actual, actual, rtol=0.0, atol=0.0)
     max_abs = (reference - actual).abs().max().item()
     cosine = F.cosine_similarity(reference, actual).item()
+    autocast_max_abs = (autocast_actual - actual).abs().max().item()
     print(f"RAE/DINOv2 parity max_abs={max_abs:.10g} cosine={cosine:.10g}")
+    print(f"RAE/DINOv2 autocast max_abs={autocast_max_abs:.10g}")
     assert max_abs <= 1e-5
     assert cosine >= 0.999999

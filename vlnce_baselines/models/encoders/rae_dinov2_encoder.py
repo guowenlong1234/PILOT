@@ -15,6 +15,8 @@ def _prepare_cls_stat(
         raise ValueError(f"RAE {name} must be a tensor, got {type(stat).__name__}")
     if not torch.isfinite(stat).all():
         raise ValueError(f"RAE {name} must contain only finite values")
+    if name == "var" and torch.any(stat < 0):
+        raise ValueError("RAE var must contain only non-negative values")
 
     channels = cls.shape[1]
     if stat.ndim == 1 and stat.shape[0] == channels:
@@ -38,6 +40,8 @@ def _prepare_cls_stat(
     prepared = prepared.to(device=cls.device, dtype=cls.dtype)
     if not torch.isfinite(prepared).all():
         raise ValueError(f"RAE {name} must contain only finite values")
+    if name == "var" and torch.any(prepared < 0):
+        raise ValueError("RAE var must contain only non-negative values")
     return prepared
 
 
@@ -144,22 +148,27 @@ class RaeDinov2ClsEncoder(nn.Module):
         if rgb.dtype != torch.uint8:
             raise ValueError(f"RAE/DINOv2 requires uint8 RGB, got {rgb.dtype}")
 
-        rgb = rgb.permute(0, 3, 1, 2).contiguous()
-        rgb = rgb.to(device=self.image_mean.device, dtype=torch.float32).div(255.0)
-        rgb = (rgb - self.image_mean) / self.image_std
-        hidden_state = self.backbone(rgb).last_hidden_state
-        cls = hidden_state[:, 0].float()
-        if tuple(cls.shape) != (rgb.shape[0], self.output_size):
-            raise ValueError(
-                f"RAE/DINOv2 backbone returned CLS shape {tuple(cls.shape)}, "
-                f"expected {(rgb.shape[0], self.output_size)}"
+        device_type = self.image_mean.device.type
+        with torch.autocast(device_type=device_type, enabled=False):
+            rgb = rgb.permute(0, 3, 1, 2).contiguous()
+            rgb = rgb.to(
+                device=self.image_mean.device,
+                dtype=torch.float32,
+            ).div(255.0)
+            rgb = (rgb - self.image_mean) / self.image_std
+            hidden_state = self.backbone(rgb).last_hidden_state
+            cls = hidden_state[:, 0].float()
+            if tuple(cls.shape) != (rgb.shape[0], self.output_size):
+                raise ValueError(
+                    f"RAE/DINOv2 backbone returned CLS shape {tuple(cls.shape)}, "
+                    f"expected {(rgb.shape[0], self.output_size)}"
+                )
+            cls = normalize_rae_cls(
+                cls,
+                self.latent_mean,
+                self.latent_var,
+                eps=1e-5,
             )
-        cls = normalize_rae_cls(
-            cls,
-            self.latent_mean,
-            self.latent_var,
-            eps=1e-5,
-        )
-        if not torch.isfinite(cls).all():
-            raise FloatingPointError("RAE/DINOv2 CLS contains NaN or infinity")
+            if not torch.isfinite(cls).all():
+                raise FloatingPointError("RAE/DINOv2 CLS contains NaN or infinity")
         return cls

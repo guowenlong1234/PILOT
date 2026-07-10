@@ -14,9 +14,13 @@ class FakeBackbone(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.scale = torch.nn.Parameter(torch.tensor(2.0))
+        self.projection = torch.nn.Linear(768, 768, bias=False)
+        with torch.no_grad():
+            self.projection.weight.copy_(torch.eye(768))
         self.layernorm = torch.nn.LayerNorm(768)
         self.last_pixels = None
         self.forward_grad_enabled = None
+        self.last_hidden_dtype = None
 
     def forward(self, pixel_values):
         self.last_pixels = pixel_values.detach().clone()
@@ -27,6 +31,8 @@ class FakeBackbone(torch.nn.Module):
             dtype=pixel_values.dtype,
             device=pixel_values.device,
         )
+        cls = self.projection(cls)
+        self.last_hidden_dtype = cls.dtype
         other_tokens = torch.zeros(
             pixel_values.shape[0],
             5,
@@ -149,6 +155,23 @@ def test_normalize_rae_cls_rejects_non_finite_mean_explicitly():
         )
 
 
+def test_normalize_rae_cls_rejects_negative_variance_even_with_positive_eps():
+    with pytest.raises(ValueError, match=r"var.*non-negative"):
+        normalize_rae_cls(
+            torch.ones(1, 2),
+            mean=None,
+            var=torch.tensor([-1e-6, 1.0]),
+            eps=1e-5,
+        )
+
+
+def test_normalize_rae_cls_rejects_negative_variance_before_spatial_mean():
+    var = torch.tensor([[[-1.0, 3.0]], [[1.0, 1.0]]])
+
+    with pytest.raises(ValueError, match=r"var.*non-negative"):
+        normalize_rae_cls(torch.ones(1, 2), mean=None, var=var)
+
+
 def test_encoder_loads_local_assets_and_disables_final_layernorm_affine(
     fake_encoder,
 ):
@@ -217,6 +240,16 @@ def test_encoder_forward_disables_gradient_tracking(fake_encoder):
 
     assert fake_encoder.backbone.forward_grad_enabled is False
     assert output.requires_grad is False
+
+
+def test_encoder_disables_outer_autocast_for_backbone(fake_encoder):
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        output = fake_encoder(
+            {"rgb": torch.zeros(1, 224, 224, 3, dtype=torch.uint8)}
+        )
+
+    assert fake_encoder.backbone.last_hidden_dtype == torch.float32
+    assert output.dtype == torch.float32
 
 
 def test_encoder_is_never_blind(fake_encoder):
