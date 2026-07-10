@@ -95,7 +95,10 @@ source_revision() {
     git_head=$(git -C "${source}" rev-parse HEAD 2>/dev/null || true)
     if [ -n "${git_head}" ]; then
         local git_status
-        git_status=$(git -C "${source}" status --porcelain --untracked-files=all)
+        if ! git_status=$(git -C "${source}" status --porcelain --untracked-files=all); then
+            echo "source_status_error: failed to inspect Git source: ${source}" >&2
+            return 1
+        fi
         if [ -n "${git_status}" ]; then
             echo "source_dirty: Git source has uncommitted or untracked files: ${source}" >&2
             printf '%s\n' "${git_status}" >&2
@@ -182,8 +185,13 @@ ensure_source_tree() {
     local actual_local_source=MARKER_MISSING
     local marker_status=missing
 
-    requested_source=$(readlink -f "${requested_source}")
-    requested_revision=$(source_revision "${requested_source}")
+    if ! requested_source=$(readlink -f "${requested_source}"); then
+        echo "source_path_error: cannot resolve source path: ${requested_source}" >&2
+        return 1
+    fi
+    if ! requested_revision=$(source_revision "${requested_source}"); then
+        return 1
+    fi
     if [ -f "${target}/.etpr1_builder_tmp" ] \
         && [ "$(cat "${target}/.etpr1_builder_tmp")" = "${BUILDER_TMP_MARKER}" ]; then
         rm "${target}/.etpr1_builder_tmp"
@@ -202,8 +210,14 @@ ensure_source_tree() {
         marker_status=present
     elif [ -f "${marker}" ]; then
         marker_status=present
-        actual_local_source=$(sed -n 's/^source=//p' "${marker}")
-        actual_revision=$(sed -n 's/^revision=//p' "${marker}")
+        if ! actual_local_source=$(sed -n 's/^source=//p' "${marker}"); then
+            echo "source_marker_error: cannot read source from marker: ${marker}" >&2
+            return 1
+        fi
+        if ! actual_revision=$(sed -n 's/^revision=//p' "${marker}"); then
+            echo "source_marker_error: cannot read revision from marker: ${marker}" >&2
+            return 1
+        fi
         if [ -z "${actual_local_source}" ] && [ "$(cat "${marker}")" = "${requested_source}" ]; then
             copy_source_tree_atomic \
                 "${name}" \

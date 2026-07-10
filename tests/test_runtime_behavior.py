@@ -340,6 +340,48 @@ def test_builder_rejects_dirty_untracked_git_source(tmp_path):
     assert "untracked.txt" in result.stdout
 
 
+def test_builder_does_not_copy_new_dirty_tracked_git_source(tmp_path):
+    runtime_root = tmp_path / "runtime"
+    lab_source = tmp_path / "lab-source"
+    sim_source = tmp_path / "sim-source"
+    _init_git_source(lab_source)
+    _init_git_source(sim_source)
+    (lab_source / "source.txt").write_text("modified\n")
+    env = os.environ.copy()
+    env["ETPR1_RUNTIME_ROOT"] = str(runtime_root)
+    env["ETPR1_HABITAT_LAB_SOURCE"] = str(lab_source)
+    env["ETPR1_HABITAT_SIM_SOURCE"] = str(sim_source)
+
+    result = _run(["bash", BUILDER], env=env)
+
+    target = runtime_root / "src" / "habitat-lab"
+    assert result.returncode != 0
+    assert "source_dirty" in result.stdout
+    assert not target.exists()
+    assert not (target / ".etpr1_source_origin").exists()
+
+
+def test_builder_does_not_copy_new_dirty_untracked_git_source(tmp_path):
+    runtime_root = tmp_path / "runtime"
+    lab_source = tmp_path / "lab-source"
+    sim_source = tmp_path / "sim-source"
+    _init_git_source(lab_source)
+    _init_git_source(sim_source)
+    (lab_source / "untracked.txt").write_text("untracked\n")
+    env = os.environ.copy()
+    env["ETPR1_RUNTIME_ROOT"] = str(runtime_root)
+    env["ETPR1_HABITAT_LAB_SOURCE"] = str(lab_source)
+    env["ETPR1_HABITAT_SIM_SOURCE"] = str(sim_source)
+
+    result = _run(["bash", BUILDER], env=env)
+
+    target = runtime_root / "src" / "habitat-lab"
+    assert result.returncode != 0
+    assert "source_dirty" in result.stdout
+    assert not target.exists()
+    assert not (target / ".etpr1_source_origin").exists()
+
+
 def test_builder_cleans_only_its_stale_copy_directories(tmp_path):
     runtime_root = tmp_path / "runtime"
     src_root = runtime_root / "src"
