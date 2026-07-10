@@ -22,13 +22,18 @@ def get_vlnbert_models(config=None, dropout_rate=0.1):
     keywords = ['graph_query_text', 'graph_attentioned_txt_embeds_transform', 'global_sap_head']
     if model_name_or_path is not None:
         ckpt_weights = torch.load(model_name_or_path, map_location='cpu')
-        for k, v in ckpt_weights.items():
-            if k.startswith('module'):
-                new_ckpt_weights[k[7:]] = v
-            if any(key in k for key in keywords):
-                new_ckpt_weights['bert.' + k] = v
-            else:
-                new_ckpt_weights[k] = v
+        for original_key, value in ckpt_weights.items():
+            normalized_key = (
+                original_key[7:]
+                if original_key.startswith('module.')
+                else original_key
+            )
+            if (
+                any(keyword in normalized_key for keyword in keywords)
+                and not normalized_key.startswith('bert.')
+            ):
+                normalized_key = 'bert.' + normalized_key
+            new_ckpt_weights[normalized_key] = value
 
     rgb_encoder_type = str(config.RGB_ENCODER.type).lower()
     projection_key = 'bert.img_embeddings.rgb_projection.0.weight'

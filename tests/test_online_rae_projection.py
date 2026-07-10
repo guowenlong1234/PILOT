@@ -403,6 +403,74 @@ def test_vlnbert_receives_rgb_config_and_normalizes_module_checkpoint(
     assert "bert.img_embeddings.rgb_projection.0.weight" in captured["state_dict"]
 
 
+def test_module_checkpoint_keys_are_canonicalized_once_and_load_real_model(
+    monkeypatch
+):
+    real_model_class = GlocalTextPathNavCMT
+    projection_weight = torch.full((768, 768), 0.125)
+    sap_weight = torch.full((1, 1536), -0.25)
+    sap_bias = torch.full((1,), -0.75)
+    checkpoint = {
+        "module.bert.img_embeddings.rgb_projection.0.weight": (
+            projection_weight
+        ),
+        "module.bert.global_sap_head.net.4.weight": sap_weight,
+        "module.global_sap_head.net.4.bias": sap_bias,
+    }
+    captured = {}
+
+    class InspectingModel:
+        @classmethod
+        def from_pretrained(cls, **kwargs):
+            captured["state_dict"] = kwargs["state_dict"]
+            model, loading_info = real_model_class.from_pretrained(
+                output_loading_info=True,
+                **kwargs,
+            )
+            captured["loading_info"] = loading_info
+            return model
+
+    monkeypatch.setattr(
+        init_module.torch,
+        "load",
+        lambda *_args, **_kwargs: checkpoint,
+    )
+    monkeypatch.setattr(
+        "vlnce_baselines.models.etp.ETP_R1_vilmodel_cmt.GlocalTextPathNavCMT",
+        InspectingModel,
+    )
+
+    model = init_module.get_vlnbert_models(_init_config())
+
+    expected_keys = {
+        "bert.img_embeddings.rgb_projection.0.weight",
+        "bert.global_sap_head.net.4.weight",
+        "bert.global_sap_head.net.4.bias",
+    }
+    assert set(captured["state_dict"]) == expected_keys
+    assert not any(
+        key.startswith("module.")
+        or "bert.module." in key
+        or key.startswith("bert.bert.")
+        for key in captured["state_dict"]
+    )
+    torch.testing.assert_close(
+        model.img_embeddings.rgb_projection[0].weight,
+        projection_weight,
+    )
+    torch.testing.assert_close(model.global_sap_head.net[4].weight, sap_weight)
+    torch.testing.assert_close(model.global_sap_head.net[4].bias, sap_bias)
+
+    relevant_unexpected = [
+        key
+        for key in captured["loading_info"]["unexpected_keys"]
+        if "rgb_projection" in key
+        or "global_sap_head" in key
+        or "module." in key
+    ]
+    assert relevant_unexpected == []
+
+
 def test_clip_checkpoint_without_rae_projection_still_loads(monkeypatch):
     captured = {}
 
