@@ -114,6 +114,7 @@ def _task_config_for_habitat(config):
             ("ACTION_SPACE_CONFIG", "action_space_config"),
         ),
     )
+    simulator.setdefault("forward_step_size", 0.25)
     simulator.update(
         {
             "type": _config_type(simulator_legacy.get("TYPE"), "Sim-v1"),

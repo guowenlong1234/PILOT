@@ -121,6 +121,27 @@ def test_real_task_config_converts_to_modern_habitat_shape(
     assert task_config.is_frozen()
 
 
+def test_rxr_task_config_supplies_modern_forward_action_default():
+    from types import SimpleNamespace
+
+    from habitat.core.simulator import SensorSuite
+    from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
+    from vlnce_baselines.common.environments import _task_config_for_habitat
+    from vlnce_baselines.config.default import get_config
+
+    task_config = _task_config_for_habitat(
+        get_config("run_rxr/iter_train.yaml")
+    )
+
+    assert task_config.simulator.forward_step_size == 0.25
+    native_config = HabitatSim.create_sim_config(
+        SimpleNamespace(habitat_config=task_config.simulator),
+        SensorSuite([]),
+    )
+    forward_action = native_config.agents[0].action_space[1]
+    assert forward_action.actuation.amount == 0.25
+
+
 def test_r1_env_passes_modern_config_to_habitat_rl_env(monkeypatch):
     import habitat
     from omegaconf import OmegaConf
