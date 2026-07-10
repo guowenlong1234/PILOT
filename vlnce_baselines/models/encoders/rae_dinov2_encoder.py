@@ -13,6 +13,8 @@ def _prepare_cls_stat(
 ) -> torch.Tensor:
     if not torch.is_tensor(stat):
         raise ValueError(f"RAE {name} must be a tensor, got {type(stat).__name__}")
+    if not torch.isfinite(stat).all():
+        raise ValueError(f"RAE {name} must contain only finite values")
 
     channels = cls.shape[1]
     if stat.ndim == 1 and stat.shape[0] == channels:
@@ -33,7 +35,10 @@ def _prepare_cls_stat(
             f"CLS shape {tuple(cls.shape)}"
         )
 
-    return prepared.to(device=cls.device, dtype=cls.dtype)
+    prepared = prepared.to(device=cls.device, dtype=cls.dtype)
+    if not torch.isfinite(prepared).all():
+        raise ValueError(f"RAE {name} must contain only finite values")
+    return prepared
 
 
 def normalize_rae_cls(

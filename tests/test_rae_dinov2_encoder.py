@@ -131,6 +131,24 @@ def test_normalize_rae_cls_rejects_non_finite_output():
         )
 
 
+def test_normalize_rae_cls_rejects_infinite_variance_before_normalizing():
+    with pytest.raises(ValueError, match=r"var.*finite"):
+        normalize_rae_cls(
+            torch.ones(1, 2),
+            mean=None,
+            var=torch.tensor([float("inf"), 1.0]),
+        )
+
+
+def test_normalize_rae_cls_rejects_non_finite_mean_explicitly():
+    with pytest.raises(ValueError, match=r"mean.*finite"):
+        normalize_rae_cls(
+            torch.ones(1, 2),
+            mean=torch.tensor([float("nan"), 0.0]),
+            var=torch.ones(2),
+        )
+
+
 def test_encoder_loads_local_assets_and_disables_final_layernorm_affine(
     fake_encoder,
 ):
