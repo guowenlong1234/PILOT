@@ -1,0 +1,351 @@
+import hashlib
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+from vlnce_baselines.GRPO_trainer_ETP_R1 import RLTrainer as GrpoTrainer
+from vlnce_baselines.models.checkpoint_utils import (
+    navigation_state_dict,
+    report_navigation_incompatible_keys,
+    sha256_file,
+    validate_rgb_checkpoint_metadata,
+)
+from vlnce_baselines.ss_trainer_ETP_R1 import RLTrainer as SftTrainer
+
+
+class _FakeRgbEncoder(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.backbone = torch.nn.Linear(2, 2)
+        self.backbone.requires_grad_(False)
+        self.register_buffer("latent_var", torch.ones(2))
+
+
+class _FakeImageEmbeddings(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.rgb_projection = torch.nn.Sequential(
+            torch.nn.Linear(768, 768),
+            torch.nn.GELU(),
+            torch.nn.Linear(768, 768),
+            torch.nn.GELU(),
+            torch.nn.Linear(768, 512),
+        )
+
+
+class _FakeVlnBert(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.img_embeddings = _FakeImageEmbeddings()
+        self.global_encoder = torch.nn.Linear(2, 2)
+
+
+class _FakeNet(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.rgb_encoder = _FakeRgbEncoder()
+        self.vln_bert = _FakeVlnBert()
+
+
+class _FakePolicy(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = _FakeNet()
+
+
+def _write_rae_assets(tmp_path):
+    model_dir = tmp_path / "rae-model"
+    model_dir.mkdir()
+    model_path = model_dir / "model.safetensors"
+    stat_path = model_dir / "stat.pt"
+    model_path.write_bytes(b"real model bytes")
+    stat_path.write_bytes(b"real stat bytes")
+    return model_dir, model_path, stat_path
+
+
+def _config(tmp_path, encoder_type="rae_dinov2"):
+    model_dir, model_path, stat_path = _write_rae_assets(tmp_path)
+    raw_output_size = 768 if encoder_type == "rae_dinov2" else 512
+    return (
+        SimpleNamespace(
+            MODEL=SimpleNamespace(
+                RGB_ENCODER=SimpleNamespace(
+                    type=encoder_type,
+                    model_dir=str(model_dir),
+                    stat_path=str(stat_path),
+                    raw_output_size=raw_output_size,
+                    output_size=512,
+                )
+            )
+        ),
+        model_path,
+        stat_path,
+    )
+
+
+def _rae_checkpoint(policy, config):
+    state_dict, metadata = navigation_state_dict(policy, config)
+    return {"state_dict": state_dict, "rgb_encoder": metadata}
+
+
+def test_sha256_file_streams_real_file_and_rejects_invalid_paths(tmp_path):
+    payload = b"checkpoint metadata must hash file contents"
+    file_path = tmp_path / "asset.bin"
+    file_path.write_bytes(payload)
+
+    assert sha256_file(file_path) == hashlib.sha256(payload).hexdigest()
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        sha256_file(tmp_path / "missing.bin")
+    with pytest.raises(ValueError, match="not a file"):
+        sha256_file(tmp_path)
+
+
+def test_rae_navigation_state_filters_wrapped_backbones_but_keeps_projection(
+    tmp_path,
+):
+    config, model_path, stat_path = _config(tmp_path)
+    policy = _FakePolicy()
+    policy.net.module = _FakeNet()
+
+    state_dict, metadata = navigation_state_dict(policy, config)
+
+    assert not any(
+        "rgb_encoder.backbone" in key for key in state_dict
+    )
+    assert "net.vln_bert.img_embeddings.rgb_projection.0.weight" in state_dict
+    assert (
+        "net.module.vln_bert.img_embeddings.rgb_projection.0.weight"
+        in state_dict
+    )
+    assert metadata == {
+        "type": "rae_dinov2",
+        "model_dir": str(model_path.parent),
+        "model_sha256": hashlib.sha256(model_path.read_bytes()).hexdigest(),
+        "stat_sha256": hashlib.sha256(stat_path.read_bytes()).hexdigest(),
+        "raw_output_size": 768,
+        "output_size": 512,
+    }
+    assert len(metadata["model_sha256"]) == 64
+    assert len(metadata["stat_sha256"]) == 64
+
+
+def test_clip_navigation_state_is_complete_without_reading_rae_files(tmp_path):
+    config = SimpleNamespace(
+        MODEL=SimpleNamespace(
+            RGB_ENCODER=SimpleNamespace(
+                type="clip",
+                model_dir=str(tmp_path / "missing-model"),
+                stat_path=str(tmp_path / "missing-stat.pt"),
+                raw_output_size=512,
+                output_size=512,
+            )
+        )
+    )
+    policy = _FakePolicy()
+
+    state_dict, metadata = navigation_state_dict(policy, config)
+
+    assert set(state_dict) == set(policy.state_dict())
+    assert metadata == {"type": "clip"}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("raw_output_size", 768.5),
+        ("raw_output_size", True),
+        ("output_size", 512.5),
+        ("output_size", False),
+    ),
+)
+def test_rae_navigation_state_strictly_rejects_non_integer_dimensions(
+    tmp_path, field, value
+):
+    config, _, _ = _config(tmp_path)
+    setattr(config.MODEL.RGB_ENCODER, field, value)
+
+    with pytest.raises(ValueError, match=f"{field}.*integer"):
+        navigation_state_dict(_FakePolicy(), config)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        (lambda checkpoint: checkpoint["rgb_encoder"].update(type="clip"),
+         "type.*rae_dinov2.*clip"),
+        (lambda checkpoint: checkpoint["rgb_encoder"].update(model_sha256="0" * 64),
+         "model.*SHA256.*mismatch"),
+        (lambda checkpoint: checkpoint["rgb_encoder"].update(stat_sha256="0" * 64),
+         "stat.*SHA256.*mismatch"),
+        (lambda checkpoint: checkpoint["rgb_encoder"].update(raw_output_size=512),
+         "raw_output_size.*768.*512"),
+        (lambda checkpoint: checkpoint["rgb_encoder"].update(output_size=768),
+         "output_size.*512.*768"),
+        (
+            lambda checkpoint: checkpoint["state_dict"].__setitem__(
+                "net.unrelated.weight",
+                checkpoint["state_dict"].pop(
+                    "net.vln_bert.img_embeddings.rgb_projection.0.weight"
+                ),
+            ),
+            "RAE/DINOv2.*missing.*rgb_projection.0.weight",
+        ),
+    ),
+)
+def test_rae_checkpoint_validation_rejects_incompatible_metadata(
+    tmp_path, mutation, message
+):
+    config, _, _ = _config(tmp_path)
+    checkpoint = _rae_checkpoint(_FakePolicy(), config)
+    mutation(checkpoint)
+
+    with pytest.raises(ValueError, match=message):
+        validate_rgb_checkpoint_metadata(checkpoint, config)
+
+
+def test_rae_checkpoint_requires_metadata(tmp_path):
+    config, _, _ = _config(tmp_path)
+    checkpoint = {"state_dict": _FakePolicy().state_dict()}
+
+    with pytest.raises(ValueError, match="RAE/DINOv2.*metadata.*missing"):
+        validate_rgb_checkpoint_metadata(checkpoint, config)
+
+
+def test_clip_checkpoint_accepts_legacy_state_but_rejects_rae_metadata_or_mlp(
+    tmp_path,
+):
+    config, _, _ = _config(tmp_path, "clip")
+    legacy_checkpoint = {
+        "state_dict": {"net.vln_bert.global_encoder.weight": torch.ones(1)}
+    }
+
+    assert validate_rgb_checkpoint_metadata(legacy_checkpoint, config) is None
+
+    with pytest.raises(ValueError, match="CLIP.*RAE/DINOv2.*metadata"):
+        validate_rgb_checkpoint_metadata(
+            {
+                **legacy_checkpoint,
+                "rgb_encoder": {"type": "rae_dinov2"},
+            },
+            config,
+        )
+
+    with pytest.raises(ValueError, match="CLIP.*RAE/DINOv2.*rgb_projection"):
+        validate_rgb_checkpoint_metadata(
+            {
+                "state_dict": {
+                    "net.vln_bert.img_embeddings.rgb_projection.0.weight": (
+                        torch.ones(1)
+                    )
+                },
+                "rgb_encoder": {"type": "clip"},
+            },
+            config,
+        )
+
+
+def test_incompatible_report_only_ignores_rae_backbone_missing_keys(tmp_path):
+    config, _, _ = _config(tmp_path)
+    incompatible = SimpleNamespace(
+        missing_keys=[
+            "net.rgb_encoder.backbone.layer.weight",
+            "net.module.rgb_encoder.backbone.layer.bias",
+            "net.vln_bert.img_embeddings.rgb_projection.4.weight",
+            "net.other.weight",
+        ],
+        unexpected_keys=["net.unexpected.weight"],
+    )
+    messages = []
+
+    report = report_navigation_incompatible_keys(
+        incompatible,
+        config,
+        print_fn=messages.append,
+    )
+
+    assert report["ignored_missing_keys"] == [
+        "net.module.rgb_encoder.backbone.layer.bias",
+        "net.rgb_encoder.backbone.layer.weight",
+    ]
+    assert report["missing_keys"] == [
+        "net.other.weight",
+        "net.vln_bert.img_embeddings.rgb_projection.4.weight",
+    ]
+    assert report["unexpected_keys"] == ["net.unexpected.weight"]
+    rendered = "\n".join(messages)
+    assert "net.other.weight" in rendered
+    assert "net.vln_bert.img_embeddings.rgb_projection.4.weight" in rendered
+    assert "net.unexpected.weight" in rendered
+    assert "ignored frozen RAE/DINOv2 backbone" in rendered
+
+
+def test_grpo_setup_training_parts_keeps_projection_and_backbone_frozen():
+    trainer = object.__new__(GrpoTrainer)
+    trainer.policy = _FakePolicy()
+    trainer.trainable_parts = [trainer.policy.net.vln_bert.global_encoder]
+
+    trainer.setup_training_parts()
+
+    projection = trainer.policy.net.vln_bert.img_embeddings.rgb_projection
+    assert all(not parameter.requires_grad for parameter in projection.parameters())
+    assert all(
+        not parameter.requires_grad
+        for parameter in trainer.policy.net.rgb_encoder.backbone.parameters()
+    )
+    assert all(
+        parameter.requires_grad
+        for parameter in trainer.policy.net.vln_bert.global_encoder.parameters()
+    )
+
+
+class _StateHolder:
+    def state_dict(self):
+        return {"value": 1}
+
+
+@pytest.mark.parametrize(
+    ("trainer_class", "stage", "iteration", "only_last"),
+    (
+        (SftTrainer, "IL", 1, True),
+        (SftTrainer, "IL", 2, False),
+        (GrpoTrainer, "GRPO", 1, True),
+        (GrpoTrainer, "GRPO", 2, False),
+    ),
+)
+def test_trainer_save_branches_include_rgb_metadata_and_keep_sft_projection_trainable(
+    tmp_path, monkeypatch, trainer_class, stage, iteration, only_last
+):
+    config, _, _ = _config(tmp_path)
+    setattr(config, "CHECKPOINT_FOLDER", str(tmp_path))
+    setattr(config, "ONLY_LAST_SAVEALL", only_last)
+    setattr(config, stage, SimpleNamespace(iters=2))
+    trainer = object.__new__(trainer_class)
+    trainer.config = config
+    trainer.policy = _FakePolicy()
+    trainer.optimizer = _StateHolder()
+    trainer.scheduler = _StateHolder()
+    captured = {}
+    monkeypatch.setattr(
+        torch,
+        "save",
+        lambda *, obj, f: captured.update(obj=obj, path=f),
+    )
+
+    trainer.save_checkpoint(iteration)
+
+    assert captured["obj"]["rgb_encoder"]["type"] == "rae_dinov2"
+    assert not any(
+        "rgb_encoder.backbone" in key
+        for key in captured["obj"]["state_dict"]
+    )
+    assert any(
+        "img_embeddings.rgb_projection.0.weight" in key
+        for key in captured["obj"]["state_dict"]
+    )
+    if trainer_class is SftTrainer:
+        projection = trainer.policy.net.vln_bert.img_embeddings.rgb_projection
+        assert all(
+            parameter.requires_grad for parameter in projection.parameters()
+        )

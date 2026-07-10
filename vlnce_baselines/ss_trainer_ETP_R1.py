@@ -34,6 +34,11 @@ from vlnce_baselines.common.env_utils import construct_envs, construct_envs_for_
 from vlnce_baselines.common.runtime_compat import get_env_class
 from vlnce_baselines.common.utils import extract_instruction_tokens
 from vlnce_baselines.models.graph_utils import GraphMap, MAX_DIST
+from vlnce_baselines.models.checkpoint_utils import (
+    navigation_state_dict,
+    report_navigation_incompatible_keys,
+    validate_rgb_checkpoint_metadata,
+)
 from vlnce_baselines.utils import reduce_loss
 
 from .utils import get_camera_orientations12
@@ -69,10 +74,14 @@ class RLTrainer(BaseVLNCETrainer):
                 self._make_results_dir()
 
     def save_checkpoint(self, iteration: int):
+        state_dict, rgb_encoder_meta = navigation_state_dict(
+            self.policy, self.config
+        )
         if self.config.ONLY_LAST_SAVEALL and (not iteration == self.config.IL.iters):
             torch.save(
                         obj={
-                            "state_dict": self.policy.state_dict(),
+                            "state_dict": state_dict,
+                            "rgb_encoder": rgb_encoder_meta,
                             "config": self.config,
                             "iteration": iteration
                         },
@@ -81,7 +90,8 @@ class RLTrainer(BaseVLNCETrainer):
         else:
             torch.save(
                 obj={
-                    "state_dict": self.policy.state_dict(),
+                    "state_dict": state_dict,
+                    "rgb_encoder": rgb_encoder_meta,
                     "config": self.config,
                     "optim_state": self.optimizer.state_dict(),
                     "scheduler_state": self.scheduler.state_dict(),
@@ -258,6 +268,7 @@ class RLTrainer(BaseVLNCETrainer):
             else:
                 ckpt_path = config.IL.ckpt_to_load
             ckpt_dict = self.load_checkpoint(ckpt_path, map_location="cpu")
+            validate_rgb_checkpoint_metadata(ckpt_dict, config)
             if config.IL.is_requeue:
                 start_iter = ckpt_dict["iteration"]
             else:
@@ -283,20 +294,10 @@ class RLTrainer(BaseVLNCETrainer):
                 incompatible_keys = self.policy.load_state_dict(ckpt_dict["state_dict"], strict=False)
             
             if self.local_rank < 1:
-                print("\n" + "="*25 + " Weight loading mismatch report " + "="*25)
-                if incompatible_keys.missing_keys:
-                    print("The following network layers exist in the model but are missing in the weight file (initial values will be used):")
-                    for key in sorted(incompatible_keys.missing_keys):
-                        print(f"  - {key}")
-                else:
-                    print("All network layers present in the model were found in the weight file.")
-                if incompatible_keys.unexpected_keys:
-                    print("\nThe following network layers exist in the weight file but are missing in the model (will be ignored):")
-                    for key in sorted(incompatible_keys.unexpected_keys):
-                        print(f"  - {key}")
-                else:
-                    print("\nThere are no extra network layers in the weight file.")
-                print("="*75 + "\n")
+                report_navigation_incompatible_keys(
+                    incompatible_keys,
+                    config,
+                )
 
             if config.IL.is_requeue:
                 self.optimizer.load_state_dict(ckpt_dict["optim_state"])
