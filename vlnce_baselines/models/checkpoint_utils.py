@@ -7,6 +7,7 @@ _RAE_TYPE = "rae_dinov2"
 _CLIP_TYPE = "clip"
 _RAE_RAW_OUTPUT_SIZE = 768
 _NAVIGATION_OUTPUT_SIZE = 512
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _PROJECTION_PARAMETER_SUFFIXES = (
     "0.weight",
     "0.bias",
@@ -142,15 +143,33 @@ def _rae_asset_metadata(config):
     rgb_config = _rgb_config(config)
     raw_output_size, output_size = _rae_dimensions(config)
     try:
-        model_dir = Path(rgb_config.model_dir)
-        stat_path = Path(rgb_config.stat_path)
+        configured_model_dir = Path(rgb_config.model_dir)
+        configured_stat_path = Path(rgb_config.stat_path)
     except (AttributeError, TypeError) as error:
         raise ValueError(
             "RAE/DINOv2 config must define model_dir and stat_path"
         ) from error
+    project_root = _PROJECT_ROOT.resolve()
+    model_dir = (
+        configured_model_dir
+        if configured_model_dir.is_absolute()
+        else project_root / configured_model_dir
+    ).resolve()
+    stat_path = (
+        configured_stat_path
+        if configured_stat_path.is_absolute()
+        else project_root / configured_stat_path
+    ).resolve()
+    try:
+        relative_model_dir = model_dir.relative_to(project_root)
+    except ValueError as error:
+        raise ValueError(
+            "RAE/DINOv2 model_dir is outside the ETP-R1 project root: "
+            f"{model_dir}"
+        ) from error
     return {
         "type": _RAE_TYPE,
-        "model_dir": str(rgb_config.model_dir),
+        "model_dir": relative_model_dir.as_posix(),
         "model_sha256": sha256_file(model_dir / "model.safetensors"),
         "stat_sha256": sha256_file(stat_path),
         "raw_output_size": raw_output_size,
@@ -179,6 +198,8 @@ def _checkpoint_state_dict(checkpoint):
     state_dict = checkpoint.get("state_dict")
     if not isinstance(state_dict, Mapping):
         raise ValueError("Navigation checkpoint state_dict is missing or invalid")
+    if not state_dict:
+        raise ValueError("Navigation checkpoint state_dict is empty")
     return state_dict
 
 
@@ -217,6 +238,12 @@ def validate_rgb_checkpoint_metadata(checkpoint, config):
         )
 
     expected = _rae_asset_metadata(config)
+    actual_model_dir = metadata.get("model_dir")
+    if actual_model_dir != expected["model_dir"]:
+        raise ValueError(
+            "RAE/DINOv2 model_dir mismatch: expected "
+            f"{expected['model_dir']}, got {actual_model_dir}"
+        )
     for field, label in (
         ("model_sha256", "model SHA256"),
         ("stat_sha256", "stat SHA256"),

@@ -1,12 +1,14 @@
 import hashlib
-from pathlib import Path
+import inspect
 import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 from vlnce_baselines.GRPO_trainer_ETP_R1 import RLTrainer as GrpoTrainer
+from vlnce_baselines.models import checkpoint_utils as checkpoint_module
 from vlnce_baselines.models.checkpoint_utils import (
     navigation_state_dict,
     report_navigation_incompatible_keys,
@@ -24,6 +26,16 @@ PROJECTION_PARAMETER_SUFFIXES = (
     "4.weight",
     "4.bias",
 )
+
+
+@pytest.fixture(autouse=True)
+def _use_test_project_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        checkpoint_module,
+        "_PROJECT_ROOT",
+        tmp_path,
+        raising=False,
+    )
 
 
 class _FakeRgbEncoder(torch.nn.Module):
@@ -67,8 +79,10 @@ class _FakePolicy(torch.nn.Module):
 
 
 def _write_rae_assets(tmp_path):
-    model_dir = tmp_path / "rae-model"
-    model_dir.mkdir()
+    model_dir = (
+        tmp_path / "pretrained" / "rae_dinov2_with_registers_base"
+    )
+    model_dir.mkdir(parents=True)
     model_path = model_dir / "model.safetensors"
     stat_path = model_dir / "stat.pt"
     model_path.write_bytes(b"real model bytes")
@@ -101,6 +115,21 @@ def _rae_checkpoint(policy, config):
     return {"state_dict": state_dict, "rgb_encoder": metadata}
 
 
+def _data_parallel_policy():
+    policy = _FakePolicy()
+    policy.net = torch.nn.DataParallel(policy.net)
+    return policy
+
+
+def _checkpoint_with_plain_and_wrapped_projection(config):
+    plain_state, metadata = navigation_state_dict(_FakePolicy(), config)
+    wrapped_state, _ = navigation_state_dict(_data_parallel_policy(), config)
+    return {
+        "state_dict": {**plain_state, **wrapped_state},
+        "rgb_encoder": metadata,
+    }
+
+
 def test_sha256_file_streams_real_file_and_rejects_invalid_paths(tmp_path):
     payload = b"checkpoint metadata must hash file contents"
     file_path = tmp_path / "asset.bin"
@@ -117,22 +146,19 @@ def test_rae_navigation_state_filters_wrapped_backbones_but_keeps_projection(
     tmp_path,
 ):
     config, model_path, stat_path = _config(tmp_path)
-    policy = _FakePolicy()
-    policy.net.module = _FakeNet()
+    policy = _data_parallel_policy()
 
     state_dict, metadata = navigation_state_dict(policy, config)
 
-    assert not any(
-        "rgb_encoder.backbone" in key for key in state_dict
-    )
-    assert "net.vln_bert.img_embeddings.rgb_projection.0.weight" in state_dict
+    assert not any("rgb_encoder.backbone" in key for key in state_dict)
     assert (
         "net.module.vln_bert.img_embeddings.rgb_projection.0.weight"
         in state_dict
     )
+    assert not any(key.startswith("net.vln_bert") for key in state_dict)
     assert metadata == {
         "type": "rae_dinov2",
-        "model_dir": str(model_path.parent),
+        "model_dir": "pretrained/rae_dinov2_with_registers_base",
         "model_sha256": hashlib.sha256(model_path.read_bytes()).hexdigest(),
         "stat_sha256": hashlib.sha256(stat_path.read_bytes()).hexdigest(),
         "raw_output_size": 768,
@@ -160,6 +186,55 @@ def test_clip_navigation_state_is_complete_without_reading_rae_files(tmp_path):
 
     assert set(state_dict) == set(policy.state_dict())
     assert metadata == {"type": "clip"}
+
+
+def test_rae_navigation_state_resolves_relative_assets_from_project_root(
+    tmp_path, monkeypatch
+):
+    config, model_path, stat_path = _config(tmp_path)
+    config.MODEL.RGB_ENCODER.model_dir = (
+        "pretrained/rae_dinov2_with_registers_base"
+    )
+    config.MODEL.RGB_ENCODER.stat_path = (
+        "pretrained/rae_dinov2_with_registers_base/stat.pt"
+    )
+    unrelated_cwd = tmp_path / "unrelated-cwd"
+    unrelated_cwd.mkdir()
+    monkeypatch.chdir(unrelated_cwd)
+
+    _, metadata = navigation_state_dict(_FakePolicy(), config)
+
+    assert metadata["model_dir"] == (
+        "pretrained/rae_dinov2_with_registers_base"
+    )
+    assert metadata["model_sha256"] == hashlib.sha256(
+        model_path.read_bytes()
+    ).hexdigest()
+    assert metadata["stat_sha256"] == hashlib.sha256(
+        stat_path.read_bytes()
+    ).hexdigest()
+
+
+def test_rae_navigation_state_normalizes_project_absolute_model_dir(tmp_path):
+    config, model_path, _ = _config(tmp_path)
+
+    _, metadata = navigation_state_dict(_FakePolicy(), config)
+
+    assert metadata["model_dir"] == model_path.parent.relative_to(
+        tmp_path
+    ).as_posix()
+
+
+def test_rae_navigation_state_rejects_model_dir_outside_project(
+    tmp_path, monkeypatch
+):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(checkpoint_module, "_PROJECT_ROOT", project_root)
+    config, _, _ = _config(tmp_path / "external")
+
+    with pytest.raises(ValueError, match="model_dir.*outside.*project root"):
+        navigation_state_dict(_FakePolicy(), config)
 
 
 @pytest.mark.parametrize(
@@ -216,6 +291,15 @@ def test_rae_checkpoint_validation_rejects_incompatible_metadata(
         validate_rgb_checkpoint_metadata(checkpoint, config)
 
 
+def test_rae_checkpoint_rejects_tampered_model_dir_metadata(tmp_path):
+    config, _, _ = _config(tmp_path)
+    checkpoint = _rae_checkpoint(_FakePolicy(), config)
+    checkpoint["rgb_encoder"]["model_dir"] = "pretrained/tampered-model"
+
+    with pytest.raises(ValueError, match="model_dir.*mismatch"):
+        validate_rgb_checkpoint_metadata(checkpoint, config)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (
@@ -264,9 +348,7 @@ def test_rae_checkpoint_requires_every_projection_parameter(
 
 def test_rae_checkpoint_does_not_merge_partial_projection_wrappers(tmp_path):
     config, _, _ = _config(tmp_path)
-    policy = _FakePolicy()
-    policy.net.module = _FakeNet()
-    checkpoint = _rae_checkpoint(policy, config)
+    checkpoint = _checkpoint_with_plain_and_wrapped_projection(config)
     del checkpoint["state_dict"][
         "net.vln_bert.img_embeddings.rgb_projection.4.bias"
     ]
@@ -280,14 +362,41 @@ def test_rae_checkpoint_does_not_merge_partial_projection_wrappers(tmp_path):
 
 def test_rae_checkpoint_accepts_one_complete_projection_wrapper(tmp_path):
     config, _, _ = _config(tmp_path)
-    policy = _FakePolicy()
-    policy.net.module = _FakeNet()
-    checkpoint = _rae_checkpoint(policy, config)
+    checkpoint = _checkpoint_with_plain_and_wrapped_projection(config)
     del checkpoint["state_dict"][
         "net.module.vln_bert.img_embeddings.rgb_projection.4.bias"
     ]
 
     assert validate_rgb_checkpoint_metadata(checkpoint, config) is None
+
+
+@pytest.mark.parametrize("encoder_type", ("clip", "rae_dinov2"))
+def test_checkpoint_validation_rejects_empty_state_dict(
+    tmp_path, encoder_type
+):
+    config, _, _ = _config(tmp_path, encoder_type)
+    if encoder_type == "rae_dinov2":
+        checkpoint = _rae_checkpoint(_FakePolicy(), config)
+        checkpoint["state_dict"] = {}
+    else:
+        checkpoint = {
+            "state_dict": {},
+            "rgb_encoder": {"type": "clip"},
+        }
+
+    with pytest.raises(ValueError, match="state_dict.*empty"):
+        validate_rgb_checkpoint_metadata(checkpoint, config)
+
+
+@pytest.mark.parametrize("trainer_class", (SftTrainer, GrpoTrainer))
+def test_trainer_validates_checkpoint_before_accessing_first_state_key(
+    trainer_class,
+):
+    source = inspect.getsource(trainer_class._initialize_policy)
+
+    assert source.index(
+        "validate_rgb_checkpoint_metadata(ckpt_dict, config)"
+    ) < source.index("list(ckpt_dict['state_dict'].keys())[0]")
 
 
 def test_rae_checkpoint_requires_metadata(tmp_path):
