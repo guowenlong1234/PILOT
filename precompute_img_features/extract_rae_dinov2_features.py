@@ -300,8 +300,19 @@ def write_feature_file(
             for index, record in enumerate(viewpoints, start=1):
                 key = record.key
                 had_corrupt_entry = False
-                if key in handle:
-                    if _dataset_is_complete(handle[key]):
+                try:
+                    link = handle.get(key, getlink=True)
+                except (KeyError, OSError, RuntimeError, ValueError):
+                    link = False
+                if link is not None:
+                    is_complete_hardlink = False
+                    if isinstance(link, h5py.HardLink):
+                        try:
+                            obj = handle.get(key)
+                            is_complete_hardlink = _dataset_is_complete(obj)
+                        except (KeyError, OSError, RuntimeError, ValueError):
+                            is_complete_hardlink = False
+                    if is_complete_hardlink:
                         summary["skipped"] += 1
                         LOGGER.info(
                             "[%d/%d] skip complete key=%s skipped=%d",

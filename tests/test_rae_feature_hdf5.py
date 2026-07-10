@@ -374,6 +374,54 @@ def test_writer_reuses_one_simulator_per_scan_and_closes_on_scan_change(tmp_path
     assert all(simulator.closed for _, simulator in created)
 
 
+@pytest.mark.parametrize(
+    "entry_kind",
+    ("group", "soft_link", "external_link", "dangling_soft_link"),
+)
+def test_writer_recomputes_non_hardlink_and_non_dataset_entries(
+    tmp_path,
+    entry_kind,
+):
+    output = tmp_path / "features.hdf5"
+    external = tmp_path / "external.hdf5"
+    record = _records(1)[0]
+    valid = np.full((36, 768), 9, dtype=np.float32)
+    with h5py.File(external, "w") as handle:
+        handle.create_dataset("valid", data=valid, compression="gzip")
+    with h5py.File(output, "w") as handle:
+        _write_metadata(handle)
+        if entry_kind == "group":
+            handle.create_group(record.key)
+        elif entry_kind == "soft_link":
+            handle.create_dataset("soft_target", data=valid, compression="gzip")
+            handle[record.key] = h5py.SoftLink("/soft_target")
+        elif entry_kind == "external_link":
+            handle[record.key] = h5py.ExternalLink(str(external), "/valid")
+        else:
+            handle[record.key] = h5py.SoftLink("/missing_target")
+
+    summary = write_feature_file(
+        output,
+        [record],
+        FakeEncoder(),
+        _simulator_factory([]),
+        metadata=EXPECTED_METADATA,
+        device=torch.device("cpu"),
+        image_size=2,
+    )
+
+    assert summary == {"total": 1, "skipped": 0, "recomputed": 1, "completed": 1}
+    with h5py.File(output, "r") as handle:
+        assert isinstance(handle.get(record.key, getlink=True), h5py.HardLink)
+        dataset = handle.get(record.key)
+        assert isinstance(dataset, h5py.Dataset)
+        assert dataset.shape == (36, 768)
+        assert dataset.dtype == np.dtype(np.float32)
+        assert dataset.compression == "gzip"
+        assert np.isfinite(dataset[...]).all()
+        assert np.any(dataset[...] != 0)
+
+
 def test_build_metadata_hashes_local_model_and_stat(tmp_path):
     model_dir = tmp_path / "model"
     model_dir.mkdir()
