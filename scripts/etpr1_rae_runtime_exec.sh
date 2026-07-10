@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
+RUNTIME_ROOT=${ETPR1_RUNTIME_ROOT:-${REPO_ROOT}/.runtime/etpr1_habitat/prefix}
+RUNTIME_SITE_PACKAGES=${ETPR1_RUNTIME_SITE_PACKAGES:-${RUNTIME_ROOT}/site-packages}
+RUNTIME_HABITAT_BASELINES=${ETPR1_RUNTIME_HABITAT_BASELINES:-${RUNTIME_ROOT}/habitat-baselines}
+RUNTIME_LIB=${ETPR1_RUNTIME_LIB:-${RUNTIME_ROOT}/lib}
+LEGACY_CLIP_ROOT=${ETPR1_LEGACY_CLIP_ROOT:-${REPO_ROOT}/vendor/legacy_clip}
+
+if [ ! -d "${RUNTIME_ROOT}" ]; then
+    echo "Missing ETP-R1 runtime root: ${RUNTIME_ROOT}" >&2
+    exit 1
+fi
+
+export ETPR1_RUNTIME_ACTIVE=1
+export ETPR1_RUNTIME_ROOT="${RUNTIME_ROOT}"
+export ETPR1_LEGACY_CLIP_ROOT="${LEGACY_CLIP_ROOT}"
+if [ -d "${LEGACY_CLIP_ROOT}/clip" ]; then
+    export PYTHONPATH="${LEGACY_CLIP_ROOT}:${RUNTIME_SITE_PACKAGES}:${RUNTIME_HABITAT_BASELINES}"
+else
+    export PYTHONPATH="${RUNTIME_SITE_PACKAGES}:${RUNTIME_HABITAT_BASELINES}"
+fi
+export LD_LIBRARY_PATH="${RUNTIME_LIB}"
+
+exec "$@"
