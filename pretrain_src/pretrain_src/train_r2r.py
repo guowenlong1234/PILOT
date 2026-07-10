@@ -7,6 +7,12 @@ from collections import defaultdict
 from easydict import EasyDict
 from tqdm import tqdm
 
+PROJECT_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '..', '..')
+)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
@@ -96,6 +102,15 @@ def main(opts):
 
     # Model config
     model_config = PretrainedConfig.from_json_file(opts.model_config)
+    model_config.rgb_encoder_type = getattr(
+        model_config, 'rgb_encoder_type', 'clip'
+    )
+    model_config.raw_image_feat_size = getattr(
+        model_config, 'raw_image_feat_size', model_config.image_feat_size
+    )
+    model_config.projection_hidden_size = getattr(
+        model_config, 'projection_hidden_size', model_config.hidden_size
+    )
     model_config.pretrain_tasks = []
     for train_dataset_config in opts.train_datasets.values():
         model_config.pretrain_tasks.extend(train_dataset_config['tasks'])
@@ -175,6 +190,8 @@ def main(opts):
         data_cfg.scanvp_cands_file, data_cfg.connectivity_dir,
         image_prob_size=model_config.image_prob_size,
         image_feat_size=model_config.image_feat_size, 
+        raw_image_feat_size=model_config.raw_image_feat_size,
+        rgb_encoder_type=model_config.rgb_encoder_type,
         depth_feat_size=model_config.depth_feat_size,
         angle_feat_size=model_config.angle_feat_size,
         max_txt_len=opts.max_txt_len, in_memory=True,
@@ -185,6 +202,8 @@ def main(opts):
         data_cfg.scanvp_cands_file, data_cfg.connectivity_dir,
         image_prob_size=model_config.image_prob_size,
         image_feat_size=model_config.image_feat_size, 
+        raw_image_feat_size=model_config.raw_image_feat_size,
+        rgb_encoder_type=model_config.rgb_encoder_type,
         depth_feat_size=model_config.depth_feat_size, 
         angle_feat_size=model_config.angle_feat_size,
         max_txt_len=opts.max_txt_len, in_memory=True,
@@ -195,6 +214,8 @@ def main(opts):
         data_cfg.scanvp_cands_file, data_cfg.connectivity_dir,
         image_prob_size=model_config.image_prob_size,
         image_feat_size=model_config.image_feat_size, 
+        raw_image_feat_size=model_config.raw_image_feat_size,
+        rgb_encoder_type=model_config.rgb_encoder_type,
         depth_feat_size=model_config.depth_feat_size, 
         angle_feat_size=model_config.angle_feat_size,
         max_txt_len=opts.max_txt_len, in_memory=True,

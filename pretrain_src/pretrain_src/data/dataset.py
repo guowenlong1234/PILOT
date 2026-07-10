@@ -17,24 +17,56 @@ MAX_DIST = 30   # normalize
 MAX_STEP = 10   # normalize
 TRAIN_MAX_STEP = 20
 
+RAE_DINO_HDF5_METADATA = {
+    'feature_extractor': 'rae_dinov2_with_registers_base_cls',
+    'feature_dim': 768,
+    'dtype': 'float32',
+    'num_views': 36,
+    'image_size': 224,
+    'vfov': 60,
+    'latent_normalized': True,
+}
+
+
+def _normalize_hdf5_attr(value):
+    if isinstance(value, bytes):
+        return value.decode('utf-8')
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _metadata_value_matches(got, expected):
+    if isinstance(expected, bool):
+        return isinstance(got, bool) and got == expected
+    return got == expected
+
 class ReverieTextPathData(object):
     def __init__(
         self, anno_files, img_ft_file, dep_ft_file, obj_ft_file, scanvp_cands_file, connectivity_dir,
         image_feat_size=2048, image_prob_size=1000, depth_feat_size=128, angle_feat_size=4,
         obj_feat_size=None, obj_prob_size=None, max_objects=20,
         max_txt_len=100, in_memory=True, act_visited_node=False,
-        val_sample_num=None,
+        val_sample_num=None, raw_image_feat_size=None, rgb_encoder_type='clip',
     ):
         self.img_ft_file = img_ft_file
         self.dep_ft_file = dep_ft_file
         self.obj_ft_file = obj_ft_file
 
-        self.image_feat_size = image_feat_size
+        self.rgb_encoder_type = str(rgb_encoder_type).lower()
+        self.image_feat_size = int(image_feat_size)
+        self.raw_image_feat_size = (
+            self.image_feat_size
+            if raw_image_feat_size is None else int(raw_image_feat_size)
+        )
         self.image_prob_size = image_prob_size
         self.angle_feat_size = angle_feat_size
         self.depth_feat_size = depth_feat_size
         self.obj_feat_size = obj_feat_size
         self.obj_prob_size = obj_prob_size
+
+        if self.rgb_encoder_type == 'rae_dinov2':
+            self._validate_rae_dino_metadata()
 
         self.obj_image_h = 480
         self.obj_image_w = 640
@@ -68,6 +100,35 @@ class ReverieTextPathData(object):
             sel_idxs = np.random.permutation(len(self.data))[:val_sample_num]
             self.data = [self.data[sidx] for sidx in sel_idxs]
 
+    def _validate_rae_dino_metadata(self):
+        with h5py.File(self.img_ft_file, 'r') as handle:
+            for key, expected in RAE_DINO_HDF5_METADATA.items():
+                got = _normalize_hdf5_attr(handle.attrs.get(key))
+                if not _metadata_value_matches(got, expected):
+                    raise ValueError(
+                        f'DINO HDF5 metadata mismatch for {key}: '
+                        f'expected {expected!r}, got {got!r}'
+                    )
+
+    def _validate_view_features(self, key, view_fts):
+        shape = tuple(view_fts.shape)
+        expected = (
+            'expected a two-dimensional array with 36 views and at least '
+            f'{self.raw_image_feat_size} feature columns'
+        )
+        if view_fts.ndim != 2:
+            raise ValueError(
+                f'RGB feature {key!r} has actual shape {shape}; {expected}'
+            )
+        if shape[0] != 36:
+            raise ValueError(
+                f'RGB feature {key!r} has actual shape {shape}; {expected}'
+            )
+        if shape[1] < self.raw_image_feat_size:
+            raise ValueError(
+                f'RGB feature {key!r} has actual shape {shape}; {expected}'
+            )
+
     def __len__(self):
         return len(self.data)
 
@@ -78,6 +139,7 @@ class ReverieTextPathData(object):
         else:
             with h5py.File(self.img_ft_file, 'r') as f:
                 view_fts = f[key][...].astype(np.float32)
+            self._validate_view_features(key, view_fts)
 
             obj_attrs = {}
             obj_fts = np.zeros((0, self.obj_feat_size+self.obj_prob_size), dtype=np.float32)
@@ -176,7 +238,7 @@ class ReverieTextPathData(object):
             'instr_id': item['instr_id'],
             'instr_encoding': item['instr_encoding'][:self.max_txt_len],
             
-            'traj_view_img_fts': [x[:, :self.image_feat_size] for x in traj_view_img_fts],
+            'traj_view_img_fts': [x[:, :self.raw_image_feat_size] for x in traj_view_img_fts],
             'traj_obj_img_fts': [x[:, :self.obj_feat_size] for x in traj_obj_img_fts],
             'traj_loc_fts': traj_loc_fts,
             'traj_nav_types': traj_nav_types,
@@ -204,7 +266,7 @@ class ReverieTextPathData(object):
             outs['local_act_labels'] = local_act_label
 
         if return_img_probs:
-            outs['vp_view_probs'] = softmax(traj_view_img_fts[-1][:, self.image_feat_size:], dim=1)
+            outs['vp_view_probs'] = softmax(traj_view_img_fts[-1][:, self.raw_image_feat_size:], dim=1)
             outs['vp_obj_probs'] = softmax(traj_obj_img_fts[-1][:, self.obj_feat_size:], dim=1)
 
         return outs
@@ -356,11 +418,13 @@ class R2RTextPathData(ReverieTextPathData):
         self, anno_files, img_ft_file, dep_ft_file, scanvp_cands_file, connectivity_dir,
         image_feat_size=2048, image_prob_size=1000, depth_feat_size=128, angle_feat_size=4,
         max_txt_len=100, in_memory=True, act_visited_node=False,
-        val_sample_num=None, start_vp_file=None
+        val_sample_num=None, start_vp_file=None,
+        raw_image_feat_size=None, rgb_encoder_type='clip',
     ):
         super().__init__(
             anno_files, img_ft_file, dep_ft_file, None, scanvp_cands_file, connectivity_dir,
             image_feat_size=image_feat_size, image_prob_size=image_prob_size, depth_feat_size=depth_feat_size,
+            raw_image_feat_size=raw_image_feat_size, rgb_encoder_type=rgb_encoder_type,
             angle_feat_size=angle_feat_size, obj_feat_size=0, obj_prob_size=0, 
             max_objects=0, max_txt_len=max_txt_len, in_memory=in_memory,
             act_visited_node=act_visited_node, val_sample_num=val_sample_num
@@ -374,6 +438,7 @@ class R2RTextPathData(ReverieTextPathData):
         else:
             with h5py.File(self.img_ft_file, 'r') as f:
                 view_fts = f[key][...].astype(np.float32)
+            self._validate_view_features(key, view_fts)
             with h5py.File(self.dep_ft_file, 'r') as f:
                 dep_fts = f[key][...].astype(np.float32)
             if self.in_memory:
@@ -443,7 +508,7 @@ class R2RTextPathData(ReverieTextPathData):
             'instr_encoding': item['instr_encoding'][:self.max_txt_len], # ID
             'task_type_encoding': item['task_type_encoding'],
             
-            'traj_view_img_fts': [x[:, :self.image_feat_size] for x in traj_view_img_fts],
+            'traj_view_img_fts': [x[:, :self.raw_image_feat_size] for x in traj_view_img_fts],
             'traj_view_dep_fts': [x[:, :self.depth_feat_size] for x in traj_view_dep_fts],
             'traj_loc_fts': traj_loc_fts,
             'traj_nav_types': traj_nav_types,
@@ -465,7 +530,7 @@ class R2RTextPathData(ReverieTextPathData):
             outs['local_act_labels'] = local_act_label
 
         if return_img_probs:
-            outs['vp_view_probs'] = softmax(traj_view_img_fts[-1][:, self.image_feat_size:], dim=1)
+            outs['vp_view_probs'] = softmax(traj_view_img_fts[-1][:, self.raw_image_feat_size:], dim=1)
         
         return outs
 
