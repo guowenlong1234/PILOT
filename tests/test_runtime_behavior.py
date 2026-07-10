@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,36 +35,106 @@ def _runtime_env():
     return env
 
 
-def test_wrapper_rejects_incomplete_runtime(tmp_path):
-    runtime_root = tmp_path / "runtime"
-    legacy_clip_root = tmp_path / "vendor" / "legacy_clip"
-    runtime_root.mkdir()
-    (legacy_clip_root / "clip").mkdir(parents=True)
-    env = os.environ.copy()
-    env["ETPR1_RUNTIME_ROOT"] = str(runtime_root)
-    env["ETPR1_LEGACY_CLIP_ROOT"] = str(legacy_clip_root)
+def _init_git_source(path):
+    path.mkdir(parents=True)
+    (path / "source.txt").write_text("version-1\n")
+    for command in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.name", "ETP-R1 Test"],
+        ["git", "config", "user.email", "etpr1-test@example.invalid"],
+        ["git", "add", "source.txt"],
+        ["git", "commit", "-q", "-m", "initial"],
+    ):
+        result = _run(command, cwd=path)
+        assert result.returncode == 0, result.stdout
+    return _run(["git", "rev-parse", "HEAD"], cwd=path).stdout.strip()
 
-    result = _run([WRAPPER, sys.executable, "-c", "print('unexpected')"], env=env)
 
-    assert result.returncode != 0
-    assert "runtime" in result.stdout.lower()
-
-
-def test_wrapper_rejects_runtime_symlink_escape(tmp_path):
-    runtime_root = tmp_path / "runtime"
-    site_packages = runtime_root / "prefix" / "site-packages"
-    site_packages.mkdir(parents=True)
-    (site_packages / "habitat").symlink_to(
-        RUNTIME_PREFIX / "site-packages" / "habitat",
-        target_is_directory=True,
+def _write_source_marker(runtime_root, name, source, revision):
+    target = runtime_root / "src" / name
+    target.mkdir(parents=True)
+    (target / ".etpr1_source_origin").write_text(
+        f"source={source.resolve()}\nrevision={revision}\n"
     )
-    env = os.environ.copy()
-    env["ETPR1_RUNTIME_ROOT"] = str(runtime_root)
 
-    result = _run([WRAPPER, sys.executable, "-c", "print('unexpected')"], env=env)
 
-    assert result.returncode != 0
-    assert "escapes ETP-R1 owner" in result.stdout
+def test_wrapper_rejects_incomplete_runtime():
+    (ROOT / ".runtime").mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="wrapper-incomplete-", dir=ROOT / ".runtime"
+    ) as temp_dir:
+        runtime_root = Path(temp_dir)
+        prefix = runtime_root / "prefix"
+        (prefix / "site-packages").mkdir(parents=True)
+        (prefix / "habitat-baselines").mkdir()
+        (prefix / "lib").mkdir()
+        env = os.environ.copy()
+        env["ETPR1_RUNTIME_ROOT"] = str(runtime_root)
+        env["ETPR1_RUNTIME_PREFIX"] = str(prefix)
+
+        result = _run(
+            [WRAPPER, sys.executable, "-c", "print('unexpected')"], env=env
+        )
+
+        missing_path = prefix / "site-packages" / "habitat"
+        assert result.returncode != 0
+        assert f"missing habitat package: {missing_path}" in result.stdout
+
+
+def test_wrapper_rejects_runtime_symlink_escape():
+    (ROOT / ".runtime").mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="wrapper-escape-", dir=ROOT / ".runtime"
+    ) as temp_dir:
+        runtime_root = Path(temp_dir)
+        prefix = runtime_root / "prefix"
+        site_packages = prefix / "site-packages"
+        (site_packages / "habitat_sim" / "_ext").mkdir(parents=True)
+        (prefix / "habitat-baselines" / "habitat_baselines").mkdir(parents=True)
+        (prefix / "lib").mkdir()
+        (site_packages / "habitat_sim" / "_ext" / "habitat_sim_bindings.so").touch()
+        (site_packages / "_corrade.so").touch()
+        (site_packages / "_magnum.so").touch()
+        escaped_target = RUNTIME_PREFIX / "site-packages" / "habitat"
+        (site_packages / "habitat").symlink_to(
+            escaped_target,
+            target_is_directory=True,
+        )
+        env = os.environ.copy()
+        env["ETPR1_RUNTIME_ROOT"] = str(runtime_root)
+        env["ETPR1_RUNTIME_PREFIX"] = str(prefix)
+
+        result = _run(
+            [WRAPPER, sys.executable, "-c", "print('unexpected')"], env=env
+        )
+
+        assert result.returncode != 0
+        assert "habitat package escapes ETP-R1 owner" in result.stdout
+        assert str(escaped_target.resolve()) in result.stdout
+
+
+def test_wrapper_rejects_missing_native_binding():
+    (ROOT / ".runtime").mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="wrapper-native-", dir=ROOT / ".runtime"
+    ) as temp_dir:
+        runtime_root = Path(temp_dir)
+        prefix = runtime_root / "prefix"
+        site_packages = prefix / "site-packages"
+        (site_packages / "habitat").mkdir(parents=True)
+        (site_packages / "habitat_sim" / "_ext").mkdir(parents=True)
+        (prefix / "habitat-baselines" / "habitat_baselines").mkdir(parents=True)
+        (prefix / "lib").mkdir()
+        env = os.environ.copy()
+        env["ETPR1_RUNTIME_ROOT"] = str(runtime_root)
+        env["ETPR1_RUNTIME_PREFIX"] = str(prefix)
+
+        result = _run(
+            [WRAPPER, sys.executable, "-c", "print('unexpected')"], env=env
+        )
+
+        assert result.returncode != 0
+        assert "missing Habitat-Sim native binding" in result.stdout
 
 
 def test_wrapper_exports_outer_root_and_explicit_prefix():
@@ -203,6 +274,70 @@ def test_builder_rejects_source_revision_mismatch(tmp_path):
 
     assert result.returncode != 0
     assert "source_revision_mismatch" in result.stdout
+
+
+def test_builder_uses_head_revision_for_clean_git_sources(tmp_path):
+    runtime_root = tmp_path / "runtime"
+    lab_source = tmp_path / "lab-source"
+    sim_source = tmp_path / "sim-source"
+    lab_head = _init_git_source(lab_source)
+    sim_head = _init_git_source(sim_source)
+    _write_source_marker(runtime_root, "habitat-lab", lab_source, f"git:{lab_head}")
+    _write_source_marker(runtime_root, "habitat-sim", sim_source, "git:stale")
+    env = os.environ.copy()
+    env["ETPR1_RUNTIME_ROOT"] = str(runtime_root)
+    env["ETPR1_HABITAT_LAB_SOURCE"] = str(lab_source)
+    env["ETPR1_HABITAT_SIM_SOURCE"] = str(sim_source)
+
+    result = _run(["bash", BUILDER], env=env)
+
+    assert result.returncode != 0
+    assert "source_revision_mismatch" in result.stdout
+    assert f"git:{sim_head}" in result.stdout
+
+
+def test_builder_rejects_dirty_tracked_git_source(tmp_path):
+    runtime_root = tmp_path / "runtime"
+    lab_source = tmp_path / "lab-source"
+    sim_source = tmp_path / "sim-source"
+    lab_head = _init_git_source(lab_source)
+    sim_head = _init_git_source(sim_source)
+    _write_source_marker(runtime_root, "habitat-lab", lab_source, f"git:{lab_head}")
+    _write_source_marker(runtime_root, "habitat-sim", sim_source, f"git:{sim_head}")
+    (lab_source / "source.txt").write_text("modified\n")
+    env = os.environ.copy()
+    env["ETPR1_RUNTIME_ROOT"] = str(runtime_root)
+    env["ETPR1_HABITAT_LAB_SOURCE"] = str(lab_source)
+    env["ETPR1_HABITAT_SIM_SOURCE"] = str(sim_source)
+
+    result = _run(["bash", BUILDER], env=env)
+
+    assert result.returncode != 0
+    assert "source_dirty" in result.stdout
+    assert str(lab_source) in result.stdout
+    assert "source.txt" in result.stdout
+
+
+def test_builder_rejects_dirty_untracked_git_source(tmp_path):
+    runtime_root = tmp_path / "runtime"
+    lab_source = tmp_path / "lab-source"
+    sim_source = tmp_path / "sim-source"
+    lab_head = _init_git_source(lab_source)
+    sim_head = _init_git_source(sim_source)
+    _write_source_marker(runtime_root, "habitat-lab", lab_source, f"git:{lab_head}")
+    _write_source_marker(runtime_root, "habitat-sim", sim_source, f"git:{sim_head}")
+    (lab_source / "untracked.txt").write_text("untracked\n")
+    env = os.environ.copy()
+    env["ETPR1_RUNTIME_ROOT"] = str(runtime_root)
+    env["ETPR1_HABITAT_LAB_SOURCE"] = str(lab_source)
+    env["ETPR1_HABITAT_SIM_SOURCE"] = str(sim_source)
+
+    result = _run(["bash", BUILDER], env=env)
+
+    assert result.returncode != 0
+    assert "source_dirty" in result.stdout
+    assert str(lab_source) in result.stdout
+    assert "untracked.txt" in result.stdout
 
 
 def test_builder_cleans_only_its_stale_copy_directories(tmp_path):

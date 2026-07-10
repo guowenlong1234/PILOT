@@ -94,6 +94,13 @@ source_revision() {
     local git_head
     git_head=$(git -C "${source}" rev-parse HEAD 2>/dev/null || true)
     if [ -n "${git_head}" ]; then
+        local git_status
+        git_status=$(git -C "${source}" status --porcelain --untracked-files=all)
+        if [ -n "${git_status}" ]; then
+            echo "source_dirty: Git source has uncommitted or untracked files: ${source}" >&2
+            printf '%s\n' "${git_status}" >&2
+            return 1
+        fi
         printf 'git:%s\n' "${git_head}"
         return
     fi
