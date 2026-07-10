@@ -1,6 +1,9 @@
 import hashlib
 import json
+import subprocess
+import sys
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import h5py
@@ -8,6 +11,7 @@ import numpy as np
 import pytest
 import torch
 
+from precompute_img_features import extract_rae_dinov2_features as extractor_module
 from precompute_img_features.extract_rae_dinov2_features import (
     DEFAULT_CONNECTIVITY_DIR,
     DEFAULT_MODEL_DIR,
@@ -354,6 +358,128 @@ def test_writer_rejects_existing_metadata_mismatch_before_rendering(tmp_path):
     assert created == []
 
 
+@pytest.mark.parametrize(
+    "empty_file_kind",
+    ("zero_bytes", "empty_hdf5", "matching_metadata_subset"),
+)
+def test_writer_recovers_empty_file_with_missing_metadata(tmp_path, empty_file_kind):
+    output = tmp_path / "features.hdf5"
+    if empty_file_kind == "zero_bytes":
+        output.write_bytes(b"")
+    else:
+        with h5py.File(output, "w") as handle:
+            if empty_file_kind == "matching_metadata_subset":
+                handle.attrs["feature_extractor"] = EXPECTED_METADATA[
+                    "feature_extractor"
+                ]
+                handle.attrs["feature_dim"] = EXPECTED_METADATA["feature_dim"]
+
+    record = _records(1)[0]
+    summary = write_feature_file(
+        output,
+        [record],
+        FakeEncoder(),
+        _simulator_factory([]),
+        metadata=EXPECTED_METADATA,
+        device=torch.device("cpu"),
+        image_size=2,
+    )
+
+    assert summary["completed"] == 1
+    with h5py.File(output, "r") as handle:
+        assert set(handle.attrs) == set(EXPECTED_METADATA)
+        for key, expected in EXPECTED_METADATA.items():
+            actual = handle.attrs[key]
+            if isinstance(actual, bytes):
+                actual = actual.decode("utf-8")
+            if isinstance(actual, np.generic):
+                actual = actual.item()
+            assert type(actual) is type(expected)
+            assert actual == expected
+        assert isinstance(handle[record.key], h5py.Dataset)
+
+
+def test_writer_rejects_conflicting_partial_metadata_without_mutation(tmp_path):
+    output = tmp_path / "features.hdf5"
+    with h5py.File(output, "w") as handle:
+        handle.attrs["feature_extractor"] = EXPECTED_METADATA["feature_extractor"]
+        handle.attrs["vfov"] = 90
+
+    with pytest.raises(ValueError, match=r"metadata mismatch.*vfov"):
+        write_feature_file(
+            output,
+            _records(1),
+            FakeEncoder(),
+            _simulator_factory([]),
+            metadata=EXPECTED_METADATA,
+            device=torch.device("cpu"),
+            image_size=2,
+        )
+
+    with h5py.File(output, "r") as handle:
+        assert dict(handle.attrs)["vfov"] == 90
+        assert len(handle) == 0
+
+
+def test_writer_rejects_unknown_partial_metadata_without_mutation(tmp_path):
+    output = tmp_path / "features.hdf5"
+    with h5py.File(output, "w") as handle:
+        handle.attrs["feature_dim"] = EXPECTED_METADATA["feature_dim"]
+        handle.attrs["unknown_semantics"] = "keep-me"
+
+    with pytest.raises(ValueError, match=r"unexpected metadata.*unknown_semantics"):
+        write_feature_file(
+            output,
+            _records(1),
+            FakeEncoder(),
+            _simulator_factory([]),
+            metadata=EXPECTED_METADATA,
+            device=torch.device("cpu"),
+            image_size=2,
+        )
+
+    with h5py.File(output, "r") as handle:
+        assert handle.attrs["unknown_semantics"] == "keep-me"
+        assert len(handle) == 0
+
+
+@pytest.mark.parametrize("root_entry_kind", ("dataset", "group", "soft_link"))
+def test_writer_rejects_incomplete_metadata_when_root_contains_entries(
+    tmp_path,
+    root_entry_kind,
+):
+    output = tmp_path / "features.hdf5"
+    sentinel = np.asarray([3.0, 4.0], dtype=np.float32)
+    with h5py.File(output, "w") as handle:
+        handle.attrs["feature_dim"] = EXPECTED_METADATA["feature_dim"]
+        if root_entry_kind == "dataset":
+            handle.create_dataset("sentinel", data=sentinel)
+        elif root_entry_kind == "group":
+            handle.create_group("sentinel")
+        else:
+            handle["sentinel"] = h5py.SoftLink("/missing_target")
+
+    with pytest.raises(ValueError, match=r"incomplete metadata.*root entries"):
+        write_feature_file(
+            output,
+            _records(1),
+            FakeEncoder(),
+            _simulator_factory([]),
+            metadata=EXPECTED_METADATA,
+            device=torch.device("cpu"),
+            image_size=2,
+        )
+
+    with h5py.File(output, "r") as handle:
+        assert handle.attrs["feature_dim"] == 768
+        if root_entry_kind == "dataset":
+            np.testing.assert_array_equal(handle["sentinel"][...], sentinel)
+        elif root_entry_kind == "group":
+            assert isinstance(handle["sentinel"], h5py.Group)
+        else:
+            assert isinstance(handle.get("sentinel", getlink=True), h5py.SoftLink)
+
+
 def test_writer_reuses_one_simulator_per_scan_and_closes_on_scan_change(tmp_path):
     records = _records(2) + [
         replace(_records(1)[0], scan_id="scan_b", viewpoint_id="vp_b")
@@ -420,6 +546,97 @@ def test_writer_recomputes_non_hardlink_and_non_dataset_entries(
         assert dataset.compression == "gzip"
         assert np.isfinite(dataset[...]).all()
         assert np.any(dataset[...] != 0)
+
+
+def test_writer_removes_soft_link_target_outside_default_allowed_keys(tmp_path):
+    output = tmp_path / "features.hdf5"
+    record = _records(1)[0]
+    valid = np.full((36, 768), 9, dtype=np.float32)
+    with h5py.File(output, "w") as handle:
+        _write_metadata(handle)
+        handle.create_dataset("soft_target", data=valid, compression="gzip")
+        handle[record.key] = h5py.SoftLink("/soft_target")
+
+    write_feature_file(
+        output,
+        [record],
+        FakeEncoder(),
+        _simulator_factory([]),
+        metadata=EXPECTED_METADATA,
+        device=torch.device("cpu"),
+        image_size=2,
+    )
+    summary = validate_feature_file(
+        output,
+        connectivity_keys=[record.key],
+        expected_count=1,
+        expected_metadata=EXPECTED_METADATA,
+    )
+
+    assert summary["valid"] is True
+    assert summary["extra_key_count"] == 0
+
+
+def test_writer_preserves_allowed_key_outside_selected_viewpoints(tmp_path):
+    output = tmp_path / "features.hdf5"
+    selected, preserved = _records(2)
+    preserved_values = np.full((36, 768), 13, dtype=np.float32)
+    with h5py.File(output, "w") as handle:
+        _write_metadata(handle)
+        handle.create_group(selected.key)
+        handle.create_dataset(
+            preserved.key,
+            data=preserved_values,
+            compression="gzip",
+        )
+        handle.create_dataset("unrelated", data=np.ones(1, dtype=np.float32))
+
+    summary = write_feature_file(
+        output,
+        [selected],
+        FakeEncoder(),
+        _simulator_factory([]),
+        metadata=EXPECTED_METADATA,
+        device=torch.device("cpu"),
+        image_size=2,
+        allowed_keys={selected.key, preserved.key},
+    )
+
+    assert summary == {"total": 1, "skipped": 0, "recomputed": 1, "completed": 1}
+    with h5py.File(output, "r") as handle:
+        assert set(handle.keys()) == {selected.key, preserved.key}
+        np.testing.assert_array_equal(handle[preserved.key][...], preserved_values)
+        assert isinstance(handle[selected.key], h5py.Dataset)
+
+
+def test_main_keeps_all_allowed_keys_when_max_viewpoints_limits_work(monkeypatch):
+    records = _records(2)
+    captured = {}
+    monkeypatch.setattr(
+        extractor_module,
+        "load_connectivity_viewpoints",
+        lambda *args, **kwargs: records,
+    )
+    monkeypatch.setattr(
+        extractor_module,
+        "build_metadata",
+        lambda *args, **kwargs: EXPECTED_METADATA,
+    )
+    monkeypatch.setattr(
+        "vlnce_baselines.models.encoders.rae_dinov2_encoder.RaeDinov2ClsEncoder",
+        lambda *args, **kwargs: FakeEncoder(),
+    )
+
+    def fake_write(output_file, viewpoints, *args, allowed_keys, **kwargs):
+        captured["viewpoints"] = list(viewpoints)
+        captured["allowed_keys"] = set(allowed_keys)
+        return {"total": 1, "skipped": 0, "recomputed": 0, "completed": 1}
+
+    monkeypatch.setattr(extractor_module, "write_feature_file", fake_write)
+
+    assert extractor_module.main(["--device", "cpu", "--max_viewpoints", "1"]) == 0
+    assert [record.key for record in captured["viewpoints"]] == [records[0].key]
+    assert captured["allowed_keys"] == {record.key for record in records}
 
 
 def test_build_metadata_hashes_local_model_and_stat(tmp_path):
@@ -520,6 +737,38 @@ def test_validator_rejects_key_mismatches_nonfinite_zero_and_bad_hash(tmp_path):
     assert any("all zero" in error for error in summary["errors"])
 
 
+def test_validator_isolates_string_dtype_and_continues_to_later_bad_key(tmp_path):
+    features = tmp_path / "bad_types.hdf5"
+    string_key = "scan_a_string"
+    zero_key = "scan_b_zero"
+    with h5py.File(features, "w") as handle:
+        _write_metadata(handle)
+        handle.create_dataset(
+            string_key,
+            data=np.full((36, 768), b"x", dtype="S1"),
+        )
+        handle.create_dataset(
+            zero_key,
+            data=np.zeros((36, 768), dtype=np.float32),
+        )
+
+    summary = validate_feature_file(
+        features,
+        connectivity_keys=[string_key, zero_key],
+        expected_count=2,
+        expected_metadata=EXPECTED_METADATA,
+    )
+
+    assert summary["valid"] is False
+    assert summary["checked_datasets"] == 2
+    assert summary["error_count"] >= 3
+    assert any(string_key in error and "dtype" in error for error in summary["errors"])
+    assert any(
+        string_key in error and "non-numeric" in error for error in summary["errors"]
+    )
+    assert any(zero_key in error and "all zero" in error for error in summary["errors"])
+
+
 def test_cli_defaults_and_key_parameters():
     extract = build_extract_parser().parse_args([])
     validate = build_validate_parser().parse_args([])
@@ -536,3 +785,48 @@ def test_cli_defaults_and_key_parameters():
     assert validate.connectivity == DEFAULT_CONNECTIVITY_DIR
     assert validate.clip_features == DEFAULT_CLIP_FEATURES
     assert validate.expected_count == 10567
+
+
+def test_validator_cli_invalid_argument_is_single_json_error():
+    script = (
+        Path(__file__).parents[1]
+        / "precompute_img_features"
+        / "validate_rae_dinov2_features.py"
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--expected_count", "nope"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stderr == ""
+    lines = result.stdout.splitlines()
+    assert len(lines) == 1
+    summary = json.loads(lines[0])
+    assert summary["valid"] is False
+    assert summary["error_count"] == 1
+    assert len(summary["errors"]) == 1
+    assert "expected_count" in summary["errors"][0]
+
+
+def test_validator_cli_help_remains_normal_text():
+    script = (
+        Path(__file__).parents[1]
+        / "precompute_img_features"
+        / "validate_rae_dinov2_features.py"
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout.startswith("usage:")
+    assert "--expected_count" in result.stdout

@@ -4,6 +4,7 @@
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 
 import h5py
@@ -29,6 +30,22 @@ except ModuleNotFoundError:
 
 DEFAULT_CLIP_FEATURES = "pretrain_src/img_features/CLIP-ViT-B-32-views-habitat.hdf5"
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+class JsonArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        print(
+            json.dumps(
+                {
+                    "valid": False,
+                    "error_count": 1,
+                    "errors": [f"argument parsing failed: {message}"],
+                },
+                sort_keys=True,
+            ),
+            file=sys.stdout,
+        )
+        self.exit(2)
 
 
 def _normalize_attribute(value):
@@ -105,11 +122,24 @@ def validate_feature_file(
                     f"got {hash_value!r}"
                 )
 
+        key_errors = (KeyError, OSError, RuntimeError, TypeError, ValueError)
         for key in sorted(actual_keys):
-            link = handle.get(key, getlink=True)
+            try:
+                link = handle.get(key, getlink=True)
+            except key_errors as error:
+                add_error(
+                    f"key {key} link lookup failed: {type(error).__name__}: {error}"
+                )
+                continue
             if not isinstance(link, h5py.HardLink):
                 add_error(f"key {key} uses unsupported HDF5 link {type(link).__name__}")
-            obj = handle.get(key)
+            try:
+                obj = handle.get(key)
+            except key_errors as error:
+                add_error(
+                    f"key {key} object lookup failed: {type(error).__name__}: {error}"
+                )
+                continue
             if not isinstance(obj, h5py.Dataset):
                 add_error(f"key {key} is not an HDF5 dataset: {type(obj).__name__}")
                 continue
@@ -122,11 +152,34 @@ def validate_feature_file(
                 add_error(
                     f"key {key} has actual dtype {obj.dtype}, expected float32"
                 )
-            values = obj[...]
-            if not np.isfinite(values).all():
-                add_error(f"key {key} contains non-finite values")
-            if not np.any(values != 0):
-                add_error(f"key {key} is all zero")
+            try:
+                is_numeric = np.issubdtype(obj.dtype, np.number)
+            except key_errors:
+                is_numeric = False
+            if not is_numeric:
+                add_error(f"key {key} has non-numeric dtype {obj.dtype}")
+                continue
+            try:
+                values = obj[...]
+            except key_errors as error:
+                add_error(
+                    f"key {key} dataset read failed: {type(error).__name__}: {error}"
+                )
+                continue
+            try:
+                if not np.isfinite(values).all():
+                    add_error(f"key {key} contains non-finite values")
+            except key_errors as error:
+                add_error(
+                    f"key {key} finite check failed: {type(error).__name__}: {error}"
+                )
+            try:
+                if not np.any(values != 0):
+                    add_error(f"key {key} is all zero")
+            except key_errors as error:
+                add_error(
+                    f"key {key} nonzero check failed: {type(error).__name__}: {error}"
+                )
 
     if clip_features is not None:
         with h5py.File(clip_features, "r") as clip_handle:
@@ -142,7 +195,7 @@ def validate_feature_file(
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(
+    parser = JsonArgumentParser(
         description="Validate RAE/DINOv2 feature keys, arrays, and metadata."
     )
     parser.add_argument("--features", default=DEFAULT_OUTPUT_FILE)

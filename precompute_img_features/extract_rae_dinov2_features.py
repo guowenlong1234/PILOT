@@ -251,14 +251,34 @@ def _normalize_attribute(value):
     return value
 
 
-def _validate_existing_metadata(handle, expected_metadata):
-    for key, expected in expected_metadata.items():
+def _validate_or_initialize_metadata(handle, expected_metadata):
+    existing_keys = set(handle.attrs)
+    expected_keys = set(expected_metadata)
+    for key in sorted(existing_keys & expected_keys):
+        expected = expected_metadata[key]
         got = _normalize_attribute(handle.attrs.get(key))
         if type(got) is not type(expected) or got != expected:
             raise ValueError(
                 f"HDF5 metadata mismatch for {key}: expected {expected!r} "
                 f"({type(expected).__name__}), got {got!r} ({type(got).__name__})"
             )
+    missing_keys = expected_keys - existing_keys
+    if not missing_keys:
+        return
+
+    unexpected_keys = existing_keys - expected_keys
+    if unexpected_keys:
+        names = ", ".join(sorted(unexpected_keys))
+        raise ValueError(f"HDF5 has unexpected metadata while incomplete: {names}")
+    root_keys = list(handle.keys())
+    if root_keys:
+        names = ", ".join(sorted(root_keys))
+        raise ValueError(
+            f"HDF5 incomplete metadata cannot be recovered while root entries exist: {names}"
+        )
+    for key in sorted(missing_keys):
+        handle.attrs[key] = expected_metadata[key]
+    handle.flush()
 
 
 def _dataset_is_complete(obj):
@@ -279,22 +299,29 @@ def write_feature_file(
     device,
     batch_size=12,
     image_size=224,
+    allowed_keys=None,
 ):
     output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    existed = output_file.exists()
     viewpoints = list(viewpoints)
+    selected_keys = {record.key for record in viewpoints}
+    allowed_keys = selected_keys if allowed_keys is None else set(allowed_keys)
+    if not selected_keys.issubset(allowed_keys):
+        raise ValueError("allowed_keys must contain every selected viewpoint key")
     summary = {"total": len(viewpoints), "skipped": 0, "recomputed": 0, "completed": 0}
 
     current_scan = None
     simulator = None
     try:
         with h5py.File(output_file, "a") as handle:
-            if existed:
-                _validate_existing_metadata(handle, metadata)
-            else:
-                for key, value in metadata.items():
-                    handle.attrs[key] = value
+            _validate_or_initialize_metadata(handle, metadata)
+
+            removed_root_entries = False
+            for key in list(handle.keys()):
+                if key not in allowed_keys:
+                    del handle[key]
+                    removed_root_entries = True
+            if removed_root_entries:
                 handle.flush()
 
             for index, record in enumerate(viewpoints, start=1):
@@ -413,9 +440,11 @@ def main(argv=None):
         RaeDinov2ClsEncoder,
     )
 
-    viewpoints = load_connectivity_viewpoints(
+    all_viewpoints = load_connectivity_viewpoints(
         args.connectivity_dir, sensor_height=args.sensor_height
     )
+    allowed_keys = {record.key for record in all_viewpoints}
+    viewpoints = all_viewpoints
     if args.max_viewpoints > 0:
         viewpoints = viewpoints[: args.max_viewpoints]
     metadata = build_metadata(args.model_dir, args.stat_path)
@@ -450,6 +479,7 @@ def main(argv=None):
         device=device,
         batch_size=args.batch_size,
         image_size=args.image_size,
+        allowed_keys=allowed_keys,
     )
     LOGGER.info(
         "finished total=%d skipped=%d recomputed=%d completed=%d",
