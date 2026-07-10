@@ -21,6 +21,7 @@ last_verified_date: 2026-07-10
 - 三层 MLP 在 GRPO 阶段冻结。
 - 原有 CLIP 配置、特征、checkpoint 和运行入口全部保留。
 - RAE/DINOv2 使用独立配置、特征文件、环境和输出目录。
+- 环境搭建、依赖安装、特征生成、全部测试和全部实验只允许在测评机执行；本机只用于代码编辑、分析和文档整理。
 
 ## 2. 不在本次范围内的内容
 
@@ -40,69 +41,111 @@ last_verified_date: 2026-07-10
 
 当前路点预测器 `BinaryDistPredictor_TRM` 的 RGB 分支已被注释，实际只使用深度特征。因此更换 RGB 编码器不需要修改或重训路点预测器。
 
-当前 `etpnav` 环境是 Python 3.7、PyTorch 1.9.1、Transformers 4.12.5，不包含 `Dinov2WithRegistersModel`。RAE-NWM 的 `raenwm` 环境是 Python 3.11、PyTorch 2.9.1、Transformers 5.3.0。新方案不能只把 RAENWM 编码器类复制到旧环境。
+本机 `etpnav` 环境是 Python 3.7、PyTorch 1.9.1、Transformers 4.12.5，不包含 `Dinov2WithRegistersModel`，只保留为旧 CLIP 链路的只读参考，不承担本次实现和验证。
+
+2026-07-10 已只读核验测评机：有线地址为 `10.10.10.2`，GPU 为 RTX 4090 24GB，根分区可用约 335GB。远端 `raenwm` 环境是 Python 3.11.15、PyTorch 2.2.2+cu121、Transformers 4.49.0，包含 `Dinov2WithRegistersModel`。现有 `gwl-etpnav` 容器中仍有 ETPNav 评测进程使用该环境，不能修改或中断。
 
 ## 4. 总体方案选择
 
-采用“现代独立环境 + ETP-R1 自有 Habitat 旁路运行目录”的方案。
+采用“测评机独立 Docker 容器 + 独立 conda 环境 + ETP-R1 自有 Habitat 依赖目录”的方案。
 
 不采用以下方案：
 
-- 不在旧 `etpnav` 环境用 `timm` 近似重建。该方案需要人工映射 Hugging Face 权重、寄存器 token 和非仿射最终层归一化，难以保证与 RAENWM 数值一致。
+- 不在本机旧 `etpnav` 环境用 `timm` 近似重建。该方案需要人工映射 Hugging Face 权重、寄存器 token 和非仿射最终层归一化，难以保证与 RAENWM 数值一致。
+- 不直接在测评机宿主机运行。宿主机 conda 无法提供与现有 ETPNav Docker 相同的图形、CUDA 和 Habitat 运行边界。
+- 不复用现有 `gwl-etpnav` 容器执行本项目。该容器中有正在运行的 ETPNav 评测，且共享进程空间会增加误操作风险。
 - 不使用跨进程视觉编码服务。该方案会增加在线导航延迟、多卡通信和异常恢复复杂度。
 
-本机 ETPNav 已经验证过现代 `raenwm` 环境配合 Habitat sidecar 的运行思路。本设计只把该思路作为参考，所有新环境、旁路目录和启动脚本都归当前 ETP-R1 独立所有。
+测评机上的 ETPNav 已经验证过现代 `raenwm` 环境配合 Habitat 0.3.3 本地依赖的运行思路。本设计只把镜像和构建方法作为只读参考，所有新容器、conda 环境、项目目录、依赖目录和输出归当前 ETP-R1 独立所有。
 
 ## 5. 环境隔离设计
 
-### 5.1 新环境
+### 5.1 测评机身份与入口
 
-新建 conda 环境：
+“测评机”或“4090”固定指：
 
 ```text
-etpr1_rae
+SSH: ssh 4090
+有线地址: 10.10.10.2
+用户: a6000
+工作根: /home/a6000/gwl
+GPU: NVIDIA GeForce RTX 4090 24GB
 ```
 
-它通过只读克隆 `raenwm` 创建。创建后所有安装、卸载和升级都只发生在 `etpr1_rae`，不得修改原 `raenwm`。
+每次远程操作前先执行 `hostname`、`whoami`、`ip -br addr`、`docker ps` 和 `nvidia-smi`，确认没有连到本机或错误容器。
 
-克隆前后保存以下证据：
+### 5.2 新 Docker 容器
 
-- `conda list -n raenwm --explicit`
+新建独立容器：
+
+```text
+gwl-etpr1-rae
+```
+
+只读复用现有基础镜像：
+
+```text
+gwl-etpnav:etpnav-runtime-20260701185256
+```
+
+容器使用 GPU、`ipc=host`、16GB 共享内存，并只绑定测评机工作根：
+
+```text
+/home/a6000/gwl -> /home/a6000/gwl
+```
+
+容器默认工作目录为 `/home/a6000/gwl/ETP-R1`。不得在现有 `gwl-etpnav` 容器中安装依赖、生成特征或运行本项目测试和实验。
+
+### 5.3 新 conda 环境
+
+新环境固定为：
+
+```text
+/home/a6000/gwl/miniconda3/envs/etpr1_rae
+```
+
+它在新容器中通过只读克隆远端 `raenwm` 创建。创建后所有安装、卸载和升级都只发生在 `etpr1_rae`，不得修改 `/home/a6000/gwl/miniconda3/envs/raenwm`。
+
+克隆前后保存：
+
+- 远端 `raenwm` 的 `conda list --explicit`
 - `pip freeze`
-- `raenwm` 环境中所有 `.pth` 文件的 SHA256
-- 正在运行的 ETPNav 进程信息
+- 所有 `.pth` 文件的 SHA256
+- 现有 ETPNav 进程与 GPU 状态
 
-### 5.2 清除克隆带来的 ETPNav 路径绑定
+### 5.4 清除 ETPNav 路径绑定
 
-原 `raenwm` 环境存在 `etpnav-habitat-sidecar.pth`，它指向 ETPNav 的项目目录。克隆后只删除新环境中的这份 `.pth`，原环境文件保持不变。
-
-新环境不得保留以下运行时引用：
+远端 `raenwm` 环境存在 `etpnav-local-deps.pth`，它指向：
 
 ```text
-/home/gwl/project/ETPNav/ETPNav/vendor/legacy_clip
-/home/gwl/project/ETPNav/ETPNav/.runtime/etp_habitat_legacy
+/home/a6000/gwl/ETPNav
+/home/a6000/gwl/dino_cwp
+/home/a6000/gwl/_deps/habitat-lab-v0.3.3
+/home/a6000/gwl/_deps/habitat-sim-v0.3.3
 ```
 
-### 5.3 ETP-R1 自有旁路目录
+克隆后只删除新环境中的这份 `.pth`，原环境文件保持不变。新环境不得把 ETPNav 工程目录加入 Python 搜索路径。
+
+### 5.5 ETP-R1 自有运行依赖
 
 建立：
 
 ```text
-ETP-R1/.runtime/etpr1_habitat_legacy/
+/home/a6000/gwl/ETP-R1/.runtime/etpr1_habitat/
 ```
 
-这里保存 ETP-R1 在现代 Python 下运行 Habitat 所需的 Python 包、Habitat Baselines、Habitat-Sim 动态库和兼容文件。
+这里保存 ETP-R1 在现代 Python 下运行所需的 Habitat-Lab、Habitat Baselines、Habitat-Sim Python 模块、动态库和兼容文件。
 
-具体做法是把 ETPNav 已验证的 sidecar 构建逻辑复制为 ETP-R1 自有脚本，在当前项目中重新构建并分阶段验证 Habitat 0.3.3 sidecar。不得软链接、硬链接或直接引用 ETPNav 的 `.runtime`。
+具体做法是把 ETPNav 已验证的 Habitat 0.3.3 构建逻辑复制为 ETP-R1 自有脚本，在当前项目目录重新构建或复制后验证。不得软链接、硬链接或直接引用 `/home/a6000/gwl/ETPNav` 的运行目录。
 
-同时把 ETP-R1 的旧运行接口迁移到现代环境：
+同时把 ETP-R1 的旧接口迁移到现代环境：
 
 - 将 `pytorch_transformers.BertConfig` 改为现代 `transformers.BertConfig`。
 - 处理 NumPy 1.26 中已删除的 `np.bool` 等旧别名。
 - 移植运行 ETP-R1 所需的最小 Habitat 配置兼容层。
 - 保持任务定义和训练算法不变，不做无关的 Habitat 重构。
 
-### 5.4 专用启动脚本
+### 5.6 专用启动脚本
 
 新增：
 
@@ -110,19 +153,31 @@ ETP-R1/.runtime/etpr1_habitat_legacy/
 scripts/etpr1_rae_runtime_exec.sh
 ```
 
-脚本只对当前子进程设置 `PYTHONPATH`、`LD_LIBRARY_PATH` 和旁路运行标志，不永久修改 shell 配置。
+脚本只对当前子进程设置 `PYTHONPATH`、`LD_LIBRARY_PATH` 和旁路运行标志，不修改宿主机 shell 配置。所有测试和实验都通过新容器、新环境和该脚本启动。
 
-### 5.5 磁盘约束
+### 5.7 本机与测评机边界
 
-设计时本机根分区剩余约 71GB。`raenwm` 环境约 8.6GB，Habitat sidecar 约 5.1GB，全量 float32 DINO CLS HDF5 原始数据约 1.2GB。
+本机工作区 `/home/gwl/project/etpr1/ETP-R1` 只用于阅读、编辑、评审、Git 操作和文档整理。本次任务禁止在本机执行：
 
-新实验必须使用独立输出目录，并限制 checkpoint 保留数量。不得为每个 checkpoint 重复保存冻结的 DINO 权重。
+- 新环境创建或依赖安装
+- 单元测试、集成测试、冒烟测试和性能测试
+- DINO/RAE 数值一致性验证
+- 全量 HDF5 生成或校验
+- 预训练、SFT、GRPO 和评测
+
+代码同步到测评机 `/home/a6000/gwl/ETP-R1` 后，所有验证都在 `gwl-etpr1-rae` 内完成。
+
+### 5.8 GPU 与磁盘约束
+
+设计时测评机根分区可用约 335GB，远端 `raenwm` 环境约 7.4GB，全量 float32 DINO CLS HDF5 原始数据约 1.2GB，空间足够。
+
+测评机只有一张 RTX 4090。启动特征生成、训练或完整评测前必须检查 ETPNav 是否仍占用 GPU；不得终止它，也不得与它并行启动本项目重型任务。新实验使用独立输出目录并限制 checkpoint 保留数量，不为每个 checkpoint 重复保存冻结 DINO 权重。
 
 ## 6. RAE/DINOv2 编码语义
 
 ### 6.1 本地模型来源
 
-视觉编码器与本地 RAE-NWM 保持一致：
+视觉编码器与测评机 `/home/a6000/gwl/RAE-NWM/raenwm` 中的 RAE-NWM 保持一致：
 
 - 架构：DINOv2-with-registers-base
 - 隐藏维度：768
@@ -133,7 +188,7 @@ scripts/etpr1_rae_runtime_exec.sh
 - RAE latent 统计：使用本地 `stat.pt`
 - 输出：RAE 归一化后的 CLS 向量
 
-只复制运行所需文件到 ETP-R1 自有模型目录：
+只把运行所需文件复制到测评机 ETP-R1 自有模型目录 `/home/a6000/gwl/ETP-R1/pretrained/rae_dinov2_with_registers_base`：
 
 - `config.json`
 - `preprocessor_config.json`
@@ -431,6 +486,8 @@ checkpoint 仍保存：
 
 ## 14. 验证计划
 
+本节全部命令只能在测评机 `gwl-etpr1-rae` 容器的 `etpr1_rae` 环境中执行。本机不得用“快速检查”为由代跑任何测试。
+
 ### 14.1 单元测试
 
 - RAE/DINO 输入预处理：布局、范围和 224×224 检查。
@@ -480,7 +537,7 @@ checkpoint 仍保存：
 
 ## 15. 性能验证
 
-DINOv2-B/14 的视觉 token 数多于 CLIP ViT-B/32，在线编码预计更慢。第一版使用 float32，先保证离线和在线一致。
+DINOv2-B/14 的视觉 token 数多于 CLIP ViT-B/32，在线编码预计更慢。第一版在测评机 RTX 4090 上使用 float32，先保证离线和在线一致。
 
 冒烟阶段记录：
 
@@ -496,7 +553,8 @@ DINOv2-B/14 的视觉 token 数多于 CLIP ViT-B/32，在线编码预计更慢�
 预计涉及：
 
 - 新 conda 环境与环境核验脚本。
-- ETP-R1 自有 Habitat sidecar 和启动脚本。
+- 测评机独立 Docker 容器约定、ETP-R1 自有 Habitat 依赖和启动脚本。
+- 根目录 `AGENTS.md` 中的本机/测评机执行边界。
 - RAE/DINO encoder-only 封装。
 - RGB 编码器配置工厂。
 - `R1Policy.py` 在线 RGB 分支。
@@ -513,8 +571,9 @@ DINOv2-B/14 的视觉 token 数多于 CLIP ViT-B/32，在线编码预计更慢�
 
 以下条件全部满足才算替换完成：
 
-- `raenwm` 原环境和正在运行的 ETPNav 未被修改或中断。
-- `etpr1_rae` 能独立运行 ETP-R1 和本地 RAE/DINOv2。
+- 测评机现有 `gwl-etpnav` 容器、远端 `raenwm` 环境和正在运行的 ETPNav 未被修改或中断。
+- 测评机新容器 `gwl-etpr1-rae` 与新环境 `etpr1_rae` 能独立运行 ETP-R1 和远端 RAE/DINOv2。
+- 本机未创建新环境、未生成特征、未运行任何测试或实验。
 - encoder-only CLS 与 RAENWM 原始链路通过数值一致性测试。
 - 全量 10,567 个视点的 DINO CLS HDF5 通过完整性验证。
 - MLP 权重能从预训练 checkpoint 正确传到 SFT。
