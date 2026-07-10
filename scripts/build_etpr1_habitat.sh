@@ -24,8 +24,60 @@ mkdir -p \
     "${PREFIX}" \
     "${SITE_PACKAGES}" \
     "${PREFIX}/lib" \
-    "${HABITAT_BASELINES_PREFIX}" \
-    "${MANIFEST_ROOT}"
+    "${HABITAT_BASELINES_PREFIX}"
+
+BUILDER_TMP_MARKER="ETP-R1 habitat builder"
+ACTIVE_SOURCE_TMP=""
+ACTIVE_SOURCE_BACKUP=""
+ACTIVE_SOURCE_TARGET=""
+MANIFEST_TMP=""
+habitat_lab_provenance_file=""
+habitat_sim_provenance_file=""
+
+cleanup_builder_temps() {
+    if [ -n "${ACTIVE_SOURCE_TMP}" ] \
+        && [ -f "${ACTIVE_SOURCE_TMP}/.etpr1_builder_tmp" ] \
+        && [ "$(cat "${ACTIVE_SOURCE_TMP}/.etpr1_builder_tmp")" = "${BUILDER_TMP_MARKER}" ]; then
+        rm -rf "${ACTIVE_SOURCE_TMP}"
+    fi
+    if [ -n "${ACTIVE_SOURCE_BACKUP}" ] \
+        && [ -f "${ACTIVE_SOURCE_BACKUP}/.etpr1_source_origin" ]; then
+        if [ -n "${ACTIVE_SOURCE_TARGET}" ] && [ ! -e "${ACTIVE_SOURCE_TARGET}" ]; then
+            mv "${ACTIVE_SOURCE_BACKUP}" "${ACTIVE_SOURCE_TARGET}"
+        else
+            rm -rf "${ACTIVE_SOURCE_BACKUP}"
+        fi
+    fi
+    if [ -n "${MANIFEST_TMP}" ] && [ -d "${MANIFEST_TMP}" ]; then
+        rm -rf "${MANIFEST_TMP}"
+    fi
+    if [ -n "${habitat_lab_provenance_file}" ]; then
+        rm -f "${habitat_lab_provenance_file}"
+    fi
+    if [ -n "${habitat_sim_provenance_file}" ]; then
+        rm -f "${habitat_sim_provenance_file}"
+    fi
+}
+trap cleanup_builder_temps EXIT
+
+cleanup_stale_source_temps() {
+    local candidate
+    while IFS= read -r -d '' candidate; do
+        if [ -f "${candidate}/.etpr1_builder_tmp" ] \
+            && [ "$(cat "${candidate}/.etpr1_builder_tmp")" = "${BUILDER_TMP_MARKER}" ]; then
+            rm -rf "${candidate}"
+        fi
+    done < <(
+        find "${SRC_ROOT}" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            -name '.*.etpr1-tmp.*' \
+            -print0
+    )
+}
+
+cleanup_stale_source_temps
 
 if [ ! -d "${HABITAT_LAB_SOURCE}" ]; then
     echo "Missing habitat-lab source directory: ${HABITAT_LAB_SOURCE}" >&2
@@ -37,31 +89,144 @@ if [ ! -d "${HABITAT_SIM_SOURCE}" ]; then
     exit 1
 fi
 
-habitat_lab_status=reused
+source_revision() {
+    local source=$1
+    local git_head
+    git_head=$(git -C "${source}" rev-parse HEAD 2>/dev/null || true)
+    if [ -n "${git_head}" ]; then
+        printf 'git:%s\n' "${git_head}"
+        return
+    fi
+
+    (
+        cd "${source}"
+        while IFS= read -r -d '' relative_path; do
+            printf '%s  %s\n' \
+                "$(sha256sum "${relative_path}" | cut -d ' ' -f 1)" \
+                "${relative_path}"
+        done < <(
+            find . \
+                -path './.git' -prune -o \
+                -path './build' -prune -o \
+                -path '*/__pycache__' -prune -o \
+                -type f ! -name '*.pyc' -print0 | sort -z
+        )
+    ) | sha256sum | awk '{print "tree:" $1}'
+}
+
+write_source_marker() {
+    local marker=$1
+    local source=$2
+    local revision=$3
+    local marker_tmp=${marker}.tmp
+    {
+        printf 'source=%s\n' "${source}"
+        printf 'revision=%s\n' "${revision}"
+    } > "${marker_tmp}"
+    mv "${marker_tmp}" "${marker}"
+}
+
+copy_source_tree_atomic() {
+    local name=$1
+    local source=$2
+    local target=$3
+    local marker=$4
+    local revision=$5
+    local replace_existing=${6:-0}
+    local tmp=${SRC_ROOT}/.${name}.etpr1-tmp.${BASHPID}.${RANDOM}
+
+    ACTIVE_SOURCE_TMP=${tmp}
+    mkdir "${tmp}"
+    printf '%s\n' "${BUILDER_TMP_MARKER}" > "${tmp}/.etpr1_builder_tmp"
+    cp -a "${source}/." "${tmp}/"
+    write_source_marker "${tmp}/$(basename "${marker}")" "${source}" "${revision}"
+
+    if [ "${replace_existing}" -eq 0 ]; then
+        mv "${tmp}" "${target}"
+        ACTIVE_SOURCE_TMP=""
+        rm "${target}/.etpr1_builder_tmp"
+        return
+    fi
+
+    ACTIVE_SOURCE_BACKUP=${target}.etpr1-backup.${BASHPID}
+    ACTIVE_SOURCE_TARGET=${target}
+    mv "${target}" "${ACTIVE_SOURCE_BACKUP}"
+    if ! mv "${tmp}" "${target}"; then
+        mv "${ACTIVE_SOURCE_BACKUP}" "${target}"
+        ACTIVE_SOURCE_BACKUP=""
+        ACTIVE_SOURCE_TARGET=""
+        return 1
+    fi
+    ACTIVE_SOURCE_TMP=""
+    rm "${target}/.etpr1_builder_tmp"
+    rm -rf "${ACTIVE_SOURCE_BACKUP}"
+    ACTIVE_SOURCE_BACKUP=""
+    ACTIVE_SOURCE_TARGET=""
+}
+
 ensure_source_tree() {
     local name=$1
     local requested_source=$2
     local target=$3
     local marker=$4
+    local requested_revision
+    local actual_revision=MARKER_MISSING
     local status=reused
     local actual_local_source=MARKER_MISSING
     local marker_status=missing
 
+    requested_source=$(readlink -f "${requested_source}")
+    requested_revision=$(source_revision "${requested_source}")
+    if [ -f "${target}/.etpr1_builder_tmp" ] \
+        && [ "$(cat "${target}/.etpr1_builder_tmp")" = "${BUILDER_TMP_MARKER}" ]; then
+        rm "${target}/.etpr1_builder_tmp"
+    fi
+
     if [ ! -d "${target}" ]; then
-        cp -a "${requested_source}" "${target}"
-        printf '%s\n' "${requested_source}" > "${marker}"
+        copy_source_tree_atomic \
+            "${name}" \
+            "${requested_source}" \
+            "${target}" \
+            "${marker}" \
+            "${requested_revision}"
         status=copied
         actual_local_source=${requested_source}
+        actual_revision=${requested_revision}
         marker_status=present
     elif [ -f "${marker}" ]; then
-        actual_local_source=$(cat "${marker}")
         marker_status=present
+        actual_local_source=$(sed -n 's/^source=//p' "${marker}")
+        actual_revision=$(sed -n 's/^revision=//p' "${marker}")
+        if [ -z "${actual_local_source}" ] && [ "$(cat "${marker}")" = "${requested_source}" ]; then
+            copy_source_tree_atomic \
+                "${name}" \
+                "${requested_source}" \
+                "${target}" \
+                "${marker}" \
+                "${requested_revision}" \
+                1
+            status=legacy_marker_rebuilt
+            actual_local_source=${requested_source}
+            actual_revision=${requested_revision}
+        fi
         if [ "${actual_local_source}" != "${requested_source}" ]; then
             echo "Existing ${name} source tree at ${target} was created from ${actual_local_source}, not requested ${requested_source}. Remove the existing tree or point ETPR1_${name^^}_SOURCE back to the recorded origin." >&2
             status=source_mismatch
             printf '%s_status=%s\n' "${name}" "${status}"
             printf '%s_requested_source=%s\n' "${name}" "${requested_source}"
             printf '%s_actual_local_source=%s\n' "${name}" "${actual_local_source}"
+            printf '%s_origin_marker_status=%s\n' "${name}" "${marker_status}"
+            printf '%s_origin_marker_path=%s\n' "${name}" "${marker}"
+            return 1
+        fi
+        if [ "${actual_revision}" != "${requested_revision}" ]; then
+            echo "source_revision_mismatch: existing ${name} source revision ${actual_revision} does not match requested revision ${requested_revision}." >&2
+            status=source_revision_mismatch
+            printf '%s_status=%s\n' "${name}" "${status}"
+            printf '%s_requested_source=%s\n' "${name}" "${requested_source}"
+            printf '%s_actual_local_source=%s\n' "${name}" "${actual_local_source}"
+            printf '%s_requested_revision=%s\n' "${name}" "${requested_revision}"
+            printf '%s_actual_revision=%s\n' "${name}" "${actual_revision}"
             printf '%s_origin_marker_status=%s\n' "${name}" "${marker_status}"
             printf '%s_origin_marker_path=%s\n' "${name}" "${marker}"
             return 1
@@ -80,6 +245,8 @@ ensure_source_tree() {
     printf '%s_status=%s\n' "${name}" "${status}"
     printf '%s_requested_source=%s\n' "${name}" "${requested_source}"
     printf '%s_actual_local_source=%s\n' "${name}" "${actual_local_source}"
+    printf '%s_requested_revision=%s\n' "${name}" "${requested_revision}"
+    printf '%s_actual_revision=%s\n' "${name}" "${actual_revision}"
     printf '%s_origin_marker_status=%s\n' "${name}" "${marker_status}"
     printf '%s_origin_marker_path=%s\n' "${name}" "${marker}"
 }
@@ -96,7 +263,6 @@ capture_provenance() {
 source_check_failed=0
 habitat_lab_provenance_file=$(mktemp)
 habitat_sim_provenance_file=$(mktemp)
-trap 'rm -f "${habitat_lab_provenance_file}" "${habitat_sim_provenance_file}"' EXIT
 
 if ! capture_provenance \
     "${habitat_lab_provenance_file}" \
@@ -303,6 +469,9 @@ purge_stale_habitat_sim_build_dir() {
 
 purge_stale_habitat_sim_build_dir
 
+habitat_sim_native_mode=""
+habitat_sim_native_source=""
+
 stage_compatible_habitat_sim_build() {
     if [ "${HABITAT_SIM_SOURCE}" = "${HABITAT_SIM_TARGET}" ]; then
         return
@@ -335,6 +504,8 @@ stage_compatible_habitat_sim_build() {
     echo "Copying validated Habitat-Sim build from: ${source_build}"
     rm -rf "${HABITAT_SIM_TARGET}/build"
     cp -a "${source_build}" "${HABITAT_SIM_TARGET}/build"
+    habitat_sim_native_mode=shared_build_copy
+    habitat_sim_native_source=${source_binding}
 }
 
 stage_compatible_habitat_sim_build
@@ -358,9 +529,35 @@ build_habitat_sim_if_needed() {
             --no-update-submodules \
             --skip-install-magnum
     )
+    habitat_sim_native_mode=local_compile
+    habitat_sim_native_source=${HABITAT_SIM_TARGET}/setup.py
 }
 
 build_habitat_sim_if_needed
+
+habitat_sim_binding_path=$(find "${HABITAT_SIM_TARGET}/build" -type f -name "habitat_sim_bindings*.so" -print -quit 2>/dev/null || true)
+if [ -z "${habitat_sim_binding_path}" ]; then
+    echo "Habitat-Sim build did not produce a native binding." >&2
+    exit 1
+fi
+if [ -z "${habitat_sim_native_mode}" ]; then
+    source_binding_path=$(
+        find \
+            "${HABITAT_SIM_SOURCE}/build/lib.linux-x86_64-${python_cache_tag}" \
+            -type f \
+            -name "habitat_sim_bindings*.so" \
+            -print \
+            -quit 2>/dev/null || true
+    )
+    if [ -n "${source_binding_path}" ] \
+        && [ "$(sha256sum "${source_binding_path}" | cut -d ' ' -f 1)" = "$(sha256sum "${habitat_sim_binding_path}" | cut -d ' ' -f 1)" ]; then
+        habitat_sim_native_mode=shared_build_copy
+        habitat_sim_native_source=${source_binding_path}
+    else
+        habitat_sim_native_mode=local_compile
+        habitat_sim_native_source=${HABITAT_SIM_TARGET}/setup.py
+    fi
+fi
 
 find_first_package_dir() {
     local package_name=$1
@@ -539,12 +736,29 @@ if [ -n "${magnum_extension_root}" ]; then
         "${SITE_PACKAGES}/$(basename "${magnum_extension_root}")"
 fi
 
-cat > "${MANIFEST_ROOT}/source-roots.txt" <<EOF
+for required_path in \
+    "${habitat_package_root}" \
+    "${habitat_baselines_package_root}" \
+    "${habitat_sim_package_root}" \
+    "${habitat_sim_extension_dir}" \
+    "${magnum_package_root}" \
+    "${corrade_package_root}" \
+    "${corrade_extension_root}" \
+    "${magnum_extension_root}"; do
+    if [ -z "${required_path}" ]; then
+        echo "Runtime staging is incomplete; a required Habitat path is missing." >&2
+        exit 1
+    fi
+done
+
+MANIFEST_TMP=$(mktemp -d "${RUNTIME_ROOT}/.manifests-tmp.XXXXXX")
+
+cat > "${MANIFEST_TMP}/source-roots.txt" <<EOF
 ${habitat_lab_provenance}
 ${habitat_sim_provenance}
 EOF
 
-cat > "${MANIFEST_ROOT}/staged-layout.txt" <<EOF
+cat > "${MANIFEST_TMP}/staged-layout.txt" <<EOF
 prefix=${PREFIX}
 site_packages=${SITE_PACKAGES}
 habitat=${SITE_PACKAGES}/habitat
@@ -565,115 +779,105 @@ _magnum=${SITE_PACKAGES}/$(basename "${magnum_extension_root:-_magnum_missing.so
 _magnum_source=${magnum_extension_root:-MISSING}
 EOF
 
+habitat_sim_binding_sha256=$(sha256sum "${habitat_sim_extension_dir}"/habitat_sim_bindings*.so | head -n 1 | cut -d ' ' -f 1)
+corrade_extension_sha256=$(sha256sum "${corrade_extension_root}" | cut -d ' ' -f 1)
+magnum_extension_sha256=$(sha256sum "${magnum_extension_root}" | cut -d ' ' -f 1)
+cat > "${MANIFEST_TMP}/habitat-sim-native.txt" <<EOF
+native_mode=${habitat_sim_native_mode}
+native_source=${habitat_sim_native_source}
+habitat_sim_bindings_path=$(readlink -f "${habitat_sim_extension_dir}"/habitat_sim_bindings*.so | head -n 1)
+habitat_sim_bindings_sha256=${habitat_sim_binding_sha256}
+corrade_extension_path=$(readlink -f "${corrade_extension_root}")
+corrade_extension_sha256=${corrade_extension_sha256}
+magnum_extension_path=$(readlink -f "${magnum_extension_root}")
+magnum_extension_sha256=${magnum_extension_sha256}
+EOF
+
 echo "Using habitat-lab source: ${HABITAT_LAB_SOURCE}"
 echo "Using habitat-sim source: ${HABITAT_SIM_SOURCE}"
 echo "Source provenance:"
-cat "${MANIFEST_ROOT}/source-roots.txt"
+cat "${MANIFEST_TMP}/source-roots.txt"
 echo "Staged ETP-R1 runtime layout:"
-cat "${MANIFEST_ROOT}/staged-layout.txt"
+cat "${MANIFEST_TMP}/staged-layout.txt"
 
-runtime_versions_tmp=$(mktemp)
-if ! \
-    ETPR1_EXPECT_HABITAT="${SITE_PACKAGES}/habitat" \
-    ETPR1_EXPECT_HABITAT_SIM="${SITE_PACKAGES}/habitat_sim" \
-    ETPR1_EXPECT_HABITAT_BASELINES="${HABITAT_BASELINES_PREFIX}/habitat_baselines" \
-    python - > "${runtime_versions_tmp}" <<'PY'
-import ast
+ETPR1_VALIDATE_RUNTIME_ROOT="${RUNTIME_ROOT}" \
+PYTHONNOUSERSITE=1 \
+PYTHONPATH="${SITE_PACKAGES}:${HABITAT_BASELINES_PREFIX}" \
+LD_LIBRARY_PATH="${PREFIX}/lib" \
+python - <<'PY' > "${MANIFEST_TMP}/runtime-imports.txt"
+import importlib
 import os
-import sys
 from pathlib import Path
 
 
-CHECKS = (
-    ("habitat", os.environ["ETPR1_EXPECT_HABITAT"]),
-    ("habitat_sim", os.environ["ETPR1_EXPECT_HABITAT_SIM"]),
-    ("habitat_baselines", os.environ["ETPR1_EXPECT_HABITAT_BASELINES"]),
-)
+root = Path(os.environ["ETPR1_VALIDATE_RUNTIME_ROOT"]).resolve()
+forbidden = ("/ETPNav", "/dino_cwp", "/_deps")
 
 
-def _read_version_from_file(version_file: Path):
-    tree = ast.parse(version_file.read_text(encoding="utf-8"))
-    for node in tree.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        for target in node.targets:
-            if isinstance(target, ast.Name) and target.id in {"__version__", "VERSION"}:
-                return ast.literal_eval(node.value)
-    return None
-
-
-def _record_strict_version(name, expected_root_str):
-    expected_path = Path(os.path.abspath(expected_root_str))
-
-    if name in {"habitat", "habitat_baselines"}:
-        version_candidates = [
-            expected_path / "version.py",
-            expected_path / "__init__.py",
-        ]
-    else:
-        version_candidates = [expected_path / "__init__.py"]
-
-    version = None
-    checked_files = []
-    for version_file in version_candidates:
-        checked_files.append(str(version_file))
-        if not version_file.is_file():
-            continue
-        try:
-            version = _read_version_from_file(version_file)
-        except Exception as exc:
-            print(
-                f"Failed to read staged {name} version from {version_file}: {exc}",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
-        if version not in (None, ""):
-            break
-
-    if version in (None, ""):
-        print(
-            f"Staged {name} is missing __version__ in {', '.join(checked_files)}",
-            file=sys.stderr,
+def validate_module(name, expected_version=None):
+    module = importlib.import_module(name)
+    module_file = getattr(module, "__file__", None)
+    if not module_file:
+        raise SystemExit(f"{name} has no module file")
+    resolved = Path(module_file).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        raise SystemExit(f"{name} escapes runtime root {root}: {resolved}")
+    if any(part in str(resolved) for part in forbidden):
+        raise SystemExit(f"{name} uses forbidden path: {resolved}")
+    version = getattr(module, "__version__", None)
+    if expected_version is not None and str(version) != expected_version:
+        raise SystemExit(
+            f"{name} version is {version}, expected {expected_version}"
         )
-        raise SystemExit(1)
+    if expected_version is not None:
+        print(f"{name}={version}")
+    print(f"{name}_file={resolved}")
 
-    print(f"{name}={version}")
 
-
-for name, expected_root in CHECKS:
-    _record_strict_version(name, expected_root)
+for module_name in ("habitat", "habitat_sim", "habitat_baselines"):
+    validate_module(module_name, "0.3.3")
+for module_name in ("magnum", "corrade"):
+    validate_module(module_name)
+for module_name in (
+    "habitat_sim._ext.habitat_sim_bindings",
+    "_corrade",
+    "_magnum",
+):
+    validate_module(module_name)
 PY
-then
-    rm -f "${runtime_versions_tmp}"
-    exit 1
-fi
 
-mv "${runtime_versions_tmp}" "${MANIFEST_ROOT}/runtime-versions.txt"
+cat > "${MANIFEST_TMP}/runtime-versions.txt" <<EOF
+habitat=0.3.3
+habitat_sim=0.3.3
+habitat_baselines=0.3.3
+EOF
 
-echo "Staged ETP-R1 runtime versions:"
-cat "${MANIFEST_ROOT}/runtime-versions.txt"
-
-python - <<'PY' > "${MANIFEST_ROOT}/shared-core.txt"
+python - <<'PY' > "${MANIFEST_TMP}/shared-core.txt"
 import importlib
 
-
-def _record_version(name):
-    try:
-        module = importlib.import_module(name)
-    except Exception as exc:
-        print(f"{name}=IMPORT_ERROR:{exc}")
-        return
-
-    version = getattr(module, "__version__", None)
-    if version is None:
-        print(f"{name}=missing")
-        return
-
-    print(f"{name}={version}")
-
-
 for name in ("torch", "torchvision", "numpy", "transformers", "timm"):
-    _record_version(name)
+    module = importlib.import_module(name)
+    print(f"{name}={getattr(module, '__version__', 'missing')}")
 PY
+
+manifest_previous=${MANIFEST_ROOT}.previous.${BASHPID}
+if [ -e "${MANIFEST_ROOT}" ]; then
+    mv "${MANIFEST_ROOT}" "${manifest_previous}"
+fi
+if ! mv "${MANIFEST_TMP}" "${MANIFEST_ROOT}"; then
+    if [ -e "${manifest_previous}" ]; then
+        mv "${manifest_previous}" "${MANIFEST_ROOT}"
+    fi
+    exit 1
+fi
+MANIFEST_TMP=""
+rm -rf "${manifest_previous}"
+
+echo "Validated ETP-R1 runtime imports:"
+cat "${MANIFEST_ROOT}/runtime-imports.txt"
+echo "Validated Habitat-Sim native binding:"
+cat "${MANIFEST_ROOT}/habitat-sim-native.txt"
 
 echo "ETP-R1 runtime root prepared at ${RUNTIME_ROOT}."
