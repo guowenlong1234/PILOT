@@ -134,4 +134,4 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 
 2026-07-10，在设计获批后编写 RAE/DINOv2 实施计划。计划位于 `docs/superpowers/plans/2026-07-10-rae-dinov2-visual-encoder.md`，依次覆盖测评机隔离环境、现代 Habitat 兼容、三层投影、冻结编码器、离线预训练、在线 SFT/GRPO、checkpoint 过滤、全量 HDF5、CLIP 回归和最终冒烟。本阶段只形成计划，尚未创建 `gwl-etpr1-rae`、`etpr1_rae` 或开始模型实现。
 
-2026-07-10，为 Task2 现代运行兼容复查。检查了 Python 3.11.15、NumPy 1.26.4、Habitat/Habitat-Sim/Habitat-Baselines 0.3.3、Transformers 4.49.0 的导入链，补齐旧配置与入口兼容，并确认 `run.py`、两个 R1 trainer、`habitat_extensions.task` 和 trainer 注册可用。代码审查后又补充了 R2R/RxR 旧配置到现代 OmegaConf 的桥接、原生配置入口幂等保护、动作编号保护和实际 `R1Env` 配置边界测试；真实 R2R/RxR 转换配置也已覆盖 `pickle` 往返与深复制兼容。测评机最终运行 Task1+Task2 共 34 项测试通过，`python run.py --help` 退出码为 0。
+2026-07-10，为 Task2 现代运行兼容复查。检查了 Python 3.11.15、NumPy 1.26.4、Habitat/Habitat-Sim/Habitat-Baselines 0.3.3、Transformers 4.49.0 的导入链，补齐旧配置与入口兼容，并确认 `run.py`、两个 R1 trainer、`habitat_extensions.task` 和 trainer 注册可用。代码审查后又补充了 R2R/RxR 旧配置到现代 OmegaConf 的桥接、原生配置入口幂等保护、动作编号保护和实际 `R1Env` 配置边界测试；真实 R2R/RxR 转换配置也已覆盖同进程与新进程 `pickle` 往返、深复制兼容，并确认不会遮蔽普通 OmegaConf 的同名数据字段。测评机最终运行 Task1+Task2 共 35 项测试通过，`python run.py --help` 退出码为 0。

@@ -87,6 +87,7 @@ def test_real_task_config_converts_to_modern_habitat_shape(
     sensor_name,
     dataset_type,
     agent_height,
+    tmp_path,
 ):
     from habitat import read_write
     from omegaconf import OmegaConf
@@ -139,6 +140,65 @@ def test_real_task_config_converts_to_modern_habitat_shape(
         restored_config.freeze()
         assert OmegaConf.is_readonly(restored_config)
         assert restored_config.is_frozen()
+
+    pickle_path = tmp_path / "task-config.pkl"
+    pickle_path.write_bytes(pickle.dumps(task_config))
+    child_code = "\n".join(
+        (
+            "import pickle",
+            "import sys",
+            "from omegaconf import OmegaConf",
+            "with open(sys.argv[1], 'rb') as pickle_file:",
+            "    config = pickle.load(pickle_file)",
+            "assert OmegaConf.is_config(config)",
+            "assert config.seed == int(sys.argv[2])",
+            "assert config.dataset.type == sys.argv[3]",
+            "assert OmegaConf.is_readonly(config)",
+            "assert config.is_frozen()",
+            "config.defrost()",
+            "assert not OmegaConf.is_readonly(config)",
+            "assert not config.is_frozen()",
+            "config.freeze()",
+            "assert OmegaConf.is_readonly(config)",
+            "assert config.is_frozen()",
+        )
+    )
+    child_result = subprocess.run(
+        (
+            sys.executable,
+            "-c",
+            child_code,
+            str(pickle_path),
+            str(task_config.seed),
+            dataset_type,
+        ),
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+
+    assert child_result.returncode == 0, child_result.stdout
+
+
+def test_legacy_freeze_api_does_not_shadow_regular_omegaconf_fields():
+    from omegaconf import OmegaConf
+    from vlnce_baselines.common.environments import _task_config_for_habitat
+    from vlnce_baselines.config.default import get_config
+
+    _task_config_for_habitat(get_config("run_r2r/iter_train.yaml"))
+    ordinary_config = OmegaConf.create(
+        {
+            "freeze": "freeze-data-value",
+            "defrost": "defrost-data-value",
+            "is_frozen": "is-frozen-data-value",
+        }
+    )
+
+    assert ordinary_config.freeze == "freeze-data-value"
+    assert ordinary_config.defrost == "defrost-data-value"
+    assert ordinary_config.is_frozen == "is-frozen-data-value"
 
 
 def test_rxr_task_config_supplies_modern_forward_action_default():

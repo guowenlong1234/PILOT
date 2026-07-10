@@ -10,36 +10,25 @@ from habitat.utils.geometry_utils import quaternion_rotate_vector
 from habitat_baselines.common.baseline_registry import baseline_registry
 from habitat_extensions import habitat_sim_action
 from habitat_extensions.utils import generate_video, heading_from_quaternion, navigator_video_frame, planner_video_frame
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 from scipy.spatial.transform import Rotation as R
 import cv2
 import os
 
 
-def _legacy_defrost(config_node):
-    OmegaConf.set_readonly(config_node, False)
+class _LegacyRootDictConfig(DictConfig):
+    def __deepcopy__(self, memo):
+        # OmegaConf 2.3 hardcodes DictConfig as the copied root type.
+        return type(self)(super().__deepcopy__(memo))
 
+    def defrost(self):
+        OmegaConf.set_readonly(self, False)
 
-def _legacy_freeze(config_node):
-    OmegaConf.set_readonly(config_node, True)
+    def freeze(self):
+        OmegaConf.set_readonly(self, True)
 
-
-def _legacy_is_frozen(config_node):
-    return bool(OmegaConf.is_readonly(config_node))
-
-
-def _install_legacy_freeze_api():
-    from omegaconf import DictConfig, ListConfig
-
-    legacy_methods = {
-        "defrost": _legacy_defrost,
-        "freeze": _legacy_freeze,
-        "is_frozen": _legacy_is_frozen,
-    }
-    for config_type in (DictConfig, ListConfig):
-        for method_name, method in legacy_methods.items():
-            if not hasattr(config_type, method_name):
-                setattr(config_type, method_name, method)
+    def is_frozen(self):
+        return bool(OmegaConf.is_readonly(self))
 
 
 def _to_omegaconf_compatible(value):
@@ -76,7 +65,6 @@ def _lowercase_fields(source, mapping):
 
 
 def _task_config_for_habitat(config):
-    _install_legacy_freeze_api()
     legacy = _to_omegaconf_compatible(config.TASK_CONFIG)
     environment_legacy = legacy.get("ENVIRONMENT", {})
     iterator_legacy = environment_legacy.get("ITERATOR_OPTIONS", {})
@@ -344,7 +332,7 @@ def _task_config_for_habitat(config):
             "dataset": dataset,
         }
     )
-    task_config = OmegaConf.create(modern)
+    task_config = _LegacyRootDictConfig(modern)
     OmegaConf.set_readonly(task_config, True)
     return task_config
 
