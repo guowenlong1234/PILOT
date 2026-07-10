@@ -28,26 +28,19 @@ def _ensure_config_aliases() -> None:
         habitat_core_utils.try_cv2_import = try_cv2_import
 
 
-def _ensure_action_aliases() -> None:
+def habitat_sim_action(name):
     from habitat.sims.habitat_simulator.actions import HabitatSimActions
 
-    for legacy_name, current_name in (
-        ("STOP", "stop"),
-        ("MOVE_FORWARD", "move_forward"),
-        ("TURN_LEFT", "turn_left"),
-        ("TURN_RIGHT", "turn_right"),
-    ):
-        if (
-            HabitatSimActions.has_action(current_name)
-            and not HabitatSimActions.has_action(legacy_name)
-        ):
-            HabitatSimActions._known_actions[legacy_name] = HabitatSimActions[
-                current_name
-            ]
+    modern_name = str(name).lower()
+    if HabitatSimActions.has_action(modern_name):
+        return HabitatSimActions[modern_name]
+    legacy_name = modern_name.upper()
+    if HabitatSimActions.has_action(legacy_name):
+        return HabitatSimActions[legacy_name]
+    raise KeyError(f"Unknown Habitat-Sim action: {name}")
 
 
 _ensure_config_aliases()
-_ensure_action_aliases()
 
 from habitat_extensions import measures, obs_transformers, sensors, nav
 from habitat_extensions.config.default import get_extended_config

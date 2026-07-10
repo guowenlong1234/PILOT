@@ -3,6 +3,8 @@ from typing import List, Optional, Union
 
 from yacs.config import CfgNode
 
+from habitat.config.default import get_config as _NATIVE_HABITAT_GET_CONFIG
+
 
 class LegacyConfig(CfgNode):
     """YACS config node matching the interface used by legacy ETP-R1."""
@@ -89,13 +91,12 @@ def install_legacy_config_compat() -> None:
     import habitat.config.default as habitat_config_default
     import habitat_baselines.config.default as habitat_baselines_default
 
+    habitat_dict_config = getattr(habitat_config, "DictConfig", LegacyConfig)
     for module in (habitat, habitat_config, habitat_config_default):
-        module.Config = LegacyConfig
-
-    habitat.get_config = get_legacy_habitat_config
-    habitat_config.get_config = get_legacy_habitat_config
-    habitat_config_default.get_config = get_legacy_habitat_config
-    habitat_baselines_default._C = _legacy_baselines_defaults()
+        if not hasattr(module, "Config"):
+            module.Config = habitat_dict_config
+    if not hasattr(habitat_baselines_default, "_C"):
+        habitat_baselines_default._C = _legacy_baselines_defaults()
 
 
 def get_env_class(env_name):
@@ -106,11 +107,13 @@ def get_env_class(env_name):
 
 def make_env_fn(config, env_class):
     from habitat import make_dataset
+    from vlnce_baselines.common.environments import _task_config_for_habitat
 
+    task_config = _task_config_for_habitat(config)
     dataset = make_dataset(
-        config.TASK_CONFIG.DATASET.TYPE,
-        config=config.TASK_CONFIG.DATASET,
+        task_config.dataset.type,
+        config=task_config.dataset,
     )
     env = env_class(config=config, dataset=dataset)
-    env.seed(config.TASK_CONFIG.SEED)
+    env.seed(task_config.seed)
     return env

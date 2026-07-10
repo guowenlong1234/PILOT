@@ -7,7 +7,6 @@ import torch
 import tqdm
 from gym import Space
 from habitat.config.default import Config
-from habitat.sims.habitat_simulator.actions import HabitatSimActions
 from vlnce_baselines.common.runtime_compat import get_env_class
 from habitat_baselines.common.obs_transformers import (
     apply_obs_transforms_obs_space,
@@ -15,6 +14,7 @@ from habitat_baselines.common.obs_transformers import (
 )
 
 from habitat_extensions.task import ALL_ROLES_MASK, RxRVLNCEDatasetV1
+from habitat_extensions import habitat_sim_action
 from vlnce_baselines.common.env_utils import construct_envs
 from vlnce_baselines.common.utils import extract_instruction_tokens
 
@@ -165,7 +165,7 @@ class TeacherRecollectionDataset(torch.utils.data.IterableDataset):
                 prev_action = (
                     trajectories[episode_id][i - 1][1]
                     if i
-                    else HabitatSimActions.STOP
+                    else habitat_sim_action("STOP")
                 )
 
                 # [prev_action, action, oracle_action]

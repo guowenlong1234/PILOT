@@ -9,9 +9,9 @@ from habitat.core.embodied_task import (
     SimulatorTaskAction,
 )
 from habitat.core.registry import registry
-from habitat.sims.habitat_simulator.actions import HabitatSimActions
 from habitat.tasks.utils import cartesian_to_polar
 from habitat.utils.geometry_utils import quaternion_rotate_vector
+from habitat_extensions import habitat_sim_action
 
 # @registry.register_task_action
 # class MoveForwardByDistanceAction(SimulatorTaskAction):
@@ -21,7 +21,7 @@ from habitat.utils.geometry_utils import quaternion_rotate_vector
 #         """
 #         original_amount = self._sim.get_agent(0).agent_config.action_space[1].actuation.amount
 #         self._sim.get_agent(0).agent_config.action_space[1].actuation.amount = distance
-#         output = self._sim.step(HabitatSimActions.MOVE_FORWARD)
+#         output = self._sim.step(habitat_sim_action("MOVE_FORWARD"))
 #         self._sim.get_agent(0).agent_config.action_space[1].actuation.amount = original_amount
 #         return output
 
@@ -37,8 +37,8 @@ class MoveHighToLowAction(SimulatorTaskAction):
 
     def turn(self, angle):
         ''' angle: 0 ~ 360 degree '''
-        left_action = HabitatSimActions.TURN_LEFT
-        right_action = HabitatSimActions.TURN_RIGHT
+        left_action = habitat_sim_action("TURN_LEFT")
+        right_action = habitat_sim_action("TURN_RIGHT")
         turn_unit = self._sim.get_agent(0).agent_config.action_space[left_action].actuation.amount
         angle = round(angle / turn_unit) * turn_unit
 
@@ -63,7 +63,7 @@ class MoveHighToLowAction(SimulatorTaskAction):
         if not niu1niu:
             init_state = self._sim.get_agent_state()
 
-            forward_action = HabitatSimActions.MOVE_FORWARD
+            forward_action = habitat_sim_action("MOVE_FORWARD")
 
             init_forward = self._sim.get_agent(0).agent_config.action_space[
                 forward_action].actuation.amount
@@ -83,9 +83,9 @@ class MoveHighToLowAction(SimulatorTaskAction):
         elif niu1niu:
             positions = []
             collisions = []
-            forward_action = HabitatSimActions.MOVE_FORWARD
-            left_action = HabitatSimActions.TURN_LEFT
-            right_action = HabitatSimActions.TURN_RIGHT
+            forward_action = habitat_sim_action("MOVE_FORWARD")
+            left_action = habitat_sim_action("TURN_LEFT")
+            right_action = habitat_sim_action("TURN_RIGHT")
             foward_unit = self._sim.get_agent(0).agent_config.action_space[forward_action].actuation.amount
 
             angle = math.degrees(angle)
@@ -175,8 +175,8 @@ class MoveHighToLowActionEval(SimulatorTaskAction):
 
     def turn(self, angle):
         ''' angle: 0 ~ 360 degree '''
-        left_action = HabitatSimActions.TURN_LEFT
-        right_action = HabitatSimActions.TURN_RIGHT
+        left_action = habitat_sim_action("TURN_LEFT")
+        right_action = habitat_sim_action("TURN_RIGHT")
         turn_unit = self._sim.get_agent(0).agent_config.action_space[left_action].actuation.amount
         angle = round(angle / turn_unit) * turn_unit
 
@@ -203,7 +203,7 @@ class MoveHighToLowActionEval(SimulatorTaskAction):
 
             positions = []
             collisions = []
-            forward_action = HabitatSimActions.MOVE_FORWARD
+            forward_action = habitat_sim_action("MOVE_FORWARD")
 
             init_forward = self._sim.get_agent(0).agent_config.action_space[
                 forward_action].actuation.amount
@@ -229,9 +229,9 @@ class MoveHighToLowActionEval(SimulatorTaskAction):
         elif niu1niu:
             positions = []
             collisions = []
-            forward_action = HabitatSimActions.MOVE_FORWARD
-            left_action = HabitatSimActions.TURN_LEFT
-            right_action = HabitatSimActions.TURN_RIGHT
+            forward_action = habitat_sim_action("MOVE_FORWARD")
+            left_action = habitat_sim_action("TURN_LEFT")
+            right_action = habitat_sim_action("TURN_RIGHT")
             foward_unit = self._sim.get_agent(0).agent_config.action_space[forward_action].actuation.amount
 
             angle = math.degrees(angle)
@@ -315,8 +315,8 @@ class MoveHighToLowActionEval(SimulatorTaskAction):
 class MoveHighToLowActionInference(SimulatorTaskAction):
     def turn(self, angle):
         ''' angle: 0 ~ 360 degree '''
-        left_action = HabitatSimActions.TURN_LEFT
-        right_action = HabitatSimActions.TURN_RIGHT
+        left_action = habitat_sim_action("TURN_LEFT")
+        right_action = habitat_sim_action("TURN_RIGHT")
         turn_unit = self._sim.get_agent(0).agent_config.action_space[left_action].actuation.amount
         angle = round(angle / turn_unit) * turn_unit
 
@@ -351,7 +351,7 @@ class MoveHighToLowActionInference(SimulatorTaskAction):
             init_state = self._sim.get_agent_state()
 
             cur_path = []
-            forward_action = HabitatSimActions.MOVE_FORWARD
+            forward_action = habitat_sim_action("MOVE_FORWARD")
 
             init_forward = self._sim.get_agent(0).agent_config.action_space[
                 forward_action].actuation.amount
@@ -373,9 +373,9 @@ class MoveHighToLowActionInference(SimulatorTaskAction):
 
         elif niu1niu:
             cur_path = []
-            forward_action = HabitatSimActions.MOVE_FORWARD
-            left_action = HabitatSimActions.TURN_LEFT
-            right_action = HabitatSimActions.TURN_RIGHT
+            forward_action = habitat_sim_action("MOVE_FORWARD")
+            left_action = habitat_sim_action("TURN_LEFT")
+            right_action = habitat_sim_action("TURN_RIGHT")
             foward_unit = self._sim.get_agent(0).agent_config.action_space[forward_action].actuation.amount
 
             angle = math.degrees(angle)

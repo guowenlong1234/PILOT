@@ -2,7 +2,7 @@ from typing import List, Optional, Union
 
 import habitat_baselines.config.default
 from habitat.config.default import CONFIG_FILE_SEPARATOR
-from habitat.config.default import Config as CN
+from vlnce_baselines.common.runtime_compat import LegacyConfig as CN
 
 from habitat_extensions.config.default import (
     get_extended_config as get_task_config,

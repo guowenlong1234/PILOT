@@ -8,11 +8,343 @@ from habitat.core.simulator import Observations
 from habitat.tasks.utils import cartesian_to_polar
 from habitat.utils.geometry_utils import quaternion_rotate_vector
 from habitat_baselines.common.baseline_registry import baseline_registry
-from habitat.sims.habitat_simulator.actions import HabitatSimActions
+from habitat_extensions import habitat_sim_action
 from habitat_extensions.utils import generate_video, heading_from_quaternion, navigator_video_frame, planner_video_frame
+from omegaconf import OmegaConf
 from scipy.spatial.transform import Rotation as R
 import cv2
 import os
+
+
+def _to_omegaconf_compatible(value):
+    if hasattr(value, "items"):
+        return {
+            key: _to_omegaconf_compatible(child)
+            for key, child in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_to_omegaconf_compatible(child) for child in value]
+    return value
+
+
+def _attach_legacy_freeze_api(config_node):
+    if not OmegaConf.is_config(config_node):
+        return
+
+    object.__setattr__(
+        config_node,
+        "defrost",
+        lambda node=config_node: OmegaConf.set_readonly(node, False),
+    )
+    object.__setattr__(
+        config_node,
+        "freeze",
+        lambda node=config_node: OmegaConf.set_readonly(node, True),
+    )
+    object.__setattr__(
+        config_node,
+        "is_frozen",
+        lambda node=config_node: bool(OmegaConf.is_readonly(node)),
+    )
+
+    children = config_node.values() if OmegaConf.is_dict(config_node) else config_node
+    for child in children:
+        _attach_legacy_freeze_api(child)
+
+
+def _config_type(value, default):
+    if isinstance(value, str):
+        return value
+    if hasattr(value, "keys"):
+        keys = list(value.keys())
+        if len(keys) == 1:
+            return keys[0]
+    return default
+
+
+def _value(source, key, default=None):
+    return source[key] if key in source else default
+
+
+def _lowercase_fields(source, mapping):
+    converted = dict(source)
+    for legacy_name, modern_name in mapping:
+        if legacy_name in source:
+            converted[modern_name] = source[legacy_name]
+    return converted
+
+
+def _task_config_for_habitat(config):
+    legacy = _to_omegaconf_compatible(config.TASK_CONFIG)
+    environment_legacy = legacy.get("ENVIRONMENT", {})
+    iterator_legacy = environment_legacy.get("ITERATOR_OPTIONS", {})
+    environment = {
+        "max_episode_steps": _value(
+            environment_legacy, "MAX_EPISODE_STEPS", 1000
+        ),
+        "max_episode_seconds": _value(
+            environment_legacy, "MAX_EPISODE_SECONDS", 10000000
+        ),
+        "iterator_options": {
+            "cycle": _value(iterator_legacy, "CYCLE", True),
+            "shuffle": _value(iterator_legacy, "SHUFFLE", True),
+            "group_by_scene": _value(iterator_legacy, "GROUP_BY_SCENE", True),
+            "num_episode_sample": _value(
+                iterator_legacy, "NUM_EPISODE_SAMPLE", -1
+            ),
+            "max_scene_repeat_episodes": _value(
+                iterator_legacy, "MAX_SCENE_REPEAT_EPISODES", -1
+            ),
+            "max_scene_repeat_steps": _value(
+                iterator_legacy, "MAX_SCENE_REPEAT_STEPS", 10000
+            ),
+            "step_repetition_range": _value(
+                iterator_legacy, "STEP_REPETITION_RANGE", 0.2
+            ),
+        },
+    }
+
+    simulator_legacy = legacy.get("SIMULATOR", {})
+    simulator = _lowercase_fields(
+        simulator_legacy,
+        (
+            ("FORWARD_STEP_SIZE", "forward_step_size"),
+            ("TURN_ANGLE", "turn_angle"),
+            ("SCENE", "scene"),
+            ("ACTION_SPACE_CONFIG", "action_space_config"),
+        ),
+    )
+    simulator.update(
+        {
+            "type": _config_type(simulator_legacy.get("TYPE"), "Sim-v1"),
+            "scene": simulator.get("scene", ""),
+            "scene_dataset": simulator.get("scene_dataset", "default"),
+            "additional_object_paths": simulator.get(
+                "additional_object_paths", []
+            ),
+            "default_agent_id": simulator.get("default_agent_id", 0),
+            "default_agent_navmesh": simulator.get(
+                "default_agent_navmesh", True
+            ),
+            "navmesh_include_static_objects": simulator.get(
+                "navmesh_include_static_objects", False
+            ),
+            "debug_render": simulator.get("debug_render", False),
+            "debug_render_articulated_agent": simulator.get(
+                "debug_render_articulated_agent", False
+            ),
+            "kinematic_mode": simulator.get("kinematic_mode", False),
+            "should_setup_semantic_ids": simulator.get(
+                "should_setup_semantic_ids", True
+            ),
+            "debug_render_goal": simulator.get("debug_render_goal", True),
+            "robot_joint_start_noise": simulator.get(
+                "robot_joint_start_noise", 0.0
+            ),
+            "ctrl_freq": simulator.get("ctrl_freq", 120.0),
+            "ac_freq_ratio": simulator.get("ac_freq_ratio", 4),
+            "load_objs": simulator.get("load_objs", True),
+            "hold_thresh": simulator.get("hold_thresh", 0.15),
+            "grasp_impulse": simulator.get("grasp_impulse", 10000.0),
+            "renderer": simulator.get(
+                "renderer", {"enable_batch_renderer": False}
+            ),
+        }
+    )
+
+    habitat_sim_legacy = simulator_legacy.get("HABITAT_SIM_V0", {})
+    habitat_sim_v0 = _lowercase_fields(
+        habitat_sim_legacy,
+        (
+            ("GPU_DEVICE_ID", "gpu_device_id"),
+            ("GPU_GPU", "gpu_gpu"),
+            ("ALLOW_SLIDING", "allow_sliding"),
+            ("FRUSTUM_CULLING", "frustum_culling"),
+            ("ENABLE_PHYSICS", "enable_physics"),
+        ),
+    )
+    habitat_sim_v0.setdefault("gpu_device_id", 0)
+    habitat_sim_v0.setdefault("gpu_gpu", False)
+    habitat_sim_v0.setdefault("allow_sliding", True)
+    simulator["habitat_sim_v0"] = habitat_sim_v0
+
+    agent_legacy = simulator_legacy.get("AGENT_0", {})
+    sim_sensors = {}
+    sensor_defaults = {
+        "RGB_SENSOR": "HabitatSimRGBSensor",
+        "DEPTH_SENSOR": "HabitatSimDepthSensor",
+        "SEMANTIC_SENSOR": "HabitatSimSemanticSensor",
+    }
+    sensor_field_mapping = (
+        ("TYPE", "type"),
+        ("UUID", "uuid"),
+        ("HEIGHT", "height"),
+        ("WIDTH", "width"),
+        ("HFOV", "hfov"),
+        ("MIN_DEPTH", "min_depth"),
+        ("MAX_DEPTH", "max_depth"),
+        ("NORMALIZE_DEPTH", "normalize_depth"),
+        ("POSITION", "position"),
+        ("ORIENTATION", "orientation"),
+    )
+    for sensor_name in agent_legacy.get("SENSORS", []):
+        sensor_legacy = simulator_legacy.get(sensor_name, {})
+        sensor = _lowercase_fields(sensor_legacy, sensor_field_mapping)
+        sensor.setdefault("type", sensor_defaults.get(sensor_name, sensor_name))
+        sensor_uuid = sensor_name.lower()
+        if sensor_uuid.endswith("_sensor"):
+            sensor_uuid = sensor_uuid[: -len("_sensor")]
+        sensor.setdefault("uuid", sensor_uuid)
+        sensor.setdefault("position", [0.0, 1.25, 0.0])
+        sensor.setdefault("orientation", [0.0, 0.0, 0.0])
+        if "DEPTH" in sensor_name:
+            sensor.setdefault("min_depth", 0.0)
+            sensor.setdefault("max_depth", 10.0)
+            sensor.setdefault("normalize_depth", True)
+        sim_sensors[sensor_name.lower()] = sensor
+
+    agent = _lowercase_fields(
+        agent_legacy,
+        (
+            ("HEIGHT", "height"),
+            ("RADIUS", "radius"),
+            ("MAX_CLIMB", "max_climb"),
+            ("MAX_SLOPE", "max_slope"),
+            ("START_POSITION", "start_position"),
+            ("START_ROTATION", "start_rotation"),
+            ("IS_SET_START_STATE", "is_set_start_state"),
+        ),
+    )
+    agent.update(
+        {
+            "height": agent.get("height", 1.5),
+            "radius": agent.get("radius", 0.1),
+            "max_climb": agent.get("max_climb", 0.2),
+            "max_slope": agent.get("max_slope", 45.0),
+            "grasp_managers": agent.get("grasp_managers", 1),
+            "sim_sensors": sim_sensors,
+            "is_set_start_state": agent.get("is_set_start_state", False),
+            "start_position": agent.get("start_position", [0.0, 0.0, 0.0]),
+            "start_rotation": agent.get(
+                "start_rotation", [0.0, 0.0, 0.0, 1.0]
+            ),
+        }
+    )
+    simulator["agents"] = {"agent_0": agent}
+    simulator["agents_order"] = ["agent_0"]
+
+    task_legacy = legacy.get("TASK", {})
+    task = dict(task_legacy)
+    task["type"] = _config_type(task_legacy.get("TYPE"), "VLN-v0")
+    task["physics_target_sps"] = task.get("physics_target_sps", 60.0)
+
+    legacy_actions = task_legacy.get("ACTIONS", {})
+    default_action_types = {
+        "STOP": "StopAction",
+        "MOVE_FORWARD": "MoveForwardAction",
+        "TURN_LEFT": "TurnLeftAction",
+        "TURN_RIGHT": "TurnRightAction",
+        "HIGHTOLOW": "MoveHighToLowAction",
+        "HIGHTOLOWEVAL": "MoveHighToLowActionEval",
+        "HIGHTOLOWINFERENCE": "MoveHighToLowActionInference",
+    }
+    task["actions"] = {}
+    for action_name in task_legacy.get("POSSIBLE_ACTIONS", []):
+        action_legacy = legacy_actions.get(action_name, {})
+        action = dict(action_legacy)
+        action["type"] = _config_type(
+            action_legacy.get("TYPE"), default_action_types[action_name]
+        )
+        task["actions"][action_name.lower()] = action
+
+    default_sensor_types = {
+        "INSTRUCTION_SENSOR": "InstructionSensor",
+        "RXR_INSTRUCTION_SENSOR": "RxRInstructionSensor",
+        "SHORTEST_PATH_SENSOR": "ShortestPathSensor",
+        "VLN_ORACLE_PROGRESS_SENSOR": "VLNOracleProgressSensor",
+    }
+    task["lab_sensors"] = {}
+    for sensor_name in task_legacy.get("SENSORS", []):
+        sensor_legacy = task_legacy.get(sensor_name, {})
+        sensor = _lowercase_fields(
+            sensor_legacy,
+            (
+                ("TYPE", "type"),
+                ("GOAL_RADIUS", "goal_radius"),
+                ("USE_ORIGINAL_FOLLOWER", "use_original_follower"),
+            ),
+        )
+        sensor["type"] = _config_type(
+            sensor_legacy.get("TYPE"), default_sensor_types[sensor_name]
+        )
+        task["lab_sensors"][sensor_name.lower()] = sensor
+
+    default_measurement_types = {
+        "DISTANCE_TO_GOAL": "DistanceToGoal",
+        "SUCCESS": "Success",
+        "SPL": "SPL",
+        "NDTW": "NDTW",
+        "SDTW": "SDTW",
+        "PATH_LENGTH": "PathLength",
+        "ORACLE_SUCCESS": "OracleSuccess",
+        "STEPS_TAKEN": "StepsTaken",
+        "COLLISIONS": "Collisions",
+        "POSITION": "Position",
+        "POSITION_TRAIN": "PositionTrain",
+        "POSITION_INFER": "PositionInfer",
+        "TOP_DOWN_MAP_VLNCE": "TopDownMapVLNCE",
+    }
+    task["measurements"] = {}
+    for measurement_name in task_legacy.get("MEASUREMENTS", []):
+        measurement_legacy = task_legacy.get(measurement_name, {})
+        measurement = _lowercase_fields(
+            measurement_legacy,
+            (
+                ("TYPE", "type"),
+                ("SUCCESS_DISTANCE", "success_distance"),
+                ("GT_PATH", "gt_path"),
+            ),
+        )
+        measurement["type"] = _config_type(
+            measurement_legacy.get("TYPE"),
+            default_measurement_types[measurement_name],
+        )
+        task["measurements"][measurement_name.lower()] = measurement
+
+    dataset_legacy = legacy.get("DATASET", {})
+    dataset = _lowercase_fields(
+        dataset_legacy,
+        (
+            ("TYPE", "type"),
+            ("SPLIT", "split"),
+            ("SCENES_DIR", "scenes_dir"),
+            ("CONTENT_SCENES", "content_scenes"),
+            ("DATA_PATH", "data_path"),
+            ("ROLES", "roles"),
+            ("LANGUAGES", "languages"),
+            ("EPISODES_ALLOWED", "episodes_allowed"),
+            ("SUFFIX", "suffix"),
+        ),
+    )
+    dataset.setdefault("type", "")
+    dataset.setdefault("split", "train")
+    dataset.setdefault("scenes_dir", "data/scene_datasets/")
+    dataset.setdefault("content_scenes", ["*"])
+
+    modern = dict(legacy)
+    modern.update(
+        {
+            "seed": legacy.get("SEED", 100),
+            "environment": environment,
+            "simulator": simulator,
+            "task": task,
+            "dataset": dataset,
+        }
+    )
+    task_config = OmegaConf.create(modern)
+    OmegaConf.set_readonly(task_config, True)
+    _attach_legacy_freeze_api(task_config)
+    return task_config
 
 
 def quat_from_heading(heading, elevation=0):
@@ -44,7 +376,7 @@ def calculate_vp_rel_pos(p1, p2, base_heading=0, base_elevation=0):
 @baseline_registry.register_env(name="R1Env")
 class VLNCEDaggerEnv(habitat.RLEnv):
     def __init__(self, config: Config, dataset: Optional[Dataset] = None):
-        super().__init__(config.TASK_CONFIG, dataset)
+        super().__init__(_task_config_for_habitat(config), dataset)
         self.prev_episode_id = "something different"
 
         self.video_option = config.VIDEO_OPTION
@@ -135,7 +467,7 @@ class VLNCEDaggerEnv(habitat.RLEnv):
         sim = self._env.sim
         init_state = sim.get_agent_state()
 
-        forward_action = HabitatSimActions.MOVE_FORWARD
+        forward_action = habitat_sim_action("MOVE_FORWARD")
         init_forward = sim.get_agent(0).agent_config.action_space[forward_action].actuation.amount
 
         theta = np.arctan2(init_state.rotation.imag[1], init_state.rotation.real) + angle / 2
@@ -256,7 +588,7 @@ class VLNCEDaggerEnv(habitat.RLEnv):
         sim = self._env.sim
         init_state = sim.get_agent_state()
 
-        forward_action = HabitatSimActions.MOVE_FORWARD
+        forward_action = habitat_sim_action("MOVE_FORWARD")
         init_forward = sim.get_agent(0).agent_config.action_space[
             forward_action].actuation.amount
 
@@ -287,7 +619,7 @@ class VLNCEDaggerEnv(habitat.RLEnv):
         sim = self._env.sim
         init_state = sim.get_agent_state()
 
-        forward_action = HabitatSimActions.MOVE_FORWARD
+        forward_action = habitat_sim_action("MOVE_FORWARD")
         init_forward = sim.get_agent(0).agent_config.action_space[
             forward_action].actuation.amount
 
@@ -360,8 +692,8 @@ class VLNCEDaggerEnv(habitat.RLEnv):
 
     def turn(self, ang, vis_info):    
         ''' angle: 0 ~ 360 degree '''
-        act_l = HabitatSimActions.TURN_LEFT
-        act_r = HabitatSimActions.TURN_RIGHT
+        act_l = habitat_sim_action("TURN_LEFT")
+        act_r = habitat_sim_action("TURN_RIGHT")
         uni_l = self._env.sim.get_agent(0).agent_config.action_space[act_l].actuation.amount
         ang_degree = math.degrees(ang)
         ang_degree = round(ang_degree / uni_l) * uni_l
@@ -382,7 +714,7 @@ class VLNCEDaggerEnv(habitat.RLEnv):
         self._env.sim.set_agent_state(pos, quat_from_heading(0))
 
     def single_step_control(self, pos, tryout, vis_info):
-        act_f = HabitatSimActions.MOVE_FORWARD
+        act_f = habitat_sim_action("MOVE_FORWARD")
         uni_f = self._env.sim.get_agent(0).agent_config.action_space[act_f].actuation.amount
         agent_state = self._env.sim.get_agent_state()
         ang, dis = calculate_vp_rel_pos(agent_state.position, pos, heading_from_quaternion(agent_state.rotation))
