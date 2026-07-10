@@ -9,12 +9,21 @@ if [[ "${ETPR1_RUNTIME_ACTIVE:-}" != "1" ]]; then
   exit 2
 fi
 
-source_commit="${ETPR1_SOURCE_COMMIT:-}"
-if [[ -z "$source_commit" ]]; then
-  source_commit="$(git rev-parse --short HEAD 2>/dev/null || true)"
+identity_tmp="$(mktemp)"
+manifest_tmp="$(mktemp)"
+trap 'rm -f "$identity_tmp" "$manifest_tmp"' EXIT
+identity_args=(
+  --project-root "$PROJECT_ROOT"
+  --manifest-output "$manifest_tmp"
+  --identity-output "$identity_tmp"
+)
+if [[ -n "${ETPR1_SOURCE_COMMIT:-}" ]]; then
+  identity_args+=(--requested-commit "$ETPR1_SOURCE_COMMIT")
 fi
-source_commit="${source_commit:-nogit}"
-source_id="$(printf '%s' "$source_commit" | tr -cs 'A-Za-z0-9._-' '_')"
+python scripts/rae_smoke_source_identity.py "${identity_args[@]}"
+source_commit="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["identity"])' "$identity_tmp")"
+source_kind="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["kind"])' "$identity_tmp")"
+source_id="$(printf '%.17s' "$source_commit" | tr -cs 'A-Za-z0-9._-' '_')"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 run_id="${source_id}_${timestamp}_$$"
 run_root="${ETPR1_RAE_SMOKE_ROOT:-data/logs/rae_dino_smoke/$run_id}"
@@ -30,7 +39,17 @@ if [[ -e "$run_root" || -e "$pretrain_root" ]]; then
 fi
 
 mkdir -p "$run_root/logs" "$run_root/matplotlib"
+mv "$identity_tmp" "$run_root/source_identity.json"
+mv "$manifest_tmp" "$run_root/source_manifest.sha256"
+trap - EXIT
 export MPLCONFIGDIR="$PROJECT_ROOT/$run_root/matplotlib"
+summary_log="$run_root/summary.log"
+{
+  printf 'RUN_ID=%s\n' "$run_id"
+  printf 'SOURCE_IDENTITY=%s\n' "$source_commit"
+  printf 'SOURCE_KIND=%s\n' "$source_kind"
+  printf 'SOURCE_MANIFEST=%s\n' "$run_root/source_manifest.sha256"
+} > "$summary_log"
 
 run_stage() {
   local name="$1"
@@ -45,10 +64,10 @@ run_stage() {
     printf '\n'
   } > "$log"
   if timeout --signal=TERM --kill-after=30s "${seconds}s" "$@" >> "$log" 2>&1; then
-    echo "PASS $name log=$log"
+    echo "STAGE $name status=PASS exit=0 log=$log" | tee -a "$summary_log"
   else
     local status=$?
-    echo "FAIL $name status=$status log=$log" >&2
+    echo "STAGE $name status=FAIL exit=$status log=$log" | tee -a "$summary_log" >&2
     tail -n 80 "$log" >&2
     exit "$status"
   fi
@@ -68,7 +87,7 @@ run_gpu_stage() {
   if (( ${#compute_pids[@]} > 0 )); then
     printf 'REFUSE_EXISTING_GPU_COMPUTE_PIDS=%s\n' \
       "${compute_pids[*]}" >> "$gpu_log"
-    echo "FAIL $name existing GPU compute PIDs: ${compute_pids[*]}" >&2
+    echo "STAGE $name status=FAIL exit=3 existing_gpu_compute_pids=${compute_pids[*]} log=$gpu_log" | tee -a "$summary_log" >&2
     exit 3
   fi
   run_stage "$name" "$seconds" "$@"
@@ -190,4 +209,4 @@ run_gpu_stage rxr_eval 900 python run.py \
   RESULTS_DIR "$rxr_eval_root/results/" \
   MODEL.pretrained_path "$pretrain_checkpoint"
 
-echo "ALL_PASS run_id=$run_id run_root=$run_root"
+echo "ALL_PASS run_id=$run_id run_root=$run_root" | tee -a "$summary_log"

@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 
 import argparse
+from collections.abc import Mapping
 from pathlib import Path
 
 import torch
+
+from vlnce_baselines.models.checkpoint_utils import (
+    is_rgb_backbone_key,
+    validate_rgb_checkpoint_metadata,
+)
 
 
 PROJECTION_MARKER = "rgb_projection."
@@ -57,32 +63,38 @@ def _projection_by_suffix(checkpoint):
 
 def _assert_online_checkpoint(checkpoint, expected_iteration):
     state = _state_dict(checkpoint)
-    backbone_keys = [
-        key for key in state if ".rgb_encoder.backbone." in key
-    ]
+    backbone_keys = [key for key in state if is_rgb_backbone_key(key)]
     if backbone_keys:
-        raise ValueError("online checkpoint contains the frozen DINO backbone")
+        raise ValueError(
+            "online checkpoint contains the frozen DINO backbone: "
+            + ", ".join(sorted(backbone_keys))
+        )
+    config = checkpoint.get("config")
+    if config is None:
+        raise ValueError("online checkpoint is missing config for metadata audit")
+    validate_rgb_checkpoint_metadata(checkpoint, config)
     metadata = checkpoint.get("rgb_encoder")
-    expected_metadata = {
-        "type": "rae_dinov2",
-        "raw_output_size": 768,
-        "output_size": 512,
-    }
-    if not isinstance(metadata, dict):
-        raise ValueError("online checkpoint is missing RGB encoder metadata")
-    for key, value in expected_metadata.items():
-        if metadata.get(key) != value:
-            raise ValueError(
-                f"RGB encoder metadata {key} mismatch: {metadata.get(key)!r}"
-            )
     if checkpoint.get("iteration") != expected_iteration:
         raise ValueError(
             "checkpoint iteration mismatch: "
             f"expected {expected_iteration}, got {checkpoint.get('iteration')}"
         )
     optimizer = checkpoint.get("optim_state")
-    if not isinstance(optimizer, dict) or not optimizer.get("state"):
+    if not isinstance(optimizer, Mapping) or not optimizer.get("state"):
         raise ValueError("online checkpoint optimizer state is empty")
+    scheduler = checkpoint.get("scheduler_state")
+    if not isinstance(scheduler, Mapping) or not scheduler:
+        raise ValueError("online checkpoint scheduler_state is missing or empty")
+    last_epoch = scheduler.get("last_epoch")
+    if (
+        isinstance(last_epoch, bool)
+        or not isinstance(last_epoch, int)
+        or last_epoch < 0
+    ):
+        raise ValueError(
+            "online checkpoint scheduler_state.last_epoch must be a "
+            f"non-negative integer, got {last_epoch!r}"
+        )
     return metadata
 
 

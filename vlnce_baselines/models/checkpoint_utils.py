@@ -60,8 +60,11 @@ def _key_has_adjacent_parts(key, *expected):
     )
 
 
-def _is_rgb_backbone_key(key):
+def is_rgb_backbone_key(key):
     return _key_has_adjacent_parts(key, "rgb_encoder", "backbone")
+
+
+_is_rgb_backbone_key = is_rgb_backbone_key
 
 
 def _is_rgb_projection_key(key):

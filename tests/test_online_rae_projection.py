@@ -540,6 +540,26 @@ def test_pretrained_checkpoint_type_guard(
         init_module.get_vlnbert_models(_init_config(encoder_type))
 
 
+def test_rae_pretrained_projection_guard_rejects_extra_projection_key():
+    checkpoint = _module_projection_checkpoint()
+    checkpoint[
+        "module.bert.img_embeddings.rgb_projection.extra.weight"
+    ] = torch.ones(1)
+    normalized = {
+        key.removeprefix("module."): value
+        for key, value in checkpoint.items()
+    }
+
+    with pytest.raises(
+        ValueError,
+        match=r"missing=\[\].*extra=.*extra\.weight",
+    ):
+        init_module._validate_pretrain_rgb_projection(
+            normalized,
+            "rae_dinov2",
+        )
+
+
 @pytest.mark.parametrize(
     ("original_path", "rae_path", "task_name", "hfov"),
     (

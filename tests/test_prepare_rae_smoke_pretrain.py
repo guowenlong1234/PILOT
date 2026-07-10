@@ -1,10 +1,13 @@
 import json
+import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
 
-from scripts.audit_rae_smoke import audit_pretrain
+from scripts.audit_rae_smoke import _assert_online_checkpoint, audit_pretrain
+from vlnce_baselines.models import checkpoint_utils as checkpoint_module
 from scripts.prepare_rae_smoke_pretrain import (
     prepare_smoke_config,
     snapshot_initial_projection,
@@ -202,3 +205,84 @@ def test_snapshot_initial_projection_saves_exactly_six_parameters(tmp_path):
     checkpoint = torch.load(path, map_location="cpu")
     assert len(checkpoint) == 6
     assert all("rgb_projection." in key for key in checkpoint)
+
+
+def _online_audit_checkpoint(tmp_path):
+    model_dir = tmp_path / "pretrained" / "rae"
+    model_dir.mkdir(parents=True)
+    model_path = model_dir / "model.safetensors"
+    stat_path = model_dir / "stat.pt"
+    model_path.write_bytes(b"model")
+    stat_path.write_bytes(b"stats")
+    config = SimpleNamespace(
+        MODEL=SimpleNamespace(
+            RGB_ENCODER=SimpleNamespace(
+                type="rae_dinov2",
+                model_dir=str(model_dir),
+                stat_path=str(stat_path),
+                raw_output_size=768,
+                output_size=512,
+            )
+        )
+    )
+    state = {
+        f"net.vln_bert.img_embeddings.rgb_projection.{suffix}": torch.ones(1)
+        for suffix in ("0.weight", "0.bias", "2.weight", "2.bias", "4.weight", "4.bias")
+    }
+    state["net.vln_bert.global_encoder.weight"] = torch.ones(1)
+    metadata = {
+        "type": "rae_dinov2",
+        "model_dir": "pretrained/rae",
+        "model_sha256": hashlib.sha256(b"model").hexdigest(),
+        "stat_sha256": hashlib.sha256(b"stats").hexdigest(),
+        "raw_output_size": 768,
+        "output_size": 512,
+    }
+    return {
+        "state_dict": state,
+        "rgb_encoder": metadata,
+        "config": config,
+        "iteration": 1,
+        "optim_state": {"state": {0: {"step": 1}}},
+        "scheduler_state": {"last_epoch": 1, "base_lrs": [1e-5]},
+    }
+
+
+def test_online_audit_rejects_missing_scheduler_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(checkpoint_module, "_PROJECT_ROOT", tmp_path)
+    checkpoint = _online_audit_checkpoint(tmp_path)
+    del checkpoint["scheduler_state"]
+
+    with pytest.raises(ValueError, match="scheduler_state"):
+        _assert_online_checkpoint(checkpoint, 1)
+
+
+@pytest.mark.parametrize(
+    ("missing_field", "message"),
+    (
+        ("model_dir", "model_dir"),
+        ("model_sha256", "model SHA256"),
+        ("stat_sha256", "stat SHA256"),
+    ),
+)
+def test_online_audit_rejects_incomplete_rae_metadata(
+    tmp_path,
+    monkeypatch,
+    missing_field,
+    message,
+):
+    monkeypatch.setattr(checkpoint_module, "_PROJECT_ROOT", tmp_path)
+    checkpoint = _online_audit_checkpoint(tmp_path)
+    del checkpoint["rgb_encoder"][missing_field]
+
+    with pytest.raises(ValueError, match=message):
+        _assert_online_checkpoint(checkpoint, 1)
+
+
+def test_online_audit_rejects_direct_rgb_backbone_prefix(tmp_path, monkeypatch):
+    monkeypatch.setattr(checkpoint_module, "_PROJECT_ROOT", tmp_path)
+    checkpoint = _online_audit_checkpoint(tmp_path)
+    checkpoint["state_dict"]["rgb_encoder.backbone.layer.weight"] = torch.ones(1)
+
+    with pytest.raises(ValueError, match="frozen DINO backbone"):
+        _assert_online_checkpoint(checkpoint, 1)

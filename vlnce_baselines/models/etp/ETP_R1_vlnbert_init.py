@@ -18,11 +18,12 @@ def _validate_pretrain_rgb_projection(state_dict, rgb_encoder_type):
 
     if rgb_encoder_type == 'rae_dinov2':
         missing = sorted(expected - present)
-        if missing:
+        extra = sorted(present - expected)
+        if present != expected:
             raise ValueError(
                 'RAE/DINOv2 pretrained checkpoint requires a complete '
-                'rgb_projection; missing required keys: '
-                + ', '.join(missing)
+                'and exact rgb_projection parameter set; '
+                f'missing={missing}, extra={extra}'
             )
     elif present:
         raise ValueError(
