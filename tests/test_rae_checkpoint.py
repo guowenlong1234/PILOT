@@ -1,5 +1,6 @@
 import hashlib
 from pathlib import Path
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,16 @@ from vlnce_baselines.models.checkpoint_utils import (
     validate_rgb_checkpoint_metadata,
 )
 from vlnce_baselines.ss_trainer_ETP_R1 import RLTrainer as SftTrainer
+
+
+PROJECTION_PARAMETER_SUFFIXES = (
+    "0.weight",
+    "0.bias",
+    "2.weight",
+    "2.bias",
+    "4.weight",
+    "4.bias",
+)
 
 
 class _FakeRgbEncoder(torch.nn.Module):
@@ -203,6 +214,80 @@ def test_rae_checkpoint_validation_rejects_incompatible_metadata(
 
     with pytest.raises(ValueError, match=message):
         validate_rgb_checkpoint_metadata(checkpoint, config)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("raw_output_size", 768.0),
+        ("raw_output_size", True),
+        ("output_size", 512.0),
+        ("output_size", False),
+    ),
+)
+def test_rae_checkpoint_metadata_dimensions_require_non_boolean_integers(
+    tmp_path, field, value
+):
+    config, _, _ = _config(tmp_path)
+    checkpoint = _rae_checkpoint(_FakePolicy(), config)
+    checkpoint["rgb_encoder"][field] = value
+
+    with pytest.raises(
+        ValueError,
+        match=f"{field}.*non-boolean integer",
+    ):
+        validate_rgb_checkpoint_metadata(checkpoint, config)
+
+
+@pytest.mark.parametrize("missing_suffix", PROJECTION_PARAMETER_SUFFIXES)
+def test_rae_checkpoint_requires_every_projection_parameter(
+    tmp_path, missing_suffix
+):
+    config, _, _ = _config(tmp_path)
+    checkpoint = _rae_checkpoint(_FakePolicy(), config)
+    semantic_suffix = (
+        f"img_embeddings.rgb_projection.{missing_suffix}"
+    )
+    key = next(
+        key
+        for key in checkpoint["state_dict"]
+        if key.endswith(semantic_suffix)
+    )
+    del checkpoint["state_dict"][key]
+
+    with pytest.raises(
+        ValueError,
+        match=rf"missing.*{re.escape(missing_suffix)}",
+    ):
+        validate_rgb_checkpoint_metadata(checkpoint, config)
+
+
+def test_rae_checkpoint_does_not_merge_partial_projection_wrappers(tmp_path):
+    config, _, _ = _config(tmp_path)
+    policy = _FakePolicy()
+    policy.net.module = _FakeNet()
+    checkpoint = _rae_checkpoint(policy, config)
+    del checkpoint["state_dict"][
+        "net.vln_bert.img_embeddings.rgb_projection.4.bias"
+    ]
+    del checkpoint["state_dict"][
+        "net.module.vln_bert.img_embeddings.rgb_projection.0.weight"
+    ]
+
+    with pytest.raises(ValueError, match="complete.*rgb_projection"):
+        validate_rgb_checkpoint_metadata(checkpoint, config)
+
+
+def test_rae_checkpoint_accepts_one_complete_projection_wrapper(tmp_path):
+    config, _, _ = _config(tmp_path)
+    policy = _FakePolicy()
+    policy.net.module = _FakeNet()
+    checkpoint = _rae_checkpoint(policy, config)
+    del checkpoint["state_dict"][
+        "net.module.vln_bert.img_embeddings.rgb_projection.4.bias"
+    ]
+
+    assert validate_rgb_checkpoint_metadata(checkpoint, config) is None
 
 
 def test_rae_checkpoint_requires_metadata(tmp_path):

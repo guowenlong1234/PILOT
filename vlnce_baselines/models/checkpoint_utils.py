@@ -7,6 +7,14 @@ _RAE_TYPE = "rae_dinov2"
 _CLIP_TYPE = "clip"
 _RAE_RAW_OUTPUT_SIZE = 768
 _NAVIGATION_OUTPUT_SIZE = 512
+_PROJECTION_PARAMETER_SUFFIXES = (
+    "0.weight",
+    "0.bias",
+    "2.weight",
+    "2.bias",
+    "4.weight",
+    "4.bias",
+)
 
 
 def sha256_file(path):
@@ -59,13 +67,44 @@ def _is_rgb_projection_key(key):
     return _key_has_adjacent_parts(key, "img_embeddings", "rgb_projection")
 
 
-def _is_first_rgb_projection_weight(key):
-    return _key_has_adjacent_parts(
-        key,
-        "img_embeddings",
-        "rgb_projection",
-        "0",
-        "weight",
+def _rgb_projection_parameter_groups(state_dict):
+    groups = {}
+    marker = ("img_embeddings", "rgb_projection")
+    expected_suffixes = set(_PROJECTION_PARAMETER_SUFFIXES)
+    for key in state_dict:
+        parts = str(key).split(".")
+        for index in range(len(parts) - 1):
+            if tuple(parts[index:index + 2]) != marker:
+                continue
+            suffix = ".".join(parts[index + 2:])
+            if suffix in expected_suffixes:
+                prefix = ".".join(parts[:index + 2])
+                groups.setdefault(prefix, set()).add(suffix)
+            break
+    return groups
+
+
+def _validate_complete_rgb_projection(state_dict):
+    groups = _rgb_projection_parameter_groups(state_dict)
+    expected_suffixes = set(_PROJECTION_PARAMETER_SUFFIXES)
+    if any(expected_suffixes.issubset(suffixes) for suffixes in groups.values()):
+        return
+
+    missing_keys = []
+    if groups:
+        for prefix, suffixes in sorted(groups.items()):
+            for suffix in _PROJECTION_PARAMETER_SUFFIXES:
+                if suffix not in suffixes:
+                    missing_keys.append(f"{prefix}.{suffix}")
+    else:
+        missing_keys = [
+            f"img_embeddings.rgb_projection.{suffix}"
+            for suffix in _PROJECTION_PARAMETER_SUFFIXES
+        ]
+    raise ValueError(
+        "RAE/DINOv2 checkpoint requires a complete rgb_projection parameter "
+        "set; missing expected semantic keys: "
+        + ", ".join(missing_keys)
     )
 
 
@@ -191,17 +230,18 @@ def validate_rgb_checkpoint_metadata(checkpoint, config):
 
     for field in ("raw_output_size", "output_size"):
         actual_value = metadata.get(field)
+        if isinstance(actual_value, bool) or not isinstance(actual_value, int):
+            raise ValueError(
+                f"RAE/DINOv2 metadata {field} must be a non-boolean "
+                f"integer, got {actual_value!r}"
+            )
         if actual_value != expected[field]:
             raise ValueError(
                 f"RAE/DINOv2 {field} mismatch: expected {expected[field]}, "
                 f"got {actual_value}"
             )
 
-    if not any(_is_first_rgb_projection_weight(key) for key in state_dict):
-        raise ValueError(
-            "RAE/DINOv2 checkpoint is missing "
-            "img_embeddings.rgb_projection.0.weight"
-        )
+    _validate_complete_rgb_projection(state_dict)
     return None
 
 
