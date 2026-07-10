@@ -172,7 +172,15 @@ class ETP(Net):
     def num_recurrent_layers(self):
         return 1
 
-    def forward(self, mode=None, 
+    @property
+    def recurrent_hidden_size(self):
+        return 1
+
+    @property
+    def perception_embedding_size(self):
+        return 1
+
+    def forward(self, mode=None,
                 txt_ids=None, txt_task_encoding=None, txt_masks=None, txt_embeds=None, 
                 waypoint_predictor=None, observations=None, in_train=True,
                 rgb_fts=None, dep_fts=None, loc_fts=None, 

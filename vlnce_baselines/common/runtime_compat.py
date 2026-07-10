@@ -105,6 +105,44 @@ def get_env_class(env_name):
     return baseline_registry.get_env(env_name)
 
 
+def get_active_obs_transforms_compat(config):
+    from habitat_baselines.common.baseline_registry import baseline_registry
+    from habitat_baselines.common.obs_transformers import (
+        get_active_obs_transforms,
+    )
+
+    if hasattr(config, "habitat_baselines"):
+        return get_active_obs_transforms(config)
+
+    active = []
+    obs_config = config.RL.POLICY.OBS_TRANSFORMS
+    enabled = getattr(obs_config, "ENABLED_TRANSFORMS", [])
+    for transform_name in enabled:
+        transform_class = baseline_registry.get_obs_transformer(transform_name)
+        if transform_class is None:
+            raise ValueError(
+                f"Unknown observation transform: {transform_name}"
+            )
+        active.append(transform_class.from_config(config))
+    return active
+
+
+def batch_obs_compat(observations, device=None):
+    import torch
+    from habitat_baselines.utils.common import batch_obs
+
+    batch = batch_obs(observations, device)
+
+    def materialize(tensor):
+        if torch.is_tensor(tensor) and torch.is_inference(tensor):
+            return tensor.clone()
+        return tensor
+
+    if hasattr(batch, "map"):
+        return batch.map(materialize)
+    return {key: materialize(value) for key, value in batch.items()}
+
+
 def make_env_fn(config, env_class):
     from habitat import make_dataset
     from vlnce_baselines.common.environments import _task_config_for_habitat

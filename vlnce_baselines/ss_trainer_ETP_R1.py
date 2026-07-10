@@ -10,6 +10,7 @@ import lmdb
 import msgpack_numpy
 import numpy as np
 import math
+import numbers
 import time
 import torch
 import torch.nn.functional as F
@@ -23,15 +24,18 @@ from habitat_baselines.common.baseline_registry import baseline_registry
 from habitat_baselines.common.obs_transformers import (
     apply_obs_transforms_batch,
     apply_obs_transforms_obs_space,
-    get_active_obs_transforms,
 )
 from habitat_baselines.common.tensorboard_utils import TensorboardWriter
-from habitat_baselines.utils.common import batch_obs
 
 from vlnce_baselines.common.aux_losses import AuxLosses
 from vlnce_baselines.common.base_il_trainer import BaseVLNCETrainer
 from vlnce_baselines.common.env_utils import construct_envs, construct_envs_for_rl, is_slurm_batch_job
-from vlnce_baselines.common.runtime_compat import get_env_class
+from vlnce_baselines.common.runtime_compat import (
+    batch_obs_compat as batch_obs,
+    get_active_obs_transforms_compat as get_active_obs_transforms,
+    get_env_class,
+)
+from vlnce_baselines.common.amp_utils import step_amp_optimizer
 from vlnce_baselines.common.utils import extract_instruction_tokens
 from vlnce_baselines.models.graph_utils import GraphMap, MAX_DIST
 from vlnce_baselines.models.checkpoint_utils import (
@@ -65,6 +69,20 @@ class RLTrainer(BaseVLNCETrainer):
         super().__init__(config)
         self.max_len = int(config.IL.max_traj_len) #  * 0.97 transfered gt path got 0.96 spl
         self.illegal_episodes_count = 0
+
+    def _create_grad_scaler(self):
+        init_scale = self.config.IL.amp_init_scale
+        if (
+            isinstance(init_scale, bool)
+            or not isinstance(init_scale, numbers.Real)
+            or not math.isfinite(init_scale)
+            or init_scale <= 0
+        ):
+            raise ValueError(
+                "IL.amp_init_scale must be a finite positive number, "
+                f"got {init_scale!r}"
+            )
+        return GradScaler(init_scale=float(init_scale))
 
     def _make_dirs(self):
         if self.config.local_rank == 0:
@@ -530,7 +548,7 @@ class RLTrainer(BaseVLNCETrainer):
         log_every  = self.config.IL.log_every
         writer     = TensorboardWriter(self.config.TENSORBOARD_DIR if self.local_rank < 1 else None)
 
-        self.scaler = GradScaler()
+        self.scaler = self._create_grad_scaler()
         logger.info('Traning Starts... GOOD LUCK!')
 
         if self.config.local_rank < 1:
@@ -586,9 +604,11 @@ class RLTrainer(BaseVLNCETrainer):
             with autocast():
                 self.rollout('train', ml_weight, sample_ratio)
             self.scaler.scale(self.loss).backward()
-            self.scaler.step(self.optimizer)
-            self.scheduler.step()
-            self.scaler.update()
+            step_amp_optimizer(
+                self.scaler,
+                self.optimizer,
+                self.scheduler,
+            )
 
             if self.local_rank < 1:
                 pbar.set_postfix({'iter': f'{idx+1}/{interval}'})
@@ -712,12 +732,13 @@ class RLTrainer(BaseVLNCETrainer):
                 aggregated_states[k] = v
         
         split = self.config.TASK_CONFIG.DATASET.SPLIT
-        fname = os.path.join(
-            self.config.RESULTS_DIR,
-            f"stats_ep_ckpt_{checkpoint_index}_{split}_r{self.local_rank}_w{self.world_size}.json",
-        )
-        with open(fname, "w") as f:
-            json.dump(self.stat_eps, f, indent=2)
+        if self.config.EVAL.SAVE_RESULTS:
+            fname = os.path.join(
+                self.config.RESULTS_DIR,
+                f"stats_ep_ckpt_{checkpoint_index}_{split}_r{self.local_rank}_w{self.world_size}.json",
+            )
+            with open(fname, "w") as f:
+                json.dump(self.stat_eps, f, indent=2)
 
         if self.local_rank < 1:
             if self.config.EVAL.SAVE_RESULTS:

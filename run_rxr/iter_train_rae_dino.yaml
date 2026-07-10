@@ -41,6 +41,7 @@ EVAL:
 #       ENABLED_TRANSFORMS: [ResizerPerSensor, CenterCropperPerSensor]
 
 IL:
+  amp_init_scale: 65536.0
   iters: 15000
   log_every: 200
   lr: 1e-5

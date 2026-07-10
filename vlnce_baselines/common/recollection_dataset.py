@@ -7,10 +7,12 @@ import torch
 import tqdm
 from gym import Space
 from habitat.config.default import Config
-from vlnce_baselines.common.runtime_compat import get_env_class
+from vlnce_baselines.common.runtime_compat import (
+    get_active_obs_transforms_compat as get_active_obs_transforms,
+    get_env_class,
+)
 from habitat_baselines.common.obs_transformers import (
     apply_obs_transforms_obs_space,
-    get_active_obs_transforms,
 )
 
 from habitat_extensions.task import ALL_ROLES_MASK, RxRVLNCEDatasetV1

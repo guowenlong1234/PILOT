@@ -23,11 +23,10 @@ from habitat_baselines.common.baseline_registry import baseline_registry
 from habitat_baselines.common.obs_transformers import (
     apply_obs_transforms_batch,
     apply_obs_transforms_obs_space,
-    get_active_obs_transforms,
 )
 from habitat_extensions.measures import Position
 from habitat_baselines.common.tensorboard_utils import TensorboardWriter
-from habitat_baselines.utils.common import batch_obs, generate_video
+from habitat_baselines.utils.common import generate_video
 from habitat_baselines.utils.common import (
     get_checkpoint_id,
     poll_checkpoint_folder,
@@ -40,7 +39,11 @@ from vlnce_baselines.common.env_utils import (
     construct_envs,
     is_slurm_batch_job,
 )
-from vlnce_baselines.common.runtime_compat import get_env_class
+from vlnce_baselines.common.runtime_compat import (
+    batch_obs_compat as batch_obs,
+    get_active_obs_transforms_compat as get_active_obs_transforms,
+    get_env_class,
+)
 from vlnce_baselines.common.utils import *
 
 from habitat_extensions.measures import NDTW
@@ -66,6 +69,12 @@ class BaseVLNCETrainer(BaseILTrainer):
         self.obs_transforms = []
         self.start_epoch = 0
         self.step_id = 0
+
+    def _make_ckpt_dir(self):
+        os.makedirs(self.config.CHECKPOINT_FOLDER, exist_ok=True)
+
+    def _make_results_dir(self):
+        os.makedirs(self.config.RESULTS_DIR, exist_ok=True)
 
     def _initialize_policy(
         self,
@@ -664,12 +673,13 @@ class BaseVLNCETrainer(BaseILTrainer):
                 aggregated_stats[k] = v
 
         split = config.TASK_CONFIG.DATASET.SPLIT
-        fname = os.path.join(
-            config.RESULTS_DIR,
-            f"stats_ep_ckpt_{checkpoint_index}_{split}_r{self.local_rank}_w{self.world_size}.json",
-        )
-        with open(fname, "w") as f:
-            json.dump(stats_episodes, f, indent=4)
+        if config.EVAL.SAVE_RESULTS:
+            fname = os.path.join(
+                config.RESULTS_DIR,
+                f"stats_ep_ckpt_{checkpoint_index}_{split}_r{self.local_rank}_w{self.world_size}.json",
+            )
+            with open(fname, "w") as f:
+                json.dump(stats_episodes, f, indent=4)
 
         if self.local_rank < 1:
             if config.EVAL.SAVE_RESULTS:
@@ -728,7 +738,8 @@ class BaseVLNCETrainer(BaseILTrainer):
         split = self.config.TASK_CONFIG.DATASET.SPLIT
 
         if 'rxr' in self.config.BASE_TASK_CONFIG_PATH:
-            if "{role}" in self.config.IL.RECOLLECT_TRAINER.gt_file:
+            gt_path = self.config.TASK_CONFIG.TASK.NDTW.GT_PATH
+            if "{role}" in gt_path:
                 gt_data = {}
                 for role in RxRVLNCEDatasetV1.annotation_roles:
                     if (
@@ -738,7 +749,7 @@ class BaseVLNCETrainer(BaseILTrainer):
                         continue
 
                     with gzip.open(
-                        self.config.IL.RECOLLECT_TRAINER.gt_file.format(
+                        gt_path.format(
                             split=split, role=role
                         ),
                         "rt",
@@ -746,8 +757,8 @@ class BaseVLNCETrainer(BaseILTrainer):
                         gt_data.update(json.load(f))
             else:
                 with gzip.open(
-                    self.config.IL.RECOLLECT_TRAINER.gt_path.format(
-                        split=split)
+                    gt_path.format(split=split),
+                    "rt",
                 ) as f:
                     gt_data = json.load(f)
         else:

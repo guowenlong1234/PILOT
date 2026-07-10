@@ -64,6 +64,20 @@ def _lowercase_fields(source, mapping):
     return converted
 
 
+def _sensor_vector3(value, sensor_name, field_name):
+    vector = np.asarray(value, dtype=np.float32)
+    if vector.shape != (3,):
+        raise ValueError(
+            f"{sensor_name} {field_name} must contain exactly 3 values, "
+            f"got shape {vector.shape}"
+        )
+    if not np.isfinite(vector).all():
+        raise ValueError(
+            f"{sensor_name} {field_name} must contain only finite values"
+        )
+    return vector
+
+
 def _task_config_for_habitat(config):
     legacy = _to_omegaconf_compatible(config.TASK_CONFIG)
     environment_legacy = legacy.get("ENVIRONMENT", {})
@@ -181,13 +195,27 @@ def _task_config_for_habitat(config):
     for sensor_name in agent_legacy.get("SENSORS", []):
         sensor_legacy = simulator_legacy.get(sensor_name, {})
         sensor = _lowercase_fields(sensor_legacy, sensor_field_mapping)
-        sensor.setdefault("type", sensor_defaults.get(sensor_name, sensor_name))
+        default_sensor_type = sensor_defaults.get(sensor_name)
+        if default_sensor_type is None:
+            for prefix, sensor_type in sensor_defaults.items():
+                if sensor_name.startswith(prefix.removesuffix("_SENSOR")):
+                    default_sensor_type = sensor_type
+                    break
+        sensor.setdefault("type", default_sensor_type or sensor_name)
         sensor_uuid = sensor_name.lower()
         if sensor_uuid.endswith("_sensor"):
             sensor_uuid = sensor_uuid[: -len("_sensor")]
         sensor.setdefault("uuid", sensor_uuid)
         sensor.setdefault("position", [0.0, 1.25, 0.0])
         sensor.setdefault("orientation", [0.0, 0.0, 0.0])
+        sensor.pop("POSITION", None)
+        sensor.pop("ORIENTATION", None)
+        sensor["position"] = _sensor_vector3(
+            sensor["position"], sensor_name, "position"
+        )
+        sensor["orientation"] = _sensor_vector3(
+            sensor["orientation"], sensor_name, "orientation"
+        )
         if "DEPTH" in sensor_name:
             sensor.setdefault("min_depth", 0.0)
             sensor.setdefault("max_depth", 10.0)
@@ -332,7 +360,10 @@ def _task_config_for_habitat(config):
             "dataset": dataset,
         }
     )
-    task_config = _LegacyRootDictConfig(modern)
+    task_config = _LegacyRootDictConfig(
+        modern,
+        flags={"allow_objects": True},
+    )
     OmegaConf.set_readonly(task_config, True)
     return task_config
 
@@ -373,6 +404,10 @@ class VLNCEDaggerEnv(habitat.RLEnv):
         self.video_dir = config.VIDEO_DIR
         self.video_frames = []
         self.plan_frames = []
+
+    @property
+    def original_action_space(self):
+        return self.action_space
 
     def get_reward_range(self) -> Tuple[float, float]:
         # We don't use a reward for DAgger, but the baseline_registry requires
@@ -776,7 +811,18 @@ class VLNCEDaggerEnv(habitat.RLEnv):
         frame = cv2.copyMakeBorder(frame, 6,6,5,5, cv2.BORDER_CONSTANT, value=(255,255,255))
         self.plan_frames.append(frame)
 
-    def step(self, action, vis_info, *args, **kwargs):
+    @staticmethod
+    def _normalize_step_payload(action, vis_info):
+        if (
+            vis_info is None
+            and isinstance(action, dict)
+            and "action" in action
+        ):
+            return action["action"], action.get("vis_info")
+        return action, vis_info
+
+    def step(self, action, vis_info=None, *args, **kwargs):
+        action, vis_info = self._normalize_step_payload(action, vis_info)
         act = action['act']
 
         if act == 4: # high to low

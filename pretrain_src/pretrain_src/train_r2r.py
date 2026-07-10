@@ -39,6 +39,7 @@ from data.tasks import (
     SapDataset, sap_collate)
 
 from model.pretrain_cmt import GlocalTextPathCMTPreTraining
+from scripts.prepare_rae_smoke_pretrain import snapshot_initial_projection
 import numpy as np
 
 def create_dataloaders(
@@ -181,6 +182,11 @@ def main(opts):
     model.train()
     set_dropout(model, opts.dropout) # 0.1
     model = wrap_model(model, device, opts.local_rank)
+    initial_projection_path = os.environ.get(
+        "ETPR1_RAE_SMOKE_INITIAL_PROJECTION"
+    )
+    if default_gpu and initial_projection_path:
+        snapshot_initial_projection(model, initial_projection_path)
     del checkpoint
     
     # load data training set

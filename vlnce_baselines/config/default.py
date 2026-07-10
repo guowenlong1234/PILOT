@@ -68,6 +68,7 @@ _C.GRPO.train_all = False
 # -----------------------------------------------------------------------------
 _C.IL = CN()
 _C.IL.lr = 2.5e-4
+_C.IL.amp_init_scale = 65536.0
 _C.IL.batch_size = 5
 _C.IL.epochs = 4
 _C.IL.use_iw = True

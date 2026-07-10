@@ -1,20 +1,23 @@
 import abc
 from typing import Any
 
+from gym import spaces
 from habitat_baselines.rl.ppo.policy import Policy
 from habitat_baselines.utils.common import (
     CategoricalNet,
     CustomFixedCategorical,
 )
 from torch.distributions import Categorical
+from torch import nn
 
 
-class ILPolicy(Policy, metaclass=abc.ABCMeta):
+class ILPolicy(nn.Module, Policy, metaclass=abc.ABCMeta):
     def __init__(self, net, dim_actions):
         r"""Defines an imitation learning policy as having functions act() and
         build_distribution().
         """
-        super(Policy, self).__init__()
+        nn.Module.__init__(self)
+        Policy.__init__(self, spaces.Discrete(dim_actions))
         self.net = net
         self.dim_actions = dim_actions
 

@@ -1,6 +1,36 @@
 import torch
 
 
+_RGB_PROJECTION_PARAMETER_NAMES = (
+    '0.weight',
+    '0.bias',
+    '2.weight',
+    '2.bias',
+    '4.weight',
+    '4.bias',
+)
+
+
+def _validate_pretrain_rgb_projection(state_dict, rgb_encoder_type):
+    prefix = 'bert.img_embeddings.rgb_projection.'
+    expected = {prefix + name for name in _RGB_PROJECTION_PARAMETER_NAMES}
+    present = {key for key in state_dict if key.startswith(prefix)}
+
+    if rgb_encoder_type == 'rae_dinov2':
+        missing = sorted(expected - present)
+        if missing:
+            raise ValueError(
+                'RAE/DINOv2 pretrained checkpoint requires a complete '
+                'rgb_projection; missing required keys: '
+                + ', '.join(missing)
+            )
+    elif present:
+        raise ValueError(
+            'CLIP cannot load a RAE/DINOv2 pretrained checkpoint containing '
+            + ', '.join(sorted(present))
+        )
+
+
 def get_tokenizer(args):
     from transformers import AutoTokenizer
     if args.dataset == 'rxr' or args.tokenizer == 'xlm':
@@ -36,18 +66,7 @@ def get_vlnbert_models(config=None, dropout_rate=0.1):
             new_ckpt_weights[normalized_key] = value
 
     rgb_encoder_type = str(config.RGB_ENCODER.type).lower()
-    projection_key = 'bert.img_embeddings.rgb_projection.0.weight'
-    has_rae_projection = projection_key in new_ckpt_weights
-    if rgb_encoder_type == 'rae_dinov2' and not has_rae_projection:
-        raise ValueError(
-            'RAE/DINOv2 pretrained checkpoint is missing required key '
-            f'{projection_key}'
-        )
-    if rgb_encoder_type == 'clip' and has_rae_projection:
-        raise ValueError(
-            'CLIP cannot load a RAE/DINOv2 pretrained checkpoint containing '
-            f'{projection_key}'
-        )
+    _validate_pretrain_rgb_projection(new_ckpt_weights, rgb_encoder_type)
     
     cfg_name = 'bert_config/xlm-roberta-base'
     vis_config = PretrainedConfig.from_pretrained(cfg_name)

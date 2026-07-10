@@ -75,6 +75,14 @@ def _init_config(encoder_type="rae_dinov2", pretrained_path="pretrain.pt"):
     )
 
 
+def _module_projection_checkpoint():
+    projection = PretrainImageEmbeddings(_image_config()).rgb_projection
+    return {
+        f"module.bert.img_embeddings.rgb_projection.{name}": value
+        for name, value in projection.state_dict().items()
+    }
+
+
 def _flatten(value, prefix=()):
     if isinstance(value, dict):
         flattened = {}
@@ -382,11 +390,7 @@ def test_vlnbert_receives_rgb_config_and_normalizes_module_checkpoint(
     monkeypatch.setattr(
         init_module.torch,
         "load",
-        lambda *_args, **_kwargs: {
-            "module.bert.img_embeddings.rgb_projection.0.weight": torch.ones(
-                768, 768
-            )
-        },
+        lambda *_args, **_kwargs: _module_projection_checkpoint(),
     )
     monkeypatch.setattr(
         "vlnce_baselines.models.etp.ETP_R1_vilmodel_cmt.GlocalTextPathNavCMT",
@@ -410,13 +414,12 @@ def test_module_checkpoint_keys_are_canonicalized_once_and_load_real_model(
     projection_weight = torch.full((768, 768), 0.125)
     sap_weight = torch.full((1, 1536), -0.25)
     sap_bias = torch.full((1,), -0.75)
-    checkpoint = {
-        "module.bert.img_embeddings.rgb_projection.0.weight": (
-            projection_weight
-        ),
+    checkpoint = _module_projection_checkpoint()
+    checkpoint.update({
+        "module.bert.img_embeddings.rgb_projection.0.weight": projection_weight,
         "module.bert.global_sap_head.net.4.weight": sap_weight,
         "module.global_sap_head.net.4.bias": sap_bias,
-    }
+    })
     captured = {}
 
     class InspectingModel:
@@ -443,7 +446,9 @@ def test_module_checkpoint_keys_are_canonicalized_once_and_load_real_model(
     model = init_module.get_vlnbert_models(_init_config())
 
     expected_keys = {
-        "bert.img_embeddings.rgb_projection.0.weight",
+        key.removeprefix("module.")
+        for key in _module_projection_checkpoint()
+    } | {
         "bert.global_sap_head.net.4.weight",
         "bert.global_sap_head.net.4.bias",
     }

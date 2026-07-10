@@ -175,7 +175,7 @@ class RxRInstructionSensor(Sensor):
         # self.features_path = config.features_path
         # super().__init__(config=config)
         self.uuid = "instruction"
-        self.observation_space = spaces.Discrete(0)
+        self.observation_space = spaces.Discrete(1)
 
     def _get_uuid(self, *args: Any, **kwargs: Any) -> str:
         return self.cls_uuid

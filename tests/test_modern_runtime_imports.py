@@ -12,6 +12,21 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _normalize_numpy_values(value):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {
+            key: _normalize_numpy_values(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_normalize_numpy_values(item) for item in value]
+    return value
+
+
 def test_removed_numpy_bool_alias_is_not_used():
     source_paths = (
         ROOT / "vlnce_baselines" / "ss_trainer_ETP_R1.py",
@@ -125,11 +140,16 @@ def test_real_task_config_converts_to_modern_habitat_shape(
 
     serialized_config = pickle.loads(pickle.dumps(task_config))
     copied_config = copy.deepcopy(task_config)
-    expected_fields = OmegaConf.to_container(task_config, resolve=True)
+    expected_fields = _normalize_numpy_values(
+        OmegaConf.to_container(task_config, resolve=True)
+    )
 
     for restored_config in (serialized_config, copied_config):
         assert OmegaConf.is_config(restored_config)
-        assert OmegaConf.to_container(restored_config, resolve=True) == expected_fields
+        restored_fields = _normalize_numpy_values(
+            OmegaConf.to_container(restored_config, resolve=True)
+        )
+        assert restored_fields == expected_fields
         assert OmegaConf.is_readonly(restored_config)
         assert restored_config.is_frozen()
 

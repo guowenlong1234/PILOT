@@ -23,15 +23,18 @@ from habitat_baselines.common.baseline_registry import baseline_registry
 from habitat_baselines.common.obs_transformers import (
     apply_obs_transforms_batch,
     apply_obs_transforms_obs_space,
-    get_active_obs_transforms,
 )
 from habitat_baselines.common.tensorboard_utils import TensorboardWriter
-from habitat_baselines.utils.common import batch_obs
 
 from vlnce_baselines.common.aux_losses import AuxLosses
 from vlnce_baselines.common.base_il_trainer import BaseVLNCETrainer
 from vlnce_baselines.common.env_utils import construct_envs, construct_envs_for_rl, is_slurm_batch_job
-from vlnce_baselines.common.runtime_compat import get_env_class
+from vlnce_baselines.common.runtime_compat import (
+    batch_obs_compat as batch_obs,
+    get_active_obs_transforms_compat as get_active_obs_transforms,
+    get_env_class,
+)
+from vlnce_baselines.common.amp_utils import step_amp_optimizer
 from vlnce_baselines.common.utils import extract_instruction_tokens
 from vlnce_baselines.models.graph_utils import GraphMap, MAX_DIST
 from vlnce_baselines.models.checkpoint_utils import (
@@ -684,6 +687,7 @@ class RLTrainer(BaseVLNCETrainer):
 
         total_processed_actions_for_ratio = 0
         total_unclipped_actions = 0
+        optimizer_stepped = False
 
         # --- 2. Multi-epoch training loop over the same data buffer ---
         for epoch in range(self.grpo_update_epochs):
@@ -806,8 +810,11 @@ class RLTrainer(BaseVLNCETrainer):
                     grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, self.max_grad_norm)
                     self.logs['grad_norm'].append(grad_norm.item())
                 
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+                epoch_optimizer_stepped = step_amp_optimizer(
+                    self.scaler,
+                    self.optimizer,
+                )
+                optimizer_stepped = epoch_optimizer_stepped or optimizer_stepped
 
                 total_policy_loss_across_epochs += (accumulated_policy_loss_this_epoch / num_samples_processed_this_epoch)
                 if self.need_ref_policy:
@@ -839,7 +846,8 @@ class RLTrainer(BaseVLNCETrainer):
 
         self.data_buffer.clear() 
         self.optimizer.zero_grad()
-        self.scheduler.step()
+        if optimizer_stepped:
+            self.scheduler.step()
     
     def get_pos_ori(self):
         pos_ori = self.envs.call(['get_pos_ori']*self.envs.num_envs)
