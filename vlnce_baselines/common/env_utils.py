@@ -6,7 +6,7 @@ from typing import List, Optional, Type, Union
 import habitat
 from habitat import logger
 from habitat import Config, Env, RLEnv, VectorEnv, make_dataset
-from habitat_baselines.utils.env_utils import make_env_fn
+from vlnce_baselines.common.runtime_compat import make_env_fn
 
 random.seed(0)
 

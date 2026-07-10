@@ -4,7 +4,7 @@ import numpy as np
 import vlnce_baselines.waypoint_pred.utils as utils
 
 from .transformer.waypoint_bert import WaypointBert
-from pytorch_transformers import BertConfig
+from transformers import BertConfig
 
 class BinaryDistPredictor_TRM(nn.Module):
     def __init__(self, hidden_dim=768, n_classes=12, device=None):

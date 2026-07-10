@@ -27,12 +27,12 @@ if TYPE_CHECKING:
 import habitat_sim
 
 from habitat_sim.simulator import MutableMapping, MutableMapping_T
+from habitat.config import DictConfig as Config
 from habitat.sims.habitat_simulator.habitat_simulator import HabitatSim
 from habitat.core.dataset import Episode
 from habitat.core.registry import registry
 from habitat.core.simulator import (
     AgentState,
-    Config,
     DepthSensor,
     Observations,
     RGBSensor,

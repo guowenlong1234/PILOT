@@ -1,41 +1,60 @@
 from typing import List, Optional, Union
 
-from habitat.config.default import Config as CN
-from habitat.config.default import get_config
+from habitat.config.default import CONFIG_FILE_SEPARATOR
+from yacs.config import CfgNode as CN
 
-_C = get_config()
-_C.defrost()
+
+def _config_node() -> CN:
+    return CN(new_allowed=True)
+
+
+_C = _config_node()
+_C.SEED = 100
+_C.ENVIRONMENT = _config_node()
+_C.ENVIRONMENT.MAX_EPISODE_STEPS = 1000
+_C.ENVIRONMENT.ITERATOR_OPTIONS = _config_node()
+_C.ENVIRONMENT.ITERATOR_OPTIONS.SHUFFLE = True
+_C.ENVIRONMENT.ITERATOR_OPTIONS.MAX_SCENE_REPEAT_STEPS = 10000
+_C.TASK = _config_node()
+_C.TASK.ACTIONS = _config_node()
+_C.SIMULATOR = _config_node()
+_C.SIMULATOR.AGENT_0 = _config_node()
+_C.SIMULATOR.AGENT_0.SENSORS = []
+_C.SIMULATOR.HABITAT_SIM_V0 = _config_node()
+_C.SIMULATOR.HABITAT_SIM_V0.GPU_DEVICE_ID = 0
+_C.DATASET = _config_node()
+_C.DATASET.CONTENT_SCENES = ["*"]
 
 # ----------------------------------------------------------------------------
 # CUSTOM ACTION: HIGHTOLOWINFERENCE ACTION
 # ----------------------------------------------------------------------------
-_C.TASK.ACTIONS.HIGHTOLOWINFERENCE = CN()
+_C.TASK.ACTIONS.HIGHTOLOWINFERENCE = _config_node()
 _C.TASK.ACTIONS.HIGHTOLOWINFERENCE.TYPE = 'MoveHighToLowActionInference'
 # ----------------------------------------------------------------------------
 # CUSTOM ACTION: HIGHTOLOWEVAL ACTION
 # ----------------------------------------------------------------------------
-_C.TASK.ACTIONS.HIGHTOLOWEVAL = CN()
+_C.TASK.ACTIONS.HIGHTOLOWEVAL = _config_node()
 _C.TASK.ACTIONS.HIGHTOLOWEVAL.TYPE = 'MoveHighToLowActionEval'
 # ----------------------------------------------------------------------------
 # CUSTOM ACTION: HIGHTOLOW ACTION
 # ----------------------------------------------------------------------------
-_C.TASK.ACTIONS.HIGHTOLOW = CN()
+_C.TASK.ACTIONS.HIGHTOLOW = _config_node()
 _C.TASK.ACTIONS.HIGHTOLOW.TYPE = 'MoveHighToLowAction'
 # ----------------------------------------------------------------------------
 # GPS SENSOR
 # ----------------------------------------------------------------------------
-_C.TASK.GLOBAL_GPS_SENSOR = CN()
+_C.TASK.GLOBAL_GPS_SENSOR = _config_node()
 _C.TASK.GLOBAL_GPS_SENSOR.TYPE = "GlobalGPSSensor"
 _C.TASK.GLOBAL_GPS_SENSOR.DIMENSIONALITY = 3
 # ----------------------------------------------------------------------------
 # OREINTATION SENSOR
 # ----------------------------------------------------------------------------
-_C.TASK.OREINTATION_SENSOR = CN()
+_C.TASK.OREINTATION_SENSOR = _config_node()
 _C.TASK.OREINTATION_SENSOR.TYPE = "OrienSensor"
 # ----------------------------------------------------------------------------
 # # RXR INSTRUCTION SENSOR
 # ----------------------------------------------------------------------------
-_C.TASK.RXR_INSTRUCTION_SENSOR = CN()
+_C.TASK.RXR_INSTRUCTION_SENSOR = _config_node()
 _C.TASK.RXR_INSTRUCTION_SENSOR.TYPE = "RxRInstructionSensor"
 _C.TASK.RXR_INSTRUCTION_SENSOR.features_path = "data/datasets/RxR_VLNCE_v0/text_features/rxr_{split}/{id:06}_{lang}_text_features.npz"
 _C.TASK.RXR_INSTRUCTION_SENSOR.max_text_len = 512
@@ -43,7 +62,7 @@ _C.TASK.INSTRUCTION_SENSOR_UUID = "rxr_instruction"
 # ----------------------------------------------------------------------------
 # SHORTEST PATH SENSOR (previously: VLN_ORACLE_ACTION_SENSOR)
 # ----------------------------------------------------------------------------
-_C.TASK.SHORTEST_PATH_SENSOR = CN()
+_C.TASK.SHORTEST_PATH_SENSOR = _config_node()
 _C.TASK.SHORTEST_PATH_SENSOR.TYPE = "ShortestPathSensor"
 # all goals can be navigated to within 0.5m.
 _C.TASK.SHORTEST_PATH_SENSOR.GOAL_RADIUS = 0.5
@@ -53,12 +72,12 @@ _C.TASK.SHORTEST_PATH_SENSOR.USE_ORIGINAL_FOLLOWER = False
 # ----------------------------------------------------------------------------
 # VLN ORACLE PROGRESS SENSOR
 # ----------------------------------------------------------------------------
-_C.TASK.VLN_ORACLE_PROGRESS_SENSOR = CN()
+_C.TASK.VLN_ORACLE_PROGRESS_SENSOR = _config_node()
 _C.TASK.VLN_ORACLE_PROGRESS_SENSOR.TYPE = "VLNOracleProgressSensor"
 # ----------------------------------------------------------------------------
 # NDTW MEASUREMENT
 # ----------------------------------------------------------------------------
-_C.TASK.NDTW = CN()
+_C.TASK.NDTW = _config_node()
 _C.TASK.NDTW.TYPE = "NDTW"
 _C.TASK.NDTW.SPLIT = "val_seen"
 _C.TASK.NDTW.FDTW = True  # False: DTW
@@ -69,49 +88,49 @@ _C.TASK.NDTW.SUCCESS_DISTANCE = 3.0
 # ----------------------------------------------------------------------------
 # SDTW MEASUREMENT
 # ----------------------------------------------------------------------------
-_C.TASK.SDTW = CN()
+_C.TASK.SDTW = _config_node()
 _C.TASK.SDTW.TYPE = "SDTW"
 # ----------------------------------------------------------------------------
 # PATH_LENGTH MEASUREMENT
 # ----------------------------------------------------------------------------
-_C.TASK.PATH_LENGTH = CN()
+_C.TASK.PATH_LENGTH = _config_node()
 _C.TASK.PATH_LENGTH.TYPE = "PathLength"
 # ----------------------------------------------------------------------------
 # ORACLE_NAVIGATION_ERROR MEASUREMENT
 # ----------------------------------------------------------------------------
-_C.TASK.ORACLE_NAVIGATION_ERROR = CN()
+_C.TASK.ORACLE_NAVIGATION_ERROR = _config_node()
 _C.TASK.ORACLE_NAVIGATION_ERROR.TYPE = "OracleNavigationError"
 # ----------------------------------------------------------------------------
 # ORACLE_SUCCESS MEASUREMENT
 # ----------------------------------------------------------------------------
-_C.TASK.ORACLE_SUCCESS = CN()
+_C.TASK.ORACLE_SUCCESS = _config_node()
 _C.TASK.ORACLE_SUCCESS.TYPE = "OracleSuccess"
 _C.TASK.ORACLE_SUCCESS.SUCCESS_DISTANCE = 3.0
 # ----------------------------------------------------------------------------
 # ORACLE_SPL MEASUREMENT
 # ----------------------------------------------------------------------------
-_C.TASK.ORACLE_SPL = CN()
+_C.TASK.ORACLE_SPL = _config_node()
 _C.TASK.ORACLE_SPL.TYPE = "OracleSPL"
 # ----------------------------------------------------------------------------
 # STEPS_TAKEN MEASUREMENT
 # ----------------------------------------------------------------------------
-_C.TASK.STEPS_TAKEN = CN()
+_C.TASK.STEPS_TAKEN = _config_node()
 _C.TASK.STEPS_TAKEN.TYPE = "StepsTaken"
 # ----------------------------------------------------------------------------
 # POSITION MEASUREMENT For faster eval
 # ----------------------------------------------------------------------------
-_C.TASK.POSITION = CN()
+_C.TASK.POSITION = _config_node()
 _C.TASK.POSITION.TYPE = 'Position'
 # ----------------------------------------------------------------------------
-_C.TASK.POSITION_TRAIN = CN()
+_C.TASK.POSITION_TRAIN = _config_node()
 _C.TASK.POSITION_TRAIN.TYPE = 'PositionTrain'
 # -----------------------------------------------------------------------------
-_C.TASK.POSITION_INFER = CN()
+_C.TASK.POSITION_INFER = _config_node()
 _C.TASK.POSITION_INFER.TYPE = 'PositionInfer'
 # -----------------------------------------------------------------------------
 # TOP_DOWN_MAP_VLNCE MEASUREMENT
 # -----------------------------------------------------------------------------
-_C.TASK.TOP_DOWN_MAP_VLNCE = CN()
+_C.TASK.TOP_DOWN_MAP_VLNCE = _config_node()
 _C.TASK.TOP_DOWN_MAP_VLNCE.TYPE = "TopDownMapVLNCE"
 _C.TASK.TOP_DOWN_MAP_VLNCE.MAX_EPISODE_STEPS = _C.ENVIRONMENT.MAX_EPISODE_STEPS
 _C.TASK.TOP_DOWN_MAP_VLNCE.MAP_RESOLUTION = 512
@@ -122,7 +141,7 @@ _C.TASK.TOP_DOWN_MAP_VLNCE.DRAW_REFERENCE_PATH = False
 _C.TASK.TOP_DOWN_MAP_VLNCE.DRAW_FIXED_WAYPOINTS = False
 _C.TASK.TOP_DOWN_MAP_VLNCE.DRAW_MP3D_AGENT_PATH = False
 _C.TASK.TOP_DOWN_MAP_VLNCE.GRAPHS_FILE = "data/connectivity_graphs.pkl"
-_C.TASK.TOP_DOWN_MAP_VLNCE.FOG_OF_WAR = CN()
+_C.TASK.TOP_DOWN_MAP_VLNCE.FOG_OF_WAR = _config_node()
 _C.TASK.TOP_DOWN_MAP_VLNCE.FOG_OF_WAR.DRAW = False
 _C.TASK.TOP_DOWN_MAP_VLNCE.FOG_OF_WAR.FOV = 79
 _C.TASK.TOP_DOWN_MAP_VLNCE.FOG_OF_WAR.VISIBILITY_DIST = 5.0
@@ -154,7 +173,10 @@ def get_extended_config(
 
     if config_paths:
         if isinstance(config_paths, str):
-            config_paths = [config_paths]
+            if CONFIG_FILE_SEPARATOR in config_paths:
+                config_paths = config_paths.split(CONFIG_FILE_SEPARATOR)
+            else:
+                config_paths = [config_paths]
 
         for config_path in config_paths:
             config.merge_from_file(config_path)

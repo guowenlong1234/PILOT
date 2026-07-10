@@ -88,7 +88,7 @@ README 要求准备 Matterport3D 数据，目标结构是 `data/scene_datasets/m
 
 ## Tests And Verification
 
-当前仓库未发现专门测试入口。下面两条命令是 2026-06-08 对本机旧 CLIP 环境做过的历史验证记录，不是新 RAE/DINOv2 方案的测试入口：
+现代测评运行时的隔离检查位于 `tests/test_runtime_contract.py`、`tests/test_runtime_behavior.py` 和 `tests/test_modern_runtime_imports.py`。必须在测评机的专用容器与专用环境中通过 `scripts/etpr1_rae_runtime_exec.sh` 运行。本机不运行这些测试。下面两条命令是 2026-06-08 对本机旧 CLIP 环境做过的历史验证记录，不是新 RAE/DINOv2 方案的测试入口：
 
 ```bash
 conda run -n etpnav python -c "import habitat_sim, habitat, habitat_baselines; print(habitat.__version__, habitat_sim.__version__)"
@@ -113,7 +113,7 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 - 默认旧配置里还有 `habitat_extensions/config/vlnce_task.yaml` 这类历史路径，但 README 的实际脚本使用 `run_r2r/iter_train.yaml` 和 `run_rxr/iter_train.yaml`，这两个路径已验证可解析。
 - 联合预训练配置将 `max_txt_len` 设为 250，`dataset.py` 会截断更长的指令。现有数据中 RxR-Marky 有 38,456 条、RxR train 有 3,097 条超过 250 个词元；这是训练配置造成的截断，不是数据文件缺失。
 - 5 类数据的训练就绪 JSONL 都完整，但转换脚本引用的部分原始源文件和 Gemini 标注中间文件未按原路径保存在当前仓库中。因此可以直接运行联合预训练，但若要从原始指令和 Gemini API 输出开始重新生成全部 JSONL，还需要另行补齐源数据。
-- 本机 `etpnav` 环境是 Python 3.7、PyTorch 1.9.1、Transformers 4.12.5，不包含 RAE-NWM 所用的 `Dinov2WithRegistersModel`，因此只能参考旧 CLIP 链路。已选方案是在测评机新建独立容器和独立 `etpr1_rae` 环境，并为 ETP-R1 建立自有 Habitat 依赖目录；这些资源目前尚未创建，必须等实施计划获批后再搭建。
+- 本机 `etpnav` 环境是 Python 3.7、PyTorch 1.9.1、Transformers 4.12.5，不包含 RAE-NWM 所用的 `Dinov2WithRegistersModel`，因此只能参考旧 CLIP 链路。测评机现已建立独立容器 `gwl-etpr1-rae`、独立 `etpr1_rae` 环境和 ETP-R1 自有 Habitat 0.3.3 依赖目录。现代导入链还需要仓库原环境固定的 `boto3==1.20.31`；它只安装在 `etpr1_rae` 中。
 - 测评机只有一张 RTX 4090。现有 ETPNav 任务占用 GPU 时，不得并行启动全量特征生成、预训练、SFT、GRPO 或完整评测，也不得擅自中断 ETPNav。
 
 ## Last Reviewed
@@ -133,3 +133,5 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 2026-07-10，为把 RAE/DINOv2 的全部运行工作迁移到测评机而复查。只读核验了 `ssh 4090` 对应主机的 GPU、磁盘、Docker 容器、远端 `raenwm` 包版本、`etpnav-local-deps.pth` 和 RAE-NWM 权重位置；确定使用独立容器 `gwl-etpr1-rae`、独立环境 `etpr1_rae` 和 ETP-R1 自有 Habitat 依赖目录。本轮只更新约定与设计，没有创建远端环境或运行实验。用户随后明确授权停止当时正在运行的一个 ETPNav 评测任务；已向其 `torchrun` 主进程发送正常终止信号，任务进程树退出、GPU 释放，`gwl-etpnav` 容器未停止。该授权只适用于这个具体任务，后续仍默认禁止停止 ETPNav 进程。
 
 2026-07-10，在设计获批后编写 RAE/DINOv2 实施计划。计划位于 `docs/superpowers/plans/2026-07-10-rae-dinov2-visual-encoder.md`，依次覆盖测评机隔离环境、现代 Habitat 兼容、三层投影、冻结编码器、离线预训练、在线 SFT/GRPO、checkpoint 过滤、全量 HDF5、CLIP 回归和最终冒烟。本阶段只形成计划，尚未创建 `gwl-etpr1-rae`、`etpr1_rae` 或开始模型实现。
+
+2026-07-10，为 Task2 现代运行兼容复查。检查了 Python 3.11.15、NumPy 1.26.4、Habitat/Habitat-Sim/Habitat-Baselines 0.3.3、Transformers 4.49.0 的导入链，补齐旧配置与入口别名，并确认 `run.py`、两个 R1 trainer、`habitat_extensions.task` 和 trainer 注册可用。测评机最终运行 Task1+Task2 共 25 项测试通过，`python run.py --help` 退出码为 0。

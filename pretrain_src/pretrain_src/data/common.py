@@ -34,7 +34,7 @@ def gen_seq_masks(seq_lens, max_len=None):
     if max_len is None:
         max_len = max(seq_lens)
     if max_len == 0:
-        return np.zeros((len(seq_lens), 0), dtype=np.bool)
+        return np.zeros((len(seq_lens), 0), dtype=np.bool_)
     batch_size = len(seq_lens)
     masks = np.arange(max_len).reshape(-1, max_len).repeat(batch_size, 0)
     masks = masks < seq_lens.reshape(-1, 1)

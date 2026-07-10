@@ -2,7 +2,6 @@ import gc
 import os
 import sys
 import random
-import warnings
 from collections import defaultdict
 from typing import Dict, List
 import jsonlines
@@ -21,7 +20,6 @@ import tqdm
 from gym import Space
 from habitat import Config, logger
 from habitat_baselines.common.baseline_registry import baseline_registry
-from habitat_baselines.common.environments import get_env_class
 from habitat_baselines.common.obs_transformers import (
     apply_obs_transforms_batch,
     apply_obs_transforms_obs_space,
@@ -33,6 +31,7 @@ from habitat_baselines.utils.common import batch_obs
 from vlnce_baselines.common.aux_losses import AuxLosses
 from vlnce_baselines.common.base_il_trainer import BaseVLNCETrainer
 from vlnce_baselines.common.env_utils import construct_envs, construct_envs_for_rl, is_slurm_batch_job
+from vlnce_baselines.common.runtime_compat import get_env_class
 from vlnce_baselines.common.utils import extract_instruction_tokens
 from vlnce_baselines.models.graph_utils import GraphMap, MAX_DIST
 from vlnce_baselines.utils import reduce_loss
@@ -44,10 +43,6 @@ from .utils import (
 from vlnce_baselines.common.utils import dis_to_con, gather_list_and_concat
 from habitat_extensions.measures import NDTW, StepsTaken
 from fastdtw import fastdtw
-
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", category=FutureWarning)
-    import tensorflow as tf  # noqa: F401
 
 import torch.distributed as distr
 import gzip
@@ -438,7 +433,7 @@ class RLTrainer(BaseVLNCETrainer):
         
         for i in range(self.envs.num_envs):
             rgb_fts, dep_fts, loc_fts , nav_types = [], [], [], []
-            cand_idxes = np.zeros(12, dtype=np.bool)
+            cand_idxes = np.zeros(12, dtype=np.bool_)
             cand_idxes[obs['cand_img_idxes'][i]] = True
 
             rgb_fts.append(obs['cand_rgb'][i])

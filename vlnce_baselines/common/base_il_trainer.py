@@ -3,7 +3,6 @@ import jsonlines
 import os
 import sys
 import time
-import warnings
 from collections import defaultdict
 from typing import Dict, List
 
@@ -19,10 +18,8 @@ from copy import deepcopy
 import tqdm
 from gym import Space
 from habitat import Config, logger
-from habitat.utils.visualizations.utils import append_text_to_image
 from habitat_baselines.common.base_il_trainer import BaseILTrainer
 from habitat_baselines.common.baseline_registry import baseline_registry
-from habitat_baselines.common.environments import get_env_class
 from habitat_baselines.common.obs_transformers import (
     apply_obs_transforms_batch,
     apply_obs_transforms_obs_space,
@@ -36,13 +33,14 @@ from habitat_baselines.utils.common import (
     poll_checkpoint_folder,
 )
 
-from habitat_extensions.utils import observations_to_image
+from habitat_extensions.utils import append_text_to_image, observations_to_image
 from vlnce_baselines.common.aux_losses import AuxLosses
 from vlnce_baselines.common.env_utils import (
     construct_envs_auto_reset_false,
     construct_envs,
     is_slurm_batch_job,
 )
+from vlnce_baselines.common.runtime_compat import get_env_class
 from vlnce_baselines.common.utils import *
 
 from habitat_extensions.measures import NDTW
@@ -52,11 +50,6 @@ from ..utils import get_camera_orientations12
 from ..utils import (
     length2mask, dir_angle_feature, dir_angle_feature_with_ele,
 )
-
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", category=FutureWarning)
-    import tensorflow as tf  # noqa: F401
-
 
 class BaseVLNCETrainer(BaseILTrainer):
     r"""A base trainer for VLN-CE imitation learning."""
