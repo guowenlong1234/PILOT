@@ -57,7 +57,8 @@ class MetaLoader:
         epoch_id = 0
         while True:
             if self.step % self.accum_steps == 0:
-                sampling_ratios = self.get_ratios(self.step)
+                update_step = self.step // self.accum_steps
+                sampling_ratios = self.get_ratios(update_step)
                 task_id = torch.multinomial(sampling_ratios, 1)
                 if self.distributed:
                     dist.broadcast(task_id, 0)

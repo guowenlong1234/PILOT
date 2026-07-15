@@ -421,7 +421,7 @@ def test_rae_model_config_has_explicit_projection_contract():
     assert config["image_prob_size"] == 0
 
 
-def test_rae_pretrain_config_only_replaces_rgb_feature_file():
+def test_rae_pretrain_config_keeps_data_contract_and_uses_safe_single_gpu_batch():
     clip_config = json.loads(
         (RUN_PT / "mix_pretrain_server.json").read_text(encoding="utf-8")
     )
@@ -430,6 +430,14 @@ def test_rae_pretrain_config_only_replaces_rgb_feature_file():
     )
     expected = copy.deepcopy(clip_config)
     expected["train_datasets"]["R2R"]["img_ft_file"] = RAE_FEATURE_FILE
+    expected.update(
+        {
+            "train_batch_size": 16,
+            "gradient_accumulation_steps": 8,
+            "keep_last_checkpoints": 3,
+            "keep_every_n_steps": 25000,
+        }
+    )
 
     assert rae_config == expected
     dataset = rae_config["train_datasets"]["R2R"]

@@ -1,0 +1,165 @@
+from pathlib import Path
+import random
+import subprocess
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+import torch
+
+from pretrain_src.pretrain_src.utils.save import (
+    ModelSaver,
+    capture_rng_state,
+    load_training_state,
+    resolve_resume_checkpoint,
+    restore_rng_state,
+    validate_resume_config,
+)
+
+
+def _opts(tmp_path, **overrides):
+    model_config = tmp_path / "model.json"
+    model_config.write_text("{}", encoding="utf-8")
+    values = {
+        "gradient_accumulation_steps": 8,
+        "train_batch_size": 16,
+        "world_size": 1,
+        "model_config": str(model_config),
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _updated_model_and_optimizer():
+    model = torch.nn.Linear(3, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    loss = model(torch.ones(2, 3)).sum()
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+    return model, optimizer
+
+
+def test_resumable_checkpoint_round_trip_contains_complete_state(tmp_path):
+    model, optimizer = _updated_model_and_optimizer()
+    opts = _opts(tmp_path)
+    saver = ModelSaver(str(tmp_path / "ckpts"))
+
+    model_path, state_path = saver.save(
+        model,
+        25,
+        optimizer=optimizer,
+        meta_loader_step=200,
+        opts=opts,
+    )
+
+    resolved = resolve_resume_checkpoint("latest", str(tmp_path / "ckpts"))
+    state, referenced_model = load_training_state(resolved)
+    assert resolved == state_path
+    assert referenced_model == model_path
+    assert state["step"] == 25
+    assert state["meta_loader_step"] == 200
+    assert state["optimizer"]["state"]
+    assert state["training_config"]["gradient_accumulation_steps"] == 8
+    assert validate_resume_config(state, opts) is None
+
+
+def test_resume_configuration_rejects_effective_batch_change(tmp_path):
+    model, optimizer = _updated_model_and_optimizer()
+    saver = ModelSaver(str(tmp_path / "ckpts"))
+    _, state_path = saver.save(model, 2, optimizer=optimizer, opts=_opts(tmp_path))
+    state, _ = load_training_state(state_path)
+
+    with pytest.raises(ValueError, match="gradient_accumulation_steps"):
+        validate_resume_config(
+            state, _opts(tmp_path, gradient_accumulation_steps=4)
+        )
+
+
+def test_latest_resume_ignores_model_without_training_state(tmp_path):
+    checkpoint_dir = tmp_path / "ckpts"
+    checkpoint_dir.mkdir()
+    torch.save({}, checkpoint_dir / "model_step_100.pt")
+    torch.save({}, checkpoint_dir / "model_step_50.pt")
+    torch.save(
+        {
+            "format_version": 1,
+            "step": 50,
+            "model_checkpoint": "model_step_50.pt",
+            "optimizer": {},
+            "rng_state": {},
+            "meta_loader_step": 400,
+            "training_config": {},
+        },
+        checkpoint_dir / "train_state_50.pt",
+    )
+
+    assert resolve_resume_checkpoint("latest", str(checkpoint_dir)).endswith(
+        "train_state_50.pt"
+    )
+
+
+def test_checkpoint_pruning_keeps_recent_pairs_and_sparse_models(tmp_path):
+    model, optimizer = _updated_model_and_optimizer()
+    opts = _opts(tmp_path)
+    checkpoint_dir = tmp_path / "ckpts"
+    saver = ModelSaver(str(checkpoint_dir))
+
+    for step in (10, 20, 30, 40):
+        saver.save(
+            model,
+            step,
+            optimizer=optimizer,
+            opts=opts,
+            keep_last_checkpoints=2,
+            keep_every_n_steps=20,
+        )
+
+    assert sorted(path.name for path in checkpoint_dir.glob("train_state_*.pt")) == [
+        "train_state_30.pt",
+        "train_state_40.pt",
+    ]
+    assert sorted(path.name for path in checkpoint_dir.glob("model_step_*.pt")) == [
+        "model_step_20.pt",
+        "model_step_30.pt",
+        "model_step_40.pt",
+    ]
+
+
+def test_rng_state_round_trip_restores_python_numpy_and_torch():
+    state = capture_rng_state()
+    expected_python = random.random()
+    expected_numpy = np.random.rand(3)
+    expected_torch = torch.rand(3)
+
+    restore_rng_state(state)
+
+    assert random.random() == expected_python
+    assert np.array_equal(np.random.rand(3), expected_numpy)
+    assert torch.equal(torch.rand(3), expected_torch)
+
+
+def test_management_scripts_have_valid_bash_syntax():
+    root = Path(__file__).resolve().parents[1]
+    for relative_path in (
+        "scripts/manage_rae_pretrain.sh",
+        "scripts/manage_rae_pretrain_host.sh",
+        "scripts/run_rae_pretrain_job.sh",
+        "pretrain_src/run_pt/run_mix_rae_dino.bash",
+    ):
+        path = root / relative_path
+        result = subprocess.run(
+            ["bash", "-n", str(path)], capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stderr
+
+
+def test_supervised_job_records_manifest_identity_without_requiring_git():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "scripts/run_rae_pretrain_job.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "rae_smoke_source_identity.py" in source
+    assert "source_manifest" in source
+    assert "git rev-parse HEAD" not in source

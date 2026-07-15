@@ -23,7 +23,14 @@ from transformers import AutoTokenizer, PretrainedConfig
 from transformers import AutoModel
 
 from utils.logger import LOGGER, TB_LOGGER, RunningMeter, add_log_to_file
-from utils.save import ModelSaver, save_training_meta
+from utils.save import (
+    ModelSaver,
+    load_training_state,
+    resolve_resume_checkpoint,
+    restore_rng_state,
+    save_training_meta,
+    validate_resume_config,
+)
 from utils.misc import NoOp, set_dropout, set_random_seed, set_cuda, wrap_model
 from utils.distributed import all_gather
 
@@ -75,6 +82,11 @@ def create_dataloaders(
 
 
 def main(opts):
+    if opts.checkpoint and opts.resume_checkpoint:
+        raise ValueError(
+            "--checkpoint initializes model weights only and cannot be combined "
+            "with --resume_checkpoint"
+        )
     default_gpu, n_gpu, device = set_cuda(opts) 
     print(default_gpu, n_gpu, device)
     
@@ -101,6 +113,16 @@ def main(opts):
         pbar = NoOp()
         model_saver = NoOp()
 
+    checkpoint_dir = os.path.join(opts.output_dir, 'ckpts')
+    resume_path = resolve_resume_checkpoint(
+        opts.resume_checkpoint, checkpoint_dir
+    )
+    resume_state = None
+    resume_model_path = None
+    if resume_path is not None:
+        resume_state, resume_model_path = load_training_state(resume_path)
+        validate_resume_config(resume_state, opts)
+
     # Model config
     model_config = PretrainedConfig.from_json_file(opts.model_config)
     model_config.rgb_encoder_type = getattr(
@@ -120,7 +142,11 @@ def main(opts):
     tokenizer = AutoTokenizer.from_pretrained("./bert_config/xlm-roberta-base")
 
     # Prepare model
-    if opts.checkpoint:
+    if resume_model_path is not None:
+        checkpoint = torch.load(
+            resume_model_path, map_location=lambda storage, loc: storage
+        )
+    elif opts.checkpoint:
         checkpoint = torch.load(opts.checkpoint, map_location=lambda storage, loc: storage)
     else:
         checkpoint = {}
@@ -253,10 +279,31 @@ def main(opts):
     optimizer = build_optimizer(model, opts)
     task2scaler = {t: i for i, t in enumerate(train_dataloaders.keys())}
 
-    if opts.fp16:
-        grad_scaler = amp.GradScaler()
+    grad_scaler = amp.GradScaler() if opts.fp16 else None
     
     global_step = 0
+    if resume_state is not None:
+        optimizer.load_state_dict(resume_state["optimizer"])
+        if grad_scaler is not None and resume_state["grad_scaler"] is not None:
+            grad_scaler.load_state_dict(resume_state["grad_scaler"])
+        elif grad_scaler is None and resume_state["grad_scaler"] is not None:
+            raise ValueError(
+                "Resume checkpoint contains fp16 scaler state, but fp16 is disabled"
+            )
+        global_step = int(resume_state["step"])
+        meta_loader.loader.step = int(resume_state["meta_loader_step"])
+        restore_rng_state(resume_state["rng_state"])
+        pbar.update(global_step)
+        LOGGER.info(
+            "Resumed complete training state from %s at global step %d",
+            resume_path,
+            global_step,
+        )
+    if global_step >= opts.num_train_steps:
+        raise ValueError(
+            f"Resume step {global_step} is not below num_train_steps "
+            f"{opts.num_train_steps}"
+        )
     LOGGER.info(f"***** Running training with {opts.world_size} GPUs *****")
     LOGGER.info("  Batch size = %d", opts.train_batch_size if opts.local_rank == -1 else opts.train_batch_size * opts.world_size)
     LOGGER.info("  Accumulate steps = %d", opts.gradient_accumulation_steps)
@@ -274,7 +321,8 @@ def main(opts):
     start_time = time.time()
     # quick hack for amp delay_unscale bug
     optimizer.zero_grad()
-    optimizer.step()
+    if resume_state is None:
+        optimizer.step()
     mlm_loss = []
     sap_loss = []
     for step, (name, batch) in enumerate(meta_loader):
@@ -367,7 +415,18 @@ def main(opts):
                 validate(model, val_r2r_dataloaders, setname='_unseen')
                 LOGGER.info(f'------Step {global_step}: start validation RxR unseen------')
                 validate(model, val_rxr_dataloaders, setname='_unseen')
-                model_saver.save(model, global_step)
+                model_saver.save(
+                    model,
+                    global_step,
+                    optimizer=optimizer,
+                    grad_scaler=grad_scaler,
+                    meta_loader_step=(
+                        global_step * opts.gradient_accumulation_steps
+                    ),
+                    opts=opts,
+                    keep_last_checkpoints=opts.keep_last_checkpoints,
+                    keep_every_n_steps=opts.keep_every_n_steps,
+                )
         if global_step >= opts.num_train_steps:
             break
     if global_step % opts.valid_steps != 0:
@@ -375,7 +434,16 @@ def main(opts):
         validate(model, val_r2r_dataloaders, setname='_unseen')
         LOGGER.info(f'------Step {global_step}: start validation RxR unseen------')
         validate(model, val_rxr_dataloaders, setname='_unseen')
-        model_saver.save(model, global_step)   
+        model_saver.save(
+            model,
+            global_step,
+            optimizer=optimizer,
+            grad_scaler=grad_scaler,
+            meta_loader_step=global_step * opts.gradient_accumulation_steps,
+            opts=opts,
+            keep_last_checkpoints=opts.keep_last_checkpoints,
+            keep_every_n_steps=opts.keep_every_n_steps,
+        )
     
 
 def validate(model, val_dataloaders, setname=''):

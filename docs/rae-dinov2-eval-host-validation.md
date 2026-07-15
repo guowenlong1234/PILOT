@@ -117,4 +117,16 @@ RAE 编码器使用 float32，对 12 张 `224x224 uint8 RGB` 图像预热 5 次�
 /home/a6000/gwl/ETP-R1/data/logs/rae_dino_batch_test/bs16_acc8_fp32_20260715/
 ```
 
-本轮没有改动正式配置，也没有启动完整预训练。
+batch 实测当时没有改动正式配置；后续断点续训阶段按实测结论更新了配置，见下一节。完整预训练尚未启动。
+
+## 断点续训与长任务托管
+
+2026-07-15 已在 batch 实测之后补齐完整训练状态：`model_step_<step>.pt` 保存模型，配套的 `train_state_<step>.pt` 保存优化器、混合精度缩放器、全局步数、数据混合步数和 Python/NumPy/PyTorch 随机状态。写入采用临时文件加原子改名；`latest` 只选择模型与训练状态都存在的最新一步。恢复时还会强制核对 batch、梯度累积、GPU 数和模型结构配置。
+
+真实恢复验证先完成第 1 步并写出 2.2GB 模型和 2.7GB 训练状态，再启动新进程：日志明确显示从 `train_state_1.pt` 的全局第 1 步恢复，并继续完成第 2 步。新状态记录 `step=2`、`meta_loader_step=2`，优化器包含 484 组状态。临时 9.8GB checkpoint 已清理，日志保存在：
+
+```text
+/home/a6000/gwl/ETP-R1/data/logs/rae_dino_resume_validation/20260715/
+```
+
+完整测试更新为 `276 passed, 3 warnings in 59.48s`。正式配置已改为 batch 16、梯度累积 8；默认保留最近 3 对可恢复状态，并每 25,000 步保留一个模型里程碑。容器已安装 tmux，宿主机安全检查、启动、恢复、状态、日志和停止入口见 `docs/rae-dinov2-pretrain-operations.md`。正式 500,000 步训练仍未启动。

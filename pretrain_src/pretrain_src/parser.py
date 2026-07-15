@@ -15,6 +15,15 @@ def load_parser():
     parser.add_argument(
         "--checkpoint", default=None, type=str, help="path to model checkpoint (*.pt)"
     )
+    parser.add_argument(
+        "--resume_checkpoint",
+        default=None,
+        type=str,
+        help=(
+            "path to train_state_*.pt, a checkpoint directory, or 'latest'; "
+            "restores model, optimizer, scaler, RNG, and global step"
+        ),
+    )
 
     parser.add_argument(
         "--output_dir",
@@ -53,6 +62,21 @@ def load_parser():
         "--valid_steps", default=1000, type=int, help="Run validation every X steps"
     )
     parser.add_argument("--log_steps", default=1000, type=int)
+    parser.add_argument(
+        "--keep_last_checkpoints",
+        default=3,
+        type=int,
+        help="Number of recent model+training-state checkpoint pairs to retain.",
+    )
+    parser.add_argument(
+        "--keep_every_n_steps",
+        default=0,
+        type=int,
+        help=(
+            "Retain older model-only milestone checkpoints at this interval; "
+            "0 disables milestone retention."
+        ),
+    )
     parser.add_argument(
         "--num_train_steps",
         default=100000,

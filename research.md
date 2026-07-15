@@ -45,6 +45,7 @@ README 原始说明要求创建 `etpr1` conda 环境，核心环境为 Python 3.
 - `CUDA_VISIBLE_DEVICES=0,1,2,3 bash run_rxr/main_server.bash dagger 2333`: RxR 在线 SFT。
 - `CUDA_VISIBLE_DEVICES=0,1,2,3 bash run_rxr/main_server.bash grpo 2333`: RxR 在线 RFT/GRPO。
 - `CUDA_VISIBLE_DEVICES=0,1,2,3 bash run_rxr/main_server.bash eval 2333`: RxR 评测。
+- `scripts/manage_rae_pretrain_host.sh start|resume|status|tail|stop`：在 4090 宿主机检查 ETPNav/GPU 后，通过专用容器内的 tmux 托管 RAE/DINOv2 完整联合预训练。完整命令见 `docs/rae-dinov2-pretrain-operations.md`。
 
 ## Important Modules And Functions
 
@@ -106,7 +107,9 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 
 2026-07-15 已完成正式验收：完整测试为 `269 passed, 3 warnings`；RAE encoder-only 对照结果为 `max_abs=0`、`cosine=0.9999999404`；全量 HDF5 含 10,567 个 `[36,768] float32` 视点且完整性错误为 0；RAE 正式 smoke 的 15 个阶段全部通过。原 CLIP 的 `ckpt.iter25000.pth` 也在现代运行时完成一个 R2R `val_unseen` episode，权重无未处理 missing/extra layer。详细命令、性能和远端日志见 `docs/rae-dinov2-eval-host-validation.md`。
 
-2026-07-15 又在完整 3,210,737 条真实联合预训练数据上完成单卡 RTX 4090 的 batch 实测。float32 下，`batch_size=32` 虽能完成 20 次更新，但峰值显存达到 23,684 MiB，距离整卡上限只剩约 880 MiB，不适合作为长训练配置；`batch_size=16` 的峰值为 17,692 MiB；`batch_size=16 + gradient_accumulation_steps=8` 能完成真实累积更新，峰值为 17,842 MiB，对应有效 batch 128。完整预训练建议使用后者，但正式配置尚未修改，长训练也尚未启动。持久化日志位于测评机 `data/logs/rae_dino_batch_test/`。
+2026-07-15 又在完整 3,210,737 条真实联合预训练数据上完成单卡 RTX 4090 的 batch 实测。float32 下，`batch_size=32` 虽能完成 20 次更新，但峰值显存达到 23,684 MiB，距离整卡上限只剩约 880 MiB，不适合作为长训练配置；`batch_size=16` 的峰值为 17,692 MiB；`batch_size=16 + gradient_accumulation_steps=8` 能完成真实累积更新，峰值为 17,842 MiB，对应有效 batch 128。正式配置现已使用后者，长训练尚未启动。持久化日志位于测评机 `data/logs/rae_dino_batch_test/`。
+
+2026-07-15 已补齐联合预训练断点续训和 tmux 长任务托管：每个可恢复点同时原子写入模型与包含优化器、混合精度缩放器、全局步数、数据混合步数和随机状态的 `train_state`；恢复时会拒绝 batch、梯度累积、GPU 数或模型配置不一致的状态。默认保留最近 3 对完整状态，并每 25,000 步保留一个模型里程碑。真实模型已完成“第 1 步保存、由新进程恢复并完成第 2 步”，状态含 484 组优化器参数；全量测试为 `276 passed, 3 warnings`。操作手册见 `docs/rae-dinov2-pretrain-operations.md`。
 
 本地完整 checkpoint 评测记录见 `docs/ETP-R1_checkpoint_eval_comparison.md`，里面包含单卡评测命令、R2R/RxR 四个 checkpoint 的指标、结果文件路径和并行环境数量调整记录。ETP-R1 与原版 ETPNav 的代码差异分析见 `docs/ETP-R1_vs_ETPNav_diff_analysis.md`。
 
@@ -114,7 +117,7 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 
 - `pip check` 会报告 `tensorflow 1.13.1` 声明要求 `tensorboard<1.14`，但 PyTorch 1.9 的 tensorboard 接口要求 `tensorboard>=1.15`。当前选择 `tensorboard==1.15.0`，因为这是项目入口能导入的最低可用折中。
 - RAE/DINOv2 已完成一步预训练、单环境 SFT/GRPO 和 R2R/RxR 单 episode 冒烟，但尚未启动完整规模的长训练或完整数据集评测；冒烟通过不能替代最终实验指标。
-- 完整数据 batch 实测已确认 `batch_size=16 + gradient_accumulation_steps=8` 可用，但 50 万次更新仍缺少完整的断点续训、checkpoint 保留策略和长任务托管闭环；启动正式长训练前应先补齐这些保护。
+- 完整数据 batch、断点续训、checkpoint 保留和 tmux 托管均已验证。当前每 2,500 步保存一次，异常断电最多损失最近一个保存间隔；恢复会继续正确的模型、优化器和全局步数，但数据随机采样流不承诺逐样本、逐位复现。
 - 默认旧配置里还有 `habitat_extensions/config/vlnce_task.yaml` 这类历史路径，但 README 的实际脚本使用 `run_r2r/iter_train.yaml` 和 `run_rxr/iter_train.yaml`，这两个路径已验证可解析。
 - 联合预训练配置将 `max_txt_len` 设为 250，`dataset.py` 会截断更长的指令。现有数据中 RxR-Marky 有 38,456 条、RxR train 有 3,097 条超过 250 个词元；这是训练配置造成的截断，不是数据文件缺失。
 - 5 类数据的训练就绪 JSONL 都完整，但转换脚本引用的部分原始源文件和 Gemini 标注中间文件未按原路径保存在当前仓库中。因此可以直接运行联合预训练，但若要从原始指令和 Gemini API 输出开始重新生成全部 JSONL，还需要另行补齐源数据。
@@ -123,7 +126,7 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 
 ## Last Reviewed
 
-2026-07-15，为完成 RAE/DINOv2 视觉编码器计划而复查。核对了隔离运行时、全量特征、真实 RAE 数值一致性、离线/在线投影、checkpoint 过滤、三阶段冻结、CLIP 旧 checkpoint 兼容、完整测试和正式 smoke。最终代码验证提交为 `5436799`，正式 smoke manifest 为 `f4503e77b2e338cc4f8efab5a5193ca8223f7afa1ee6e39509f0d16c371e5c76`；随后补做完整真实数据的 batch 32、batch 16 和 batch 16 加 8 次梯度累积测试，推荐正式预训练使用最后一种配置，完整长训练尚未启动。
+2026-07-15，为完成 RAE/DINOv2 视觉编码器计划而复查。核对了隔离运行时、全量特征、真实 RAE 数值一致性、离线/在线投影、checkpoint 过滤、三阶段冻结、CLIP 旧 checkpoint 兼容、完整测试和正式 smoke。最终代码验证提交为 `5436799`，正式 smoke manifest 为 `f4503e77b2e338cc4f8efab5a5193ca8223f7afa1ee6e39509f0d16c371e5c76`；随后补做完整真实数据的 batch 32、batch 16 和 batch 16 加 8 次梯度累积测试，并把正式配置改为 batch 16 加 8 次累积。又检查并修改 `train_r2r.py`、`utils/save.py`、`data/loader.py`、预训练 parser/配置/启动脚本和新增的宿主机/容器托管脚本，完成真实两步跨进程恢复与 276 项全量测试；完整长训练尚未启动。
 
 2026-07-11，为清理本机重复存储而复查。使用 `rsync -anrc --itemize-changes` 确认 `dataset/extra_files/` 的全部文件已完整存在于正式工程，只有目录时间戳差异；随后删除重复目录，释放约 21GB。删除说明见 `/home/gwl/project/etpr1/dataset/README.extra_files_removed_20260711.md`。
 
