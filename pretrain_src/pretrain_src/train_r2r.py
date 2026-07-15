@@ -24,7 +24,9 @@ from transformers import AutoModel
 
 from utils.logger import LOGGER, TB_LOGGER, RunningMeter, add_log_to_file
 from utils.save import (
+    BestModelSaver,
     ModelSaver,
+    build_joint_accuracy_metrics,
     load_training_state,
     resolve_resume_checkpoint,
     restore_rng_state,
@@ -107,11 +109,13 @@ def main(opts):
         TB_LOGGER.create(os.path.join(opts.output_dir, 'logs'))
         pbar = tqdm(total=opts.num_train_steps)
         model_saver = ModelSaver(os.path.join(opts.output_dir, 'ckpts'))
+        best_model_saver = BestModelSaver(os.path.join(opts.output_dir, 'best'))
         add_log_to_file(os.path.join(opts.output_dir, 'logs', 'log.txt'))
     else:
         LOGGER.disabled = True
         pbar = NoOp()
         model_saver = NoOp()
+        best_model_saver = NoOp()
 
     checkpoint_dir = os.path.join(opts.output_dir, 'ckpts')
     resume_path = resolve_resume_checkpoint(
@@ -412,10 +416,14 @@ def main(opts):
 
             if global_step % opts.valid_steps == 0:
                 LOGGER.info(f'------Step {global_step}: start validation R2R unseen------')
-                validate(model, val_r2r_dataloaders, setname='_unseen')
+                r2r_metrics = validate(
+                    model, val_r2r_dataloaders, setname='_unseen'
+                )
                 LOGGER.info(f'------Step {global_step}: start validation RxR unseen------')
-                validate(model, val_rxr_dataloaders, setname='_unseen')
-                model_saver.save(
+                rxr_metrics = validate(
+                    model, val_rxr_dataloaders, setname='_unseen'
+                )
+                model_path, _ = model_saver.save(
                     model,
                     global_step,
                     optimizer=optimizer,
@@ -427,14 +435,31 @@ def main(opts):
                     keep_last_checkpoints=opts.keep_last_checkpoints,
                     keep_every_n_steps=opts.keep_every_n_steps,
                 )
+                if default_gpu:
+                    best_metrics = build_joint_accuracy_metrics(
+                        global_step, r2r_metrics, rxr_metrics
+                    )
+                    if best_model_saver.maybe_save(model_path, best_metrics):
+                        LOGGER.info(
+                            "New best checkpoint at step %d: score=%.6f "
+                            "(MLM mean acc=%.6f, SAP mean gacc=%.6f)",
+                            global_step,
+                            best_metrics["score"],
+                            best_metrics["mlm_acc_mean"],
+                            best_metrics["sap_gacc_mean"],
+                        )
         if global_step >= opts.num_train_steps:
             break
     if global_step % opts.valid_steps != 0:
         LOGGER.info(f'------Step {global_step}: start validation R2R unseen------')
-        validate(model, val_r2r_dataloaders, setname='_unseen')
+        r2r_metrics = validate(
+            model, val_r2r_dataloaders, setname='_unseen'
+        )
         LOGGER.info(f'------Step {global_step}: start validation RxR unseen------')
-        validate(model, val_rxr_dataloaders, setname='_unseen')
-        model_saver.save(
+        rxr_metrics = validate(
+            model, val_rxr_dataloaders, setname='_unseen'
+        )
+        model_path, _ = model_saver.save(
             model,
             global_step,
             optimizer=optimizer,
@@ -444,10 +469,24 @@ def main(opts):
             keep_last_checkpoints=opts.keep_last_checkpoints,
             keep_every_n_steps=opts.keep_every_n_steps,
         )
+        if default_gpu:
+            best_metrics = build_joint_accuracy_metrics(
+                global_step, r2r_metrics, rxr_metrics
+            )
+            if best_model_saver.maybe_save(model_path, best_metrics):
+                LOGGER.info(
+                    "New best checkpoint at step %d: score=%.6f "
+                    "(MLM mean acc=%.6f, SAP mean gacc=%.6f)",
+                    global_step,
+                    best_metrics["score"],
+                    best_metrics["mlm_acc_mean"],
+                    best_metrics["sap_gacc_mean"],
+                )
     
 
 def validate(model, val_dataloaders, setname=''):
     model.eval()
+    metrics = {}
     for task, loader in val_dataloaders.items():
         LOGGER.info(f"validate val{setname} on {task} task")
         if task.startswith('mlm'):
@@ -457,10 +496,12 @@ def validate(model, val_dataloaders, setname=''):
         else:
             raise ValueError(f'Undefined task {task}')
         val_log = {f'val{setname}_{task}_{k}': v for k, v in val_log.items()}
+        metrics.update(val_log)
         TB_LOGGER.log_scalar_dict(
             {f'valid{setname}_{task}/{k}': v for k, v in val_log.items()}
         )
     model.train()
+    return metrics
 
 
 @torch.no_grad()

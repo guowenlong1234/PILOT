@@ -130,3 +130,5 @@ batch 实测当时没有改动正式配置；后续断点续训阶段按实测�
 ```
 
 完整测试更新为 `276 passed, 3 warnings in 59.48s`。正式配置已改为 batch 16、梯度累积 8；默认保留最近 3 对可恢复状态，并每 25,000 步保留一个模型里程碑。容器已安装 tmux，宿主机安全检查、启动、恢复、状态、日志和停止入口见 `docs/rae-dinov2-pretrain-operations.md`。正式 500,000 步训练仍未启动。
+
+2026-07-15 又增加联合准确率最佳模型选择：总分为 R2R/RxR 的 MLM 准确率均值与 SAP 准确率均值之和，只有严格超过历史最高分才更新 `best/model_best_step_<step>.pt` 和 `best/best_metrics.json`。最佳模型使用硬链接，不会在周期模型仍存在时复制文件内容。真实一步 GPU 验证确认最佳模型与周期模型 inode 相同，指标 JSON 完整落盘；全量测试更新为 `280 passed, 3 warnings in 59.85s`。证据位于测评机 `data/logs/rae_dino_best_checkpoint_validation/20260715/`。

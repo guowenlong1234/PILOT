@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import random
 import subprocess
 from types import SimpleNamespace
@@ -8,7 +9,9 @@ import pytest
 import torch
 
 from pretrain_src.pretrain_src.utils.save import (
+    BestModelSaver,
     ModelSaver,
+    build_joint_accuracy_metrics,
     capture_rng_state,
     load_training_state,
     resolve_resume_checkpoint,
@@ -124,6 +127,81 @@ def test_checkpoint_pruning_keeps_recent_pairs_and_sparse_models(tmp_path):
         "model_step_30.pt",
         "model_step_40.pt",
     ]
+
+
+def _validation_metrics(mlm_acc, sap_gacc):
+    return {
+        "val_unseen_mlm_acc": mlm_acc,
+        "val_unseen_sap_gacc": sap_gacc,
+    }
+
+
+def test_joint_accuracy_score_uses_equal_r2r_rxr_means():
+    metrics = build_joint_accuracy_metrics(
+        2500,
+        _validation_metrics(0.2, 0.4),
+        _validation_metrics(0.6, 0.8),
+    )
+
+    assert metrics["mlm_acc_mean"] == pytest.approx(0.4)
+    assert metrics["sap_gacc_mean"] == pytest.approx(0.6)
+    assert metrics["score"] == pytest.approx(1.0)
+    assert metrics["step"] == 2500
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_joint_accuracy_score_rejects_nonfinite_metrics(value):
+    with pytest.raises(ValueError, match="finite"):
+        build_joint_accuracy_metrics(
+            2500,
+            _validation_metrics(value, 0.4),
+            _validation_metrics(0.6, 0.8),
+        )
+
+
+def test_best_model_saver_keeps_only_strictly_better_joint_score(tmp_path):
+    checkpoint_dir = tmp_path / "ckpts"
+    checkpoint_dir.mkdir()
+    first_model = checkpoint_dir / "model_step_2500.pt"
+    second_model = checkpoint_dir / "model_step_5000.pt"
+    third_model = checkpoint_dir / "model_step_7500.pt"
+    first_model.write_bytes(b"first")
+    second_model.write_bytes(b"second")
+    third_model.write_bytes(b"third")
+    saver = BestModelSaver(str(tmp_path / "best"))
+
+    first_metrics = build_joint_accuracy_metrics(
+        2500,
+        _validation_metrics(0.2, 0.4),
+        _validation_metrics(0.6, 0.8),
+    )
+    worse_metrics = build_joint_accuracy_metrics(
+        5000,
+        _validation_metrics(0.1, 0.4),
+        _validation_metrics(0.5, 0.8),
+    )
+    better_metrics = build_joint_accuracy_metrics(
+        7500,
+        _validation_metrics(0.3, 0.5),
+        _validation_metrics(0.7, 0.9),
+    )
+
+    assert saver.maybe_save(str(first_model), first_metrics) is True
+    first_best = tmp_path / "best" / "model_best_step_2500.pt"
+    assert first_best.stat().st_ino == first_model.stat().st_ino
+    assert saver.maybe_save(str(second_model), worse_metrics) is False
+    assert first_best.exists()
+    assert saver.maybe_save(str(third_model), better_metrics) is True
+
+    assert not first_best.exists()
+    third_best = tmp_path / "best" / "model_best_step_7500.pt"
+    assert third_best.stat().st_ino == third_model.stat().st_ino
+    metadata = json.loads(
+        (tmp_path / "best" / "best_metrics.json").read_text(encoding="utf-8")
+    )
+    assert metadata["step"] == 7500
+    assert metadata["model_checkpoint"] == "model_best_step_7500.pt"
+    assert metadata["score"] == pytest.approx(better_metrics["score"])
 
 
 def test_rng_state_round_trip_restores_python_numpy_and_torch():

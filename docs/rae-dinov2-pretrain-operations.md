@@ -10,6 +10,7 @@
 - 每 2,500 次更新验证并保存一次。
 - 最近 3 个检查点同时保留模型和完整训练状态，可用于恢复。
 - 每 25,000 步额外保留一个模型里程碑；较旧的优化器状态自动清理。
+- 每次验证计算联合准确率总分，并永久保留历史总分最高的模型。
 
 每个可恢复点由两个文件组成：
 
@@ -19,6 +20,28 @@ ckpts/train_state_<step>.pt
 ```
 
 前者供下游加载模型，后者记录优化器、混合精度缩放器、全局步数、数据混合步数和 Python/NumPy/PyTorch 随机状态。只有两者都存在时，`latest` 才会把该步视为有效恢复点。文件先写临时文件再原子改名，进程在写入中途退出时不会把半个文件误当成有效 checkpoint。
+
+## 最佳检查点
+
+每 2,500 步完成 R2R 和 RxR 验证后，按照下面的固定公式计算总分：
+
+```text
+MLM平均准确率 = (R2R MLM acc + RxR MLM acc) / 2
+SAP平均准确率 = (R2R SAP gacc + RxR SAP gacc) / 2
+总分 = MLM平均准确率 + SAP平均准确率
+```
+
+只有新总分严格高于历史最高分时，才更新：
+
+```text
+pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp/best/
+  model_best_step_<step>.pt
+  best_metrics.json
+```
+
+`best_metrics.json` 记录四个原始准确率、两个平均准确率、总分、选择公式和训练步数。最佳模型通过硬链接指向刚保存的周期模型：周期模型仍存在时不会重复占用 2.2GB；周期模型以后被清理时，最佳模型链接仍会保留同一份数据。旧的最佳模型会在更高总分出现后删除。
+
+最佳模型用于下游训练和最终比较，不代替断点恢复。训练中断时仍从 `ckpts/` 中最新的模型与 `train_state` 完整配对恢复。
 
 ## 长任务命令
 
@@ -79,7 +102,9 @@ pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp/supervisor/
 - 恢复与保留策略单元测试通过。
 - 真实模型先训练到第 1 步并写出约 2.2GB 模型和约 2.7GB 训练状态，再由新进程恢复并完成第 2 步。
 - 第 2 步状态记录 `step=2`、`meta_loader_step=2`、484 组优化器状态。
-- 全量测试结果为 `276 passed, 3 warnings`。
+- 联合准确率最佳模型完成真实一步 GPU 验证；模型硬链接、指标 JSON 和更新日志均正确落盘。
+- 全量测试结果为 `280 passed, 3 warnings`。
 - 验证日志保存在测评机 `data/logs/rae_dino_resume_validation/20260715/`。
+- 最佳模型验证日志保存在测评机 `data/logs/rae_dino_best_checkpoint_validation/20260715/`。
 
 本轮没有启动正式 500,000 步训练。

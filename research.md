@@ -111,6 +111,8 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 
 2026-07-15 已补齐联合预训练断点续训和 tmux 长任务托管：每个可恢复点同时原子写入模型与包含优化器、混合精度缩放器、全局步数、数据混合步数和随机状态的 `train_state`；恢复时会拒绝 batch、梯度累积、GPU 数或模型配置不一致的状态。默认保留最近 3 对完整状态，并每 25,000 步保留一个模型里程碑。真实模型已完成“第 1 步保存、由新进程恢复并完成第 2 步”，状态含 484 组优化器参数；全量测试为 `276 passed, 3 warnings`。操作手册见 `docs/rae-dinov2-pretrain-operations.md`。
 
+2026-07-15 已增加预训练最佳模型：每次验证将 R2R/RxR 的 MLM 准确率等权平均、SAP 准确率等权平均，再把两个均值相加；仅当总分严格提高时，通过硬链接更新 `best/model_best_step_<step>.pt`，并原子更新包含四个原始准确率、两个均值、总分和步数的 `best_metrics.json`。真实一步 GPU 验证确认硬链接与指标文件正确，全量测试为 `280 passed, 3 warnings`。最佳模型用于下游选择，断点恢复仍使用最近 3 对完整 checkpoint。
+
 本地完整 checkpoint 评测记录见 `docs/ETP-R1_checkpoint_eval_comparison.md`，里面包含单卡评测命令、R2R/RxR 四个 checkpoint 的指标、结果文件路径和并行环境数量调整记录。ETP-R1 与原版 ETPNav 的代码差异分析见 `docs/ETP-R1_vs_ETPNav_diff_analysis.md`。
 
 ## Current Caveats And Open Questions
@@ -126,7 +128,7 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 
 ## Last Reviewed
 
-2026-07-15，为完成 RAE/DINOv2 视觉编码器计划而复查。核对了隔离运行时、全量特征、真实 RAE 数值一致性、离线/在线投影、checkpoint 过滤、三阶段冻结、CLIP 旧 checkpoint 兼容、完整测试和正式 smoke。最终代码验证提交为 `5436799`，正式 smoke manifest 为 `f4503e77b2e338cc4f8efab5a5193ca8223f7afa1ee6e39509f0d16c371e5c76`；随后补做完整真实数据的 batch 32、batch 16 和 batch 16 加 8 次梯度累积测试，并把正式配置改为 batch 16 加 8 次累积。又检查并修改 `train_r2r.py`、`utils/save.py`、`data/loader.py`、预训练 parser/配置/启动脚本和新增的宿主机/容器托管脚本，完成真实两步跨进程恢复与 276 项全量测试；完整长训练尚未启动。
+2026-07-15，为完成 RAE/DINOv2 视觉编码器计划而复查。核对了隔离运行时、全量特征、真实 RAE 数值一致性、离线/在线投影、checkpoint 过滤、三阶段冻结、CLIP 旧 checkpoint 兼容、完整测试和正式 smoke。最终代码验证提交为 `5436799`，正式 smoke manifest 为 `f4503e77b2e338cc4f8efab5a5193ca8223f7afa1ee6e39509f0d16c371e5c76`；随后补做完整真实数据的 batch 32、batch 16 和 batch 16 加 8 次梯度累积测试，并把正式配置改为 batch 16 加 8 次累积。又检查并修改 `train_r2r.py`、`utils/save.py`、`data/loader.py`、预训练 parser/配置/启动脚本和新增的宿主机/容器托管脚本，完成真实两步跨进程恢复；随后增加 MLM+SAP 联合准确率最佳模型保存并完成真实 GPU 落盘验证，最终全量测试为 280 项通过。旧长跑在首个 checkpoint 前按用户要求停止，准备以新逻辑从头启动。
 
 2026-07-11，为清理本机重复存储而复查。使用 `rsync -anrc --itemize-changes` 确认 `dataset/extra_files/` 的全部文件已完整存在于正式工程，只有目录时间戳差异；随后删除重复目录，释放约 21GB。删除说明见 `/home/gwl/project/etpr1/dataset/README.extra_files_removed_20260711.md`。
 
