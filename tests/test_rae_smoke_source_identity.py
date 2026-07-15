@@ -16,6 +16,73 @@ def _git(cwd, *args):
     ).stdout.strip()
 
 
+def _clean_git_repo(tmp_path):
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.name", "Smoke Test")
+    _git(tmp_path, "config", "user.email", "smoke@example.com")
+    source = tmp_path / "source.py"
+    source.write_text("clean\n", encoding="utf-8")
+    _git(tmp_path, "add", "source.py")
+    _git(tmp_path, "commit", "-m", "initial")
+    return source, _git(tmp_path, "rev-parse", "HEAD")
+
+
+def test_git_checkout_rejects_modified_tracked_file(tmp_path):
+    source, head = _clean_git_repo(tmp_path)
+    source.write_text("modified\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="dirty.*modified.*source.py"):
+        resolve_source_identity(
+            tmp_path,
+            requested_commit=head,
+            manifest_path=tmp_path / "manifest.sha256",
+        )
+
+
+def test_git_checkout_rejects_staged_change(tmp_path):
+    source, head = _clean_git_repo(tmp_path)
+    source.write_text("staged\n", encoding="utf-8")
+    _git(tmp_path, "add", "source.py")
+
+    with pytest.raises(ValueError, match="dirty.*staged.*source.py"):
+        resolve_source_identity(
+            tmp_path,
+            requested_commit=head,
+            manifest_path=tmp_path / "manifest.sha256",
+        )
+
+
+def test_git_checkout_rejects_untracked_file(tmp_path):
+    _, head = _clean_git_repo(tmp_path)
+    (tmp_path / "untracked.py").write_text("new\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="dirty.*untracked.*untracked.py"):
+        resolve_source_identity(
+            tmp_path,
+            requested_commit=head,
+            manifest_path=tmp_path / "manifest.sha256",
+        )
+
+
+def test_git_checkout_ignores_its_own_manifest_output(tmp_path):
+    _, head = _clean_git_repo(tmp_path)
+    manifest = tmp_path / "manifest.sha256"
+
+    first = resolve_source_identity(
+        tmp_path,
+        requested_commit=head,
+        manifest_path=manifest,
+    )
+    second = resolve_source_identity(
+        tmp_path,
+        requested_commit=head,
+        manifest_path=manifest,
+    )
+
+    assert first["identity"] == head
+    assert second["identity"] == head
+
+
 def test_git_checkout_rejects_requested_commit_that_is_not_head(tmp_path):
     _git(tmp_path, "init")
     _git(tmp_path, "config", "user.name", "Smoke Test")

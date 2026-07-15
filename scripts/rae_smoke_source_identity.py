@@ -37,6 +37,42 @@ def _is_git_checkout(project_root):
         return False
 
 
+def _git_paths(project_root, *args):
+    result = subprocess.run(
+        ["git", "-C", str(project_root), *args, "-z"],
+        check=True,
+        capture_output=True,
+    )
+    return [
+        item.decode("utf-8", errors="surrogateescape")
+        for item in result.stdout.split(b"\0")
+        if item
+    ]
+
+
+def _validate_clean_git_checkout(project_root, manifest_path):
+    modified = _git_paths(project_root, "diff", "--name-only")
+    staged = _git_paths(project_root, "diff", "--cached", "--name-only")
+    untracked = _git_paths(
+        project_root,
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+    )
+    try:
+        manifest_relative = manifest_path.resolve().relative_to(project_root)
+    except ValueError:
+        manifest_relative = None
+    if manifest_relative is not None:
+        manifest_name = manifest_relative.as_posix()
+        untracked = [path for path in untracked if path != manifest_name]
+    if modified or staged or untracked:
+        raise ValueError(
+            "dirty git worktree cannot be identified as HEAD; "
+            f"modified={modified}, staged={staged}, untracked={untracked}"
+        )
+
+
 def _controlled_source_files(project_root, manifest_path):
     manifest_path = manifest_path.resolve()
     for path in sorted(project_root.rglob("*")):
@@ -77,8 +113,8 @@ def resolve_source_identity(
 ):
     project_root = Path(project_root).resolve()
     manifest_path = Path(manifest_path or project_root / "source_manifest.sha256")
-    manifest_sha256, file_count = _write_manifest(project_root, manifest_path)
     if _is_git_checkout(project_root):
+        _validate_clean_git_checkout(project_root, manifest_path)
         head = _git(project_root, "rev-parse", "HEAD")
         if requested_commit:
             try:
@@ -97,6 +133,10 @@ def resolve_source_identity(
                     "ETPR1_SOURCE_COMMIT does not match git HEAD: "
                     f"requested={requested}, head={head}"
                 )
+        manifest_sha256, file_count = _write_manifest(
+            project_root,
+            manifest_path,
+        )
         return {
             "kind": "git",
             "identity": head,
@@ -105,6 +145,7 @@ def resolve_source_identity(
             "manifest_sha256": manifest_sha256,
             "manifest_file_count": file_count,
         }
+    manifest_sha256, file_count = _write_manifest(project_root, manifest_path)
     return {
         "kind": "manifest",
         "identity": f"tree-{manifest_sha256}",
