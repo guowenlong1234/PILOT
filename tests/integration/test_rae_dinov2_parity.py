@@ -170,6 +170,17 @@ def test_production_encoder_matches_full_rae_reference(tmp_path):
     )
     image_path = tmp_path / "rgb.pt"
     reference_path = tmp_path / "reference.pt"
+    portable_reference_config = tmp_path / "DINOv2-B.yaml"
+    reference_root = "/home/gwl/project/RAE-NWM/raenwm"
+    eval_root = "/home/a6000/gwl/RAE-NWM/raenwm"
+    reference_config_text = REFERENCE_CONFIG.read_text(encoding="utf-8")
+    assert reference_root in reference_config_text, (
+        "reference config no longer contains the expected source paths"
+    )
+    portable_reference_config.write_text(
+        reference_config_text.replace(reference_root, eval_root),
+        encoding="utf-8",
+    )
     torch.save(rgb, image_path)
 
     environment = os.environ.copy()
@@ -182,7 +193,7 @@ def test_production_encoder_matches_full_rae_reference(tmp_path):
             "-c",
             REFERENCE_SCRIPT,
             str(DINO_CWP_ROOT),
-            str(REFERENCE_CONFIG),
+            str(portable_reference_config),
             str(ETPR1_ROOT),
             str(MODEL_DIR),
             str(STAT_PATH),
