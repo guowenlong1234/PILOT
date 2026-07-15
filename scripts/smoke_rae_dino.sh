@@ -56,18 +56,35 @@ run_stage() {
   local seconds="$2"
   shift 2
   local log="$run_root/logs/$name.log"
+  local started_at
+  local started_ms
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  started_ms="$(date +%s%3N)"
   {
     printf 'RUN_ID=%s\n' "$run_id"
     printf 'SOURCE_COMMIT=%s\n' "$source_commit"
+    printf 'STARTED_AT=%s\n' "$started_at"
     printf 'COMMAND='
     printf ' %q' "$@"
     printf '\n'
   } > "$log"
   if timeout --signal=TERM --kill-after=30s "${seconds}s" "$@" >> "$log" 2>&1; then
-    echo "STAGE $name status=PASS exit=0 log=$log" | tee -a "$summary_log"
+    local finished_at
+    local finished_ms
+    local elapsed_ms
+    finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    finished_ms="$(date +%s%3N)"
+    elapsed_ms=$((finished_ms - started_ms))
+    echo "STAGE $name status=PASS exit=0 elapsed_ms=$elapsed_ms started_at=$started_at finished_at=$finished_at log=$log" | tee -a "$summary_log"
   else
     local status=$?
-    echo "STAGE $name status=FAIL exit=$status log=$log" | tee -a "$summary_log" >&2
+    local finished_at
+    local finished_ms
+    local elapsed_ms
+    finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    finished_ms="$(date +%s%3N)"
+    elapsed_ms=$((finished_ms - started_ms))
+    echo "STAGE $name status=FAIL exit=$status elapsed_ms=$elapsed_ms started_at=$started_at finished_at=$finished_at log=$log" | tee -a "$summary_log" >&2
     tail -n 80 "$log" >&2
     exit "$status"
   fi
