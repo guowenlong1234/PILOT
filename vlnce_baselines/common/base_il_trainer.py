@@ -34,6 +34,9 @@ from habitat_baselines.utils.common import (
 
 from habitat_extensions.utils import append_text_to_image, observations_to_image
 from vlnce_baselines.common.aux_losses import AuxLosses
+from vlnce_baselines.common.checkpoint_compat import (
+    load_torch_checkpoint_compat,
+)
 from vlnce_baselines.common.env_utils import (
     construct_envs_auto_reset_false,
     construct_envs,
@@ -165,7 +168,7 @@ class BaseVLNCETrainer(BaseILTrainer):
     #     )
 
     def load_checkpoint(self, checkpoint_path, *args, **kwargs) -> Dict:
-        return torch.load(checkpoint_path, *args, **kwargs)
+        return load_torch_checkpoint_compat(checkpoint_path, *args, **kwargs)
 
     # def _update_agent(
     #     self,
