@@ -1,9 +1,9 @@
 ---
 title: ETP-R1 RAE/DINOv2 视觉编码器替换设计
-status: approved
+status: implemented
 owner: codex
 scope: 保留 CLIP 基线，新增 RAE/DINOv2-B CLS + 三层 MLP 视觉分支
-last_verified_date: 2026-07-10
+last_verified_date: 2026-07-15
 ---
 
 # ETP-R1 RAE/DINOv2 视觉编码器替换设计
@@ -581,3 +581,11 @@ DINOv2-B/14 的视觉 token 数多于 CLIP ViT-B/32，在线编码预计更慢�
 - MLP 在预训练/SFT 可训练、GRPO 冻结。
 - CLIP 基线仍可运行。
 - MLM、SAP、SFT、GRPO 和 R2R/RxR 冒烟全部通过。
+
+## 18. 实施与验收结果
+
+2026-07-15 已按本设计完成实现和测评机验收。最终代码验证点为 `5436799`，完整测试为 `269 passed, 3 warnings`，真实 RAE 对照为 `max_abs=0`、`cosine=0.9999999404`。全量 DINO CLS HDF5 含 10,567 个 `[36,768] float32` 视点，完整性错误为 0。
+
+正式 smoke 运行 `tree-f4503e77b2e3_20260715T080515Z_98271` 的 15 个阶段全部通过，源码 manifest 为 `f4503e77b2e338cc4f8efab5a5193ca8223f7afa1ee6e39509f0d16c371e5c76`。原 CLIP checkpoint 也完成了一个 R2R `val_unseen` episode 回归。详细命令、日志路径和性能数据见 `docs/rae-dinov2-eval-host-validation.md`。
+
+本次只完成正式冒烟和单 episode 回归，没有启动完整规模预训练、SFT、GRPO 或完整数据集评测。

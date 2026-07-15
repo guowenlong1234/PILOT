@@ -60,7 +60,7 @@ README 原始说明要求创建 `etpr1` conda 环境，核心环境为 Python 3.
 
 README 要求准备 Matterport3D 数据，目标结构是 `data/scene_datasets/mp3d/{scene}/{scene}.glb`。当前项目内 `data/scene_datasets/mp3d` 是软链接，指向本机已有数据 `/home/gwl/project/dataset/mp3d_unzipped/mp3d`，跟随软链接可看到 90 个 `.glb` 场景。
 
-`extra_files.zip` 位于 `/home/gwl/project/etpr1/dataset/extra_files.zip`，已解压到 `/home/gwl/project/etpr1/dataset/extra_files`，并已合并复制到项目根目录。关键资源已存在：
+`extra_files.zip` 的内容此前已解压并合并复制到项目根目录。2026-07-11 使用校验和模式确认 `/home/gwl/project/etpr1/dataset/extra_files` 中的全部文件都已在正式工程中且内容一致，随后删除这份约 21GB 的重复目录。关键资源继续保存在正式工程：
 
 - `pretrained/r2r_rxr_ce/mlm.sap_habitat_depth/store2/model_step_367500.pt`
 - `data/logs/checkpoints/release_r2r_dagger/store/ckpt.iter25000.pth`
@@ -104,12 +104,14 @@ conda run -n etpnav python run.py --help
 
 RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `etpr1_rae` 环境中进行。正式实现时依次验证环境导入、RAE CLS 数值一致性、小规模与全量 HDF5、预训练 MLM/SAP、SFT、GRPO 冻结状态以及 R2R/RxR 单 episode；不得用本机旧环境的导入结果代替。
 
+2026-07-15 已完成正式验收：完整测试为 `269 passed, 3 warnings`；RAE encoder-only 对照结果为 `max_abs=0`、`cosine=0.9999999404`；全量 HDF5 含 10,567 个 `[36,768] float32` 视点且完整性错误为 0；RAE 正式 smoke 的 15 个阶段全部通过。原 CLIP 的 `ckpt.iter25000.pth` 也在现代运行时完成一个 R2R `val_unseen` episode，权重无未处理 missing/extra layer。详细命令、性能和远端日志见 `docs/rae-dinov2-eval-host-validation.md`。
+
 本地完整 checkpoint 评测记录见 `docs/ETP-R1_checkpoint_eval_comparison.md`，里面包含单卡评测命令、R2R/RxR 四个 checkpoint 的指标、结果文件路径和并行环境数量调整记录。ETP-R1 与原版 ETPNav 的代码差异分析见 `docs/ETP-R1_vs_ETPNav_diff_analysis.md`。
 
 ## Current Caveats And Open Questions
 
 - `pip check` 会报告 `tensorflow 1.13.1` 声明要求 `tensorboard<1.14`，但 PyTorch 1.9 的 tensorboard 接口要求 `tensorboard>=1.15`。当前选择 `tensorboard==1.15.0`，因为这是项目入口能导入的最低可用折中。
-- 真实训练/评测会启动 Habitat 环境和加载大模型，尚未完整跑一轮；当前完成的是依赖导入、配置解析和资源路径验证。
+- RAE/DINOv2 已完成一步预训练、单环境 SFT/GRPO 和 R2R/RxR 单 episode 冒烟，但尚未启动完整规模的长训练或完整数据集评测；冒烟通过不能替代最终实验指标。
 - 默认旧配置里还有 `habitat_extensions/config/vlnce_task.yaml` 这类历史路径，但 README 的实际脚本使用 `run_r2r/iter_train.yaml` 和 `run_rxr/iter_train.yaml`，这两个路径已验证可解析。
 - 联合预训练配置将 `max_txt_len` 设为 250，`dataset.py` 会截断更长的指令。现有数据中 RxR-Marky 有 38,456 条、RxR train 有 3,097 条超过 250 个词元；这是训练配置造成的截断，不是数据文件缺失。
 - 5 类数据的训练就绪 JSONL 都完整，但转换脚本引用的部分原始源文件和 Gemini 标注中间文件未按原路径保存在当前仓库中。因此可以直接运行联合预训练，但若要从原始指令和 Gemini API 输出开始重新生成全部 JSONL，还需要另行补齐源数据。
@@ -117,6 +119,10 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 - 测评机只有一张 RTX 4090。现有 ETPNav 任务占用 GPU 时，不得并行启动全量特征生成、预训练、SFT、GRPO 或完整评测，也不得擅自中断 ETPNav。
 
 ## Last Reviewed
+
+2026-07-15，为完成 RAE/DINOv2 视觉编码器计划而复查。核对了隔离运行时、全量特征、真实 RAE 数值一致性、离线/在线投影、checkpoint 过滤、三阶段冻结、CLIP 旧 checkpoint 兼容、完整测试和正式 smoke。最终代码验证提交为 `5436799`，正式 smoke manifest 为 `f4503e77b2e338cc4f8efab5a5193ca8223f7afa1ee6e39509f0d16c371e5c76`；完整长训练尚未启动。
+
+2026-07-11，为清理本机重复存储而复查。使用 `rsync -anrc --itemize-changes` 确认 `dataset/extra_files/` 的全部文件已完整存在于正式工程，只有目录时间戳差异；随后删除重复目录，释放约 21GB。删除说明见 `/home/gwl/project/etpr1/dataset/README.extra_files_removed_20260711.md`。
 
 2026-06-08，为把 ETP-R1 建立在 `etpnav` 环境上并组织本地资源而检查。主要检查了 `README.md`、`environment.yaml`、运行脚本、配置文件、本机 conda 环境、本地 Habitat 目录、`extra_files.zip` 和 MP3D 数据。
 
