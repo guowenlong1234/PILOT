@@ -82,6 +82,9 @@ _C.IL.ckpt_to_load = "data/checkpoints/ckpt.0.pth"
 # if True, loads the optimizer state, epoch, and step_id from the ckpt dict.
 _C.IL.is_requeue = False
 _C.IL.gradient_accumulation_steps = 1
+_C.IL.use_fused_adamw = False
+_C.IL.cudnn_benchmark = False
+_C.IL.log_cuda_memory = False
 _C.IL.resumable_checkpoints = False
 _C.IL.keep_last_train_states = 3
 _C.IL.keep_train_state_every_n_iters = 0
@@ -176,6 +179,7 @@ _C.MODEL.spatial_output = True
 _C.MODEL.RGB_ENCODER = CN()
 _C.MODEL.RGB_ENCODER.cnn_type = "TorchVisionResNet50"
 _C.MODEL.RGB_ENCODER.type = "clip"
+_C.MODEL.RGB_ENCODER.precision = "float32"
 _C.MODEL.RGB_ENCODER.model_dir = ""
 _C.MODEL.RGB_ENCODER.stat_path = ""
 _C.MODEL.RGB_ENCODER.raw_output_size = 512

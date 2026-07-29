@@ -93,6 +93,11 @@ def test_formal_r2r_sft_job_preserves_original_global_batch_and_schedule():
         "IL.warmup_iters 500",
         "IL.min_lr_ratio 1.0",
         "IL.waypoint_aug True",
+        "IL.use_fused_adamw True",
+        "IL.cudnn_benchmark True",
+        "IL.log_cuda_memory True",
+        "MODEL.RGB_ENCODER.precision bf16",
+        "PYTORCH_CUDA_ALLOC_CONF=",
         "TASK_CONFIG.DATASET.SUFFIX _90",
         "model_best_step_452500.pt",
     )

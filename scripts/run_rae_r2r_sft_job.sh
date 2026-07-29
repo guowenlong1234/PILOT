@@ -59,6 +59,7 @@ fi
 set +e
 MPLCONFIGDIR=/tmp/matplotlib-etpr1 \
 CUDA_VISIBLE_DEVICES=0 \
+PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,garbage_collection_threshold:0.8} \
 scripts/etpr1_rae_runtime_exec.sh python run.py \
     --exp_name "$EXP_NAME" \
     --run-type dagger \
@@ -79,6 +80,9 @@ scripts/etpr1_rae_runtime_exec.sh python run.py \
     IL.min_lr_ratio 1.0 \
     IL.waypoint_aug True \
     IL.amp_init_scale 16384.0 \
+    IL.use_fused_adamw True \
+    IL.cudnn_benchmark True \
+    IL.log_cuda_memory True \
     IL.resumable_checkpoints True \
     IL.keep_last_train_states 3 \
     IL.keep_train_state_every_n_iters 5000 \
@@ -91,6 +95,7 @@ scripts/etpr1_rae_runtime_exec.sh python run.py \
     RESULTS_DIR "$OUTPUT_ROOT/results/" \
     MODEL.pretrained_path \
     pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp/best/model_best_step_452500.pt \
+    MODEL.RGB_ENCODER.precision bf16 \
     2>&1 | tee -a "$LOG_FILE"
 exit_code=${PIPESTATUS[0]}
 set -e

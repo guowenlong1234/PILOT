@@ -6,6 +6,23 @@ import torch.nn as nn
 from transformers import AutoImageProcessor, Dinov2WithRegistersModel
 
 
+_COMPUTE_DTYPES = {
+    "float32": torch.float32,
+    "bf16": torch.bfloat16,
+}
+
+
+def resolve_rae_compute_dtype(precision: str) -> torch.dtype:
+    normalized = str(precision).lower()
+    if normalized not in _COMPUTE_DTYPES:
+        supported = ", ".join(sorted(_COMPUTE_DTYPES))
+        raise ValueError(
+            f"Unsupported RAE/DINOv2 precision {precision!r}; "
+            f"expected one of: {supported}"
+        )
+    return _COMPUTE_DTYPES[normalized]
+
+
 def _prepare_cls_stat(
     stat: torch.Tensor,
     cls: torch.Tensor,
@@ -73,8 +90,16 @@ def normalize_rae_cls(
 class RaeDinov2ClsEncoder(nn.Module):
     output_size = 768
 
-    def __init__(self, model_dir, stat_path, device):
+    def __init__(
+        self,
+        model_dir,
+        stat_path,
+        device,
+        precision: str = "float32",
+    ):
         super().__init__()
+        self.precision = str(precision).lower()
+        self.compute_dtype = resolve_rae_compute_dtype(self.precision)
         self.backbone = Dinov2WithRegistersModel.from_pretrained(
             model_dir,
             local_files_only=True,
@@ -117,6 +142,7 @@ class RaeDinov2ClsEncoder(nn.Module):
         )
 
         self.to(device)
+        self.backbone.to(dtype=self.compute_dtype)
         self.train(False)
 
     @property
@@ -156,13 +182,29 @@ class RaeDinov2ClsEncoder(nn.Module):
                 dtype=torch.float32,
             ).div(255.0)
             rgb = (rgb - self.image_mean) / self.image_std
+
+        if self.compute_dtype == torch.float32:
+            autocast_context = torch.autocast(
+                device_type=device_type,
+                enabled=False,
+            )
+        else:
+            autocast_context = torch.autocast(
+                device_type=device_type,
+                dtype=self.compute_dtype,
+            )
+
+        with autocast_context:
+            rgb = rgb.to(dtype=self.compute_dtype)
             hidden_state = self.backbone(rgb).last_hidden_state
-            cls = hidden_state[:, 0].float()
-            if tuple(cls.shape) != (rgb.shape[0], self.output_size):
-                raise ValueError(
-                    f"RAE/DINOv2 backbone returned CLS shape {tuple(cls.shape)}, "
-                    f"expected {(rgb.shape[0], self.output_size)}"
-                )
+        cls = hidden_state[:, 0].float()
+        if tuple(cls.shape) != (rgb.shape[0], self.output_size):
+            raise ValueError(
+                f"RAE/DINOv2 backbone returned CLS shape {tuple(cls.shape)}, "
+                f"expected {(rgb.shape[0], self.output_size)}"
+            )
+
+        with torch.autocast(device_type=device_type, enabled=False):
             cls = normalize_rae_cls(
                 cls,
                 self.latent_mean,

@@ -7,6 +7,7 @@ from vlnce_baselines.models.encoders import rae_dinov2_encoder as encoder_module
 from vlnce_baselines.models.encoders.rae_dinov2_encoder import (
     RaeDinov2ClsEncoder,
     normalize_rae_cls,
+    resolve_rae_compute_dtype,
 )
 
 
@@ -250,6 +251,27 @@ def test_encoder_disables_outer_autocast_for_backbone(fake_encoder):
 
     assert fake_encoder.backbone.last_hidden_dtype == torch.float32
     assert output.dtype == torch.float32
+
+
+def test_encoder_can_run_backbone_in_bf16_and_return_float32(fake_encoder):
+    fake_encoder.precision = "bf16"
+    fake_encoder.compute_dtype = torch.bfloat16
+    fake_encoder.backbone.to(dtype=torch.bfloat16)
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        output = fake_encoder(
+            {"rgb": torch.zeros(1, 224, 224, 3, dtype=torch.uint8)}
+        )
+
+    assert fake_encoder.backbone.last_hidden_dtype == torch.bfloat16
+    assert fake_encoder.backbone.scale.dtype == torch.bfloat16
+    assert output.dtype == torch.float32
+    assert torch.isfinite(output).all()
+
+
+def test_encoder_rejects_unknown_compute_precision():
+    with pytest.raises(ValueError, match="Unsupported RAE/DINOv2 precision"):
+        resolve_rae_compute_dtype("float8")
 
 
 def test_encoder_is_never_blind(fake_encoder):

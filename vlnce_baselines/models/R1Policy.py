@@ -34,6 +34,43 @@ from vlnce_baselines.models.utils import (
     angle_feature_with_ele, dir_angle_feature_with_ele, angle_feature_torch, length2mask)
 import math
 
+
+def pack_panoramic_observations(observations, num_views=12):
+    """Pack per-sensor tensors into the legacy clockwise B*V layout."""
+    depth_keys = [
+        key
+        for key in observations
+        if key == "depth" or key.startswith("depth_")
+    ]
+    if len(depth_keys) != num_views:
+        raise ValueError(
+            f"Expected {num_views} panoramic depth sensors, "
+            f"got {len(depth_keys)}: {depth_keys}"
+        )
+
+    # The legacy loop placed the base view first, then reversed all rotated
+    # views. Building the stack in that order removes B*V indexed GPU copies.
+    ordered_depth_keys = [depth_keys[0], *reversed(depth_keys[1:])]
+    ordered_rgb_keys = [
+        key.replace("depth", "rgb", 1) for key in ordered_depth_keys
+    ]
+    missing_rgb = [key for key in ordered_rgb_keys if key not in observations]
+    if missing_rgb:
+        raise ValueError(
+            f"Missing panoramic RGB sensors paired with depth: {missing_rgb}"
+        )
+
+    depth_batch = torch.stack(
+        [observations[key] for key in ordered_depth_keys],
+        dim=1,
+    ).flatten(0, 1)
+    rgb_batch = torch.stack(
+        [observations[key] for key in ordered_rgb_keys],
+        dim=1,
+    ).flatten(0, 1)
+    return depth_batch, rgb_batch
+
+
 @baseline_registry.register_policy
 class R1Policy(ILPolicy):
     def __init__(
@@ -149,6 +186,11 @@ class ETP(Net):
                 model_config.RGB_ENCODER.model_dir,
                 model_config.RGB_ENCODER.stat_path,
                 self.device,
+                precision=getattr(
+                    model_config.RGB_ENCODER,
+                    "precision",
+                    "float32",
+                ),
             )
         else:
             raise ValueError(
@@ -202,18 +244,10 @@ class ETP(Net):
             NUM_ANGLES = 120    # 120 angles 3 degrees each
             NUM_IMGS = 12
             NUM_CLASSES = 12    # 12 distances at each sector
-            depth_batch = torch.zeros_like(observations['depth']).repeat(NUM_IMGS, 1, 1, 1)
-            rgb_batch = torch.zeros_like(observations['rgb']).repeat(NUM_IMGS, 1, 1, 1)
-
-            # reverse the order of input images to clockwise
-            a_count = 0
-            for i, (k, v) in enumerate(observations.items()):
-                if 'depth' in k:  # You might need to double check the keys order
-                    for bi in range(v.size(0)):
-                        ra_count = (NUM_IMGS - a_count) % NUM_IMGS
-                        depth_batch[ra_count + bi*NUM_IMGS] = v[bi]
-                        rgb_batch[ra_count + bi*NUM_IMGS] = observations[k.replace('depth','rgb')][bi]
-                    a_count += 1
+            depth_batch, rgb_batch = pack_panoramic_observations(
+                observations,
+                num_views=NUM_IMGS,
+            )
             obs_view12 = {}
             obs_view12['depth'] = depth_batch
             obs_view12['rgb'] = rgb_batch
@@ -224,8 +258,13 @@ class ETP(Net):
             )
 
             ''' waypoint prediction ----------------------------- '''
-            waypoint_heatmap_logits = waypoint_predictor(
-                rgb_embedding, depth_embedding)
+            # Waypoint selection is discrete and contributes no gradient.
+            # Avoid retaining a useless graph through the frozen predictor.
+            with torch.no_grad():
+                waypoint_heatmap_logits = waypoint_predictor(
+                    rgb_embedding.detach(),
+                    depth_embedding.detach(),
+                )
 
             # reverse the order of images back to counter-clockwise
             rgb_embed_reshape = rgb_embedding.reshape(
@@ -282,38 +321,89 @@ class ETP(Net):
                     waypoint_heatmap_logits[:,:-HEATMAP_OFFSET,:],
                 ), dim=1)
                 batch_way_heats_regional = batch_way_heats_regional.reshape(batch_size, 12, 10, 12)
-                batch_sample_angle_idxes = []
-                batch_sample_distance_idxes = []
+                batch_candidate_angle_idxes = []
+                batch_candidate_distance_idxes = []
                 # batch_way_log_prob = []
                 for j in range(batch_size):
                     # angle indexes with candidates
                     angle_idxes = batch_output_map[j].nonzero()[:, 0]
                     # clockwise image indexes (same as batch_x_norm)
-                    img_idxes = ((angle_idxes.cpu().numpy()+5) // 10)
-                    img_idxes[img_idxes==12] = 0
+                    img_idxes = torch.div(
+                        angle_idxes + 5,
+                        10,
+                        rounding_mode="floor",
+                    ).remainder(NUM_IMGS)
                     # # candidate waypoint states
                     # way_feats_regional = way_feats[j][img_idxes]
                     # heatmap regions for sampling
-                    way_heats_regional = batch_way_heats_regional[j][img_idxes].view(img_idxes.size, -1)
+                    way_heats_regional = batch_way_heats_regional[j][
+                        img_idxes
+                    ].reshape(img_idxes.numel(), -1)
                     way_heats_probs = F.softmax(way_heats_regional, 1)
                     probs_c = torch.distributions.Categorical(way_heats_probs)
                     way_heats_act = probs_c.sample().detach()
-                    sample_angle_idxes = []
-                    sample_distance_idxes = []
-                    for k, way_act in enumerate(way_heats_act):
-                        if img_idxes[k] != 0:
-                            angle_pointer = (img_idxes[k] - 1) * 10 + 5
-                        else:
-                            angle_pointer = 0
-                        sample_angle_idxes.append(way_act//12+angle_pointer)
-                        sample_distance_idxes.append(way_act%12)
-                    batch_sample_angle_idxes.append(sample_angle_idxes)
-                    batch_sample_distance_idxes.append(sample_distance_idxes)
+                    angle_pointer = torch.where(
+                        img_idxes != 0,
+                        (img_idxes - 1) * 10 + 5,
+                        torch.zeros_like(img_idxes),
+                    )
+                    batch_candidate_angle_idxes.append(
+                        torch.div(
+                            way_heats_act,
+                            NUM_CLASSES,
+                            rounding_mode="floor",
+                        )
+                        + angle_pointer
+                    )
+                    batch_candidate_distance_idxes.append(
+                        way_heats_act.remainder(NUM_CLASSES)
+                    )
                     # batch_way_log_prob.append(
                     #     probs_c.log_prob(way_heats_act))
             else:
                 # batch_way_log_prob = None
-                None
+                batch_candidate_angle_idxes = [
+                    batch_output_map[j].nonzero()[:, 0]
+                    for j in range(batch_size)
+                ]
+                batch_candidate_distance_idxes = [
+                    batch_output_map[j].nonzero()[:, 1]
+                    for j in range(batch_size)
+                ]
+
+            candidate_lengths = [
+                indexes.numel() for indexes in batch_candidate_angle_idxes
+            ]
+            batch_candidate_img_idxes = [
+                (
+                    12
+                    - torch.div(
+                        indexes + 5,
+                        10,
+                        rounding_mode="floor",
+                    )
+                ).remainder(NUM_IMGS)
+                for indexes in batch_candidate_angle_idxes
+            ]
+            packed_candidate_indexes = torch.cat(
+                [
+                    torch.stack((angle_indexes, distance_indexes), dim=1)
+                    for angle_indexes, distance_indexes in zip(
+                        batch_candidate_angle_idxes,
+                        batch_candidate_distance_idxes,
+                    )
+                ],
+                dim=0,
+            )
+            # One synchronization replaces repeated .cpu(), .numpy(), .item()
+            # calls in the per-environment candidate loop.
+            packed_candidate_indexes_cpu = (
+                packed_candidate_indexes.detach().cpu()
+            )
+            candidate_indexes_cpu = packed_candidate_indexes_cpu.split(
+                candidate_lengths,
+                dim=0,
+            )
             
             rgb_feats = self.space_pool_rgb(rgb_feats)
             depth_feats = self.space_pool_depth(depth_feats)
@@ -326,25 +416,22 @@ class ETP(Net):
             cand_angles = []
             cand_distances = []
             for j in range(batch_size):
-                if in_train:
-                    angle_idxes = torch.tensor(batch_sample_angle_idxes[j])
-                    distance_idxes = torch.tensor(batch_sample_distance_idxes[j])
-                else:
-                    angle_idxes = batch_output_map[j].nonzero()[:, 0]
-                    distance_idxes = batch_output_map[j].nonzero()[:, 1]
+                angle_idxes = candidate_indexes_cpu[j][:, 0]
+                distance_idxes = candidate_indexes_cpu[j][:, 1]
                 # for angle & distance
-                angle_rad_c = angle_idxes.cpu().float()/120*2*math.pi       # 顺时针
+                angle_rad_c = angle_idxes.float()/120*2*math.pi       # 顺时针
                 angle_rad_cc = 2*math.pi-angle_idxes.float()/120*2*math.pi  # 逆时针
                 cand_angle_fts.append( angle_feature_torch(angle_rad_c) )
                 cand_angles.append(angle_rad_cc.tolist())
                 cand_distances.append( ((distance_idxes + 1)*0.25).tolist() )
                 # for img idxes
-                img_idxes = 12 - (angle_idxes.cpu().numpy()+5) // 10        # 逆时针
+                img_idxes = 12 - (angle_idxes.numpy()+5) // 10        # 逆时针
                 img_idxes[img_idxes==12] = 0
                 cand_img_idxes.append(img_idxes)
                 # for rgb & depth
-                cand_rgb.append(rgb_feats[j, img_idxes, ...])
-                cand_depth.append(depth_feats[j, img_idxes, ...])
+                gpu_img_idxes = batch_candidate_img_idxes[j]
+                cand_rgb.append(rgb_feats[j, gpu_img_idxes, ...])
+                cand_depth.append(depth_feats[j, gpu_img_idxes, ...])
             
             # for pano
             pano_rgb = rgb_feats                            # B x 12 x 2048

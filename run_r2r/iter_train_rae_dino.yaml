@@ -118,6 +118,7 @@ MODEL:
   spatial_output: False
   RGB_ENCODER:
     type: rae_dinov2
+    precision: float32
     model_dir: pretrained/rae_dinov2_with_registers_base
     stat_path: pretrained/rae_dinov2_with_registers_base/stat.pt
     raw_output_size: 768

@@ -150,6 +150,7 @@ class GraphMap(object):
         self.ghost_embeds = {}      # viewpoint to single_view feature
         self.ghost_fronts = {}      # viewpoint to front_vp id
         self.ghost_real_pos = {}    # for training
+        self.ghost_goal_dists = {}  # cached geodesic distance for real pos
         self.has_real_pos = has_real_pos
         self.merge_ghost = merge_ghost
         self.ghost_aug = ghost_aug  # 0 ~ 1, noise level
@@ -189,11 +190,18 @@ class GraphMap(object):
         self.ghost_fronts.pop(vp)
         if self.has_real_pos:
             self.ghost_real_pos.pop(vp)
+            self.ghost_goal_dists.pop(vp)
 
     def update_graph(self, prev_vp, step_id,
                            cur_vp, cur_pos, cur_embeds,
                            cand_vp, cand_pos, cand_embeds, 
-                           cand_real_pos):
+                           cand_real_pos, cand_goal_dists=None):
+        if cand_goal_dists is None:
+            cand_goal_dists = [None] * len(cand_vp)
+        if len(cand_goal_dists) != len(cand_vp):
+            raise ValueError(
+                "candidate goal-distance count must match candidate count"
+            )
         # 1. connect prev_vp
         self.graph_nx.add_node(cur_vp)
         if prev_vp is not None:
@@ -225,6 +233,9 @@ class GraphMap(object):
                         self.ghost_fronts[gvp] = [cur_vp]
                         if self.has_real_pos:
                             self.ghost_real_pos[gvp] = [cand_real_pos[i]]
+                            self.ghost_goal_dists[gvp] = [
+                                cand_goal_dists[i]
+                            ]
                     # update ghost
                     else:
                         gvp = localized_gvp
@@ -235,6 +246,9 @@ class GraphMap(object):
                         self.ghost_fronts[gvp].append(cur_vp)
                         if self.has_real_pos:
                             self.ghost_real_pos[gvp].append(cand_real_pos[i])
+                            self.ghost_goal_dists[gvp].append(
+                                cand_goal_dists[i]
+                            )
                 else:
                     gvp = f'g{str(self.ghost_cnt)}'
                     self.ghost_cnt += 1
@@ -244,6 +258,7 @@ class GraphMap(object):
                     self.ghost_fronts[gvp] = [cur_vp]
                     if self.has_real_pos:
                         self.ghost_real_pos[gvp] = [cand_real_pos[i]]
+                        self.ghost_goal_dists[gvp] = [cand_goal_dists[i]]
         
         self.ghost_aug_pos = deepcopy(self.ghost_mean_pos)
         if self.ghost_aug != 0:

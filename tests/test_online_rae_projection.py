@@ -591,6 +591,7 @@ def test_rae_yaml_only_changes_allowed_fields(
         ("RESULTS_DIR",),
         ("MODEL", "pretrained_path"),
         ("MODEL", "RGB_ENCODER", "type"),
+        ("MODEL", "RGB_ENCODER", "precision"),
         ("MODEL", "RGB_ENCODER", "model_dir"),
         ("MODEL", "RGB_ENCODER", "stat_path"),
         ("MODEL", "RGB_ENCODER", "raw_output_size"),
@@ -604,6 +605,7 @@ def test_rae_yaml_only_changes_allowed_fields(
     assert changed == allowed
     assert rae["MODEL"]["RGB_ENCODER"] == {
         "type": "rae_dinov2",
+        "precision": "float32",
         "model_dir": "pretrained/rae_dinov2_with_registers_base",
         "stat_path": "pretrained/rae_dinov2_with_registers_base/stat.pt",
         "raw_output_size": 768,

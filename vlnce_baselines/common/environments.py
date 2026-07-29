@@ -451,6 +451,88 @@ class VLNCEDaggerEnv(habitat.RLEnv):
         ori = np.array([*(agent_state.rotation.imag), agent_state.rotation.real])
         return (pos, ori)
 
+    def get_navigation_state(
+        self,
+        angles,
+        forwards,
+        include_current_goal_distance=True,
+        include_candidate_goal_distances=True,
+    ):
+        """Return pose and all candidate states in one worker request."""
+        if len(angles) != len(forwards):
+            raise ValueError(
+                "candidate angles and forward distances must have equal length"
+            )
+
+        sim = self._env.sim
+        init_state = sim.get_agent_state()
+        init_position = np.array(init_state.position, copy=True)
+        init_rotation = init_state.rotation
+        orientation = np.array(
+            [*(init_rotation.imag), init_rotation.real],
+            copy=True,
+        )
+        goal_position = None
+        if (
+            include_current_goal_distance
+            or include_candidate_goal_distances
+        ):
+            goal_position = self._env.current_episode.goals[-1].position
+        current_goal_distance = None
+        if include_current_goal_distance:
+            current_goal_distance = sim.geodesic_distance(
+                init_position,
+                goal_position,
+            )
+
+        forward_action = habitat_sim_action("MOVE_FORWARD")
+        init_forward = sim.get_agent(0).agent_config.action_space[
+            forward_action
+        ].actuation.amount
+        candidate_positions = []
+        candidate_goal_distances = []
+        try:
+            for angle, forward in zip(angles, forwards):
+                theta = (
+                    np.arctan2(
+                        init_rotation.imag[1],
+                        init_rotation.real,
+                    )
+                    + angle / 2
+                )
+                rotation = np.quaternion(
+                    np.cos(theta),
+                    0,
+                    np.sin(theta),
+                    0,
+                )
+                sim.set_agent_state(init_position, rotation)
+                for _ in range(int(forward // init_forward)):
+                    sim.step_without_obs(forward_action)
+                post_position = np.array(
+                    sim.get_agent_state().position,
+                    copy=True,
+                )
+                candidate_positions.append(post_position)
+                if include_candidate_goal_distances:
+                    candidate_goal_distances.append(
+                        sim.geodesic_distance(
+                            post_position,
+                            goal_position,
+                        )
+                    )
+                sim.set_agent_state(init_position, init_rotation)
+        finally:
+            sim.set_agent_state(init_position, init_rotation)
+
+        return {
+            "position": init_position,
+            "orientation": orientation,
+            "current_goal_distance": current_goal_distance,
+            "candidate_positions": candidate_positions,
+            "candidate_goal_distances": candidate_goal_distances,
+        }
+
     def get_observation_at(self,
         source_position: List[float],
         source_rotation: List[Union[int, np.float64]],
@@ -488,27 +570,13 @@ class VLNCEDaggerEnv(habitat.RLEnv):
     
     def get_cand_real_pos(self, forward, angle):
         '''get cand real_pos by executing action'''
-
-        sim = self._env.sim
-        init_state = sim.get_agent_state()
-
-        forward_action = habitat_sim_action("MOVE_FORWARD")
-        init_forward = sim.get_agent(0).agent_config.action_space[forward_action].actuation.amount
-
-        theta = np.arctan2(init_state.rotation.imag[1], init_state.rotation.real) + angle / 2
-        rotation = np.quaternion(np.cos(theta), 0, np.sin(theta), 0)
-        sim.set_agent_state(init_state.position, rotation)
-
-        ksteps = int(forward//init_forward)
-        for k in range(ksteps):
-            sim.step_without_obs(forward_action)
-        post_state = sim.get_agent_state()
-        post_pose = post_state.position
-
-        # reset agent state
-        sim.set_agent_state(init_state.position, init_state.rotation)
-        
-        return post_pose
+        state = self.get_navigation_state(
+            angles=[angle],
+            forwards=[forward],
+            include_current_goal_distance=False,
+            include_candidate_goal_distances=False,
+        )
+        return state["candidate_positions"][0]
 
     def current_dist_to_refpath(self, path):
         sim = self._env.sim
