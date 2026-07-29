@@ -100,4 +100,6 @@ ssh eval 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_r2r_sft_host.sh stop'
   混合精度缩放器状态完整。
 - SFT 审计确认 6 个 RGB 投影参数均已更新，冻结的 DINOv2 骨干未写入
   在线 checkpoint。
-- 完整测试：`302 passed, 3 warnings`。
+- 独立保存实测：模型文件约 1.53GB，不含优化器；恢复状态约 3.00GB，
+  不含模型参数。删除旧恢复状态后，同迭代的模型文件保持不变。
+- 完整测试：`305 passed, 3 warnings`。
