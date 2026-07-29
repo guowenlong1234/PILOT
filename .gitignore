@@ -2,6 +2,9 @@
 .ftpconfig
 .vscode
 .worktrees/
+.runtime/
+.task2_logs/
+.git.training-worktree-pointer.before-central-*
 
 # Byte-compiled / optimized / DLL files
 .ipynb_checkpoints/
