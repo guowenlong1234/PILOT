@@ -6,6 +6,8 @@
 - 单次小 batch：16。
 - 梯度累积：8 次。
 - 有效 batch：128，与原四卡 `4 x 32` 一致。
+- 数据加载：`n_workers=0`、`pin_mem=false`，不创建 DataLoader 子进程。
+- CPU batch 后台线程预取：开启；只在线程中准备下一批数据，CUDA 搬运仍由训练主线程完成。
 - 总参数更新：500,000。
 - 每 2,500 次更新验证并保存一次。
 - 最近 3 个检查点同时保留模型和完整训练状态，可用于恢复。
@@ -90,6 +92,8 @@ pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp/supervisor/
 ## 恢复边界
 
 - 恢复时强制核对单卡 batch、梯度累积、GPU 数量和模型结构配置；不一致会直接拒绝，避免接错实验。
+- 不要把 `n_workers` 改回 1，也不要重新开启 `pin_mem`。旧配置会在 CUDA、HDF5 和大模型初始化后，以 Linux 默认 `fork` 为 MLM、SAP 各创建一个 worker；它曾先后触发 worker 堆内存错误、worker 段错误和 rank 0 段错误。
+- 当前 `thread_prefetch=true` 使用同一进程内的一个后台线程重叠 CPU batch 准备和 GPU 计算，不经过多进程队列、共享内存或锁页内存线程。
 - `num_train_steps` 可以在恢复时增加，因此允许延长训练。
 - 当前每 2,500 步生成一个恢复点。突然断电最多会丢失最近一个保存间隔内的进度。
 - 数据加载器会从新的随机采样流继续，不承诺中断前后的逐样本、逐位完全一致；模型、优化器、学习率所对应的全局步数和随机状态会恢复。
@@ -107,4 +111,11 @@ pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp/supervisor/
 - 验证日志保存在测评机 `data/logs/rae_dino_resume_validation/20260715/`。
 - 最佳模型验证日志保存在测评机 `data/logs/rae_dino_best_checkpoint_validation/20260715/`。
 
-本轮没有启动正式 500,000 步训练。
+2026-07-23 又完成数据加载稳定性修复验证：
+
+- 原 `n_workers=1` 实际会为 MLM、SAP 创建两个 worker；真实数据压力测试确认每个 worker 初始 RSS 约 14GB，并随特征缓存增长到约 15GB。
+- `pin_mem=true` 与 `pin_mem=false` 各完成 5,000 个真实 micro-batch；短测不能稳定复现低概率段错误，但确认关闭锁页内存不能消除大进程 `fork` 结构。
+- 新的单进程后台线程预取用正式 `train_state_117500.pt` 完成真实模型短测，从 117,500 推进到 117,703；没有 DataLoader 子进程或异常。
+- 同步单进程路径约 1.48 秒/步，后台线程预取约 1.27 秒/步，短测提速约 14%。
+- 修复后完整测试为 `290 passed, 3 warnings`。
+- 压力测试日志位于测评机 `data/logs/dataloader_stress/`，真实模型测速日志位于 `data/logs/thread_prefetch_benchmark/`。

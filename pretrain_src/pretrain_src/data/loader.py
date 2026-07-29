@@ -7,6 +7,9 @@ Modified from Nvidia Deep Learning Examples
 (https://github.com/NVIDIA/DeepLearningExamples/tree/master/PyTorch).
 """
 import random
+import queue
+import threading
+import traceback
 from typing import List, Dict, Tuple, Union, Iterator
 
 import torch
@@ -124,6 +127,78 @@ class PrefetchLoader(object):
     def __getattr__(self, name):
         method = self.loader.__getattribute__(name)
         return method
+
+
+class _PrefetchException:
+    def __init__(self, exception, formatted_traceback):
+        self.exception = exception
+        self.formatted_traceback = formatted_traceback
+
+
+_PREFETCH_END = object()
+
+
+class ThreadPrefetchLoader:
+    """Prepare CPU batches in one background thread, without forking."""
+
+    def __init__(self, loader, device: torch.device, prefetch_size: int = 2):
+        if prefetch_size < 1:
+            raise ValueError("prefetch_size must be at least 1")
+        self.loader = loader
+        self.device = device
+        self.prefetch_size = prefetch_size
+
+    def __iter__(self):
+        source = iter(self.loader)
+        batches = queue.Queue(maxsize=self.prefetch_size)
+        stop = threading.Event()
+
+        def put_unless_stopped(item):
+            while not stop.is_set():
+                try:
+                    batches.put(item, timeout=0.1)
+                    return True
+                except queue.Full:
+                    continue
+            return False
+
+        def produce():
+            try:
+                while not stop.is_set():
+                    put_unless_stopped(next(source))
+            except StopIteration:
+                put_unless_stopped(_PREFETCH_END)
+            except BaseException as exc:
+                put_unless_stopped(
+                    _PrefetchException(exc, traceback.format_exc())
+                )
+
+        producer = threading.Thread(
+            target=produce,
+            name="etpr1-cpu-batch-prefetch",
+            daemon=True,
+        )
+        producer.start()
+        try:
+            while True:
+                item = batches.get()
+                if item is _PREFETCH_END:
+                    return
+                if isinstance(item, _PrefetchException):
+                    raise RuntimeError(
+                        "CPU batch prefetch failed:\n"
+                        f"{item.formatted_traceback}"
+                    ) from item.exception
+                yield move_to_cuda(item, self.device)
+        finally:
+            stop.set()
+            producer.join(timeout=1)
+
+    def __len__(self):
+        return len(self.loader)
+
+    def __getattr__(self, name):
+        return self.loader.__getattribute__(name)
 
 
 def build_dataloader(task, dataset, collate_fn, is_train: bool, opts):

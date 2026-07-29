@@ -16,12 +16,12 @@
 
 ## 测评机身份约定
 
-- 用户提到“4090”或“测评机”时，固定指通过网线直连的另一台 Ubuntu 主机，不是当前本机。
-- 测评机有线地址是 `10.10.10.2`，本机有线地址是 `10.10.10.1`。
-- 优先使用 `ssh 4090`，也可以使用 `ssh eval-4090`。
+- 用户提到“4090”或“测评机”时，固定指主机 `eval-4090`。
+- 从笔记本访问测评机统一使用 `ssh eval`；从训练机访问测评机使用 `ssh eval-4090`。
+- 从笔记本访问训练机统一使用 `ssh server`。
+- SSH 别名负责在局域网与 Tailscale 之间选择稳定入口，不硬编码或猜测动态 IP。
 - 测评机 SSH 用户、主机名都可能显示为 `a6000`，不能仅凭提示符判断机器身份。
-- 测评机 Wi-Fi 备用地址曾为 `192.168.1.110`，但可能随路由器变化；默认不用它。
-- 每次连接后先运行 `hostname`、`whoami`、`ip -br addr`，确认 `eno1` 地址为 `10.10.10.2`。
+- 每次连接后先运行 `hostname` 和 `whoami` 确认机器身份。
 - 测评机工作根固定为 `/home/a6000/gwl`。
 
 ## 本工程的测评机容器
@@ -33,13 +33,13 @@
 - 非交互检查优先使用：
 
 ```bash
-ssh 4090 'docker exec gwl-etpr1-rae bash -lc "<command>"'
+ssh eval 'docker exec gwl-etpr1-rae bash -lc "<command>"'
 ```
 
 - 需要交互终端时使用：
 
 ```bash
-ssh 4090 'docker exec -it gwl-etpr1-rae bash'
+ssh eval 'docker exec -it gwl-etpr1-rae bash'
 ```
 
 - 只有安装系统包等确实需要管理员权限时，才临时使用 `docker exec -u root`。
@@ -74,13 +74,13 @@ cd /home/a6000/gwl/ETP-R1
 - 测评机只有一张 RTX 4090 24GB。运行任何 GPU 命令前先检查：
 
 ```bash
-ssh 4090 'nvidia-smi; docker ps --format "{{.Names}}|{{.Status}}"'
+ssh eval 'nvidia-smi; docker ps --format "{{.Names}}|{{.Status}}"'
 ```
 
 - 同时检查 `gwl-etpnav` 中是否仍有 ETPNav 任务：
 
 ```bash
-ssh 4090 'docker exec gwl-etpnav bash -lc "ps -eo pid,ppid,stat,etime,cmd | grep -E '\''torchrun|run.py|train.py'\'' | grep -v grep || true"'
+ssh eval 'docker exec gwl-etpnav bash -lc "ps -eo pid,ppid,stat,etime,cmd | grep -E '\''torchrun|run.py|train.py'\'' | grep -v grep || true"'
 ```
 
 - 如果 ETPNav 正在占用 GPU，不并行启动本项目的全量特征生成、预训练、SFT、GRPO 或完整评测，也不得擅自结束 ETPNav；应等待资源释放或向用户说明现场情况。只有用户明确授权停止该具体任务时，才能按上一节的授权边界处理。
@@ -88,6 +88,14 @@ ssh 4090 'docker exec gwl-etpnav bash -lc "ps -eo pid,ppid,stat,etime,cmd | grep
 
 ## 代码同步与产物位置
 
+- 本工程中央裸仓库固定为训练机的 `/home/gwl/git/ETP-R1.git`。
+- 三个工作目录分别是：训练机 `/home/gwl/project/etpr1/ETP-R1`、笔记本 `/home/sia/project/ETP-R1`、测评机 `/home/a6000/gwl/ETP-R1`。
+- 笔记本通过 `origin = server:/home/gwl/git/ETP-R1.git` 访问中央仓库；训练机和测评机也以该中央仓库为 `origin`。原 GitHub 仓库保留为 `upstream`，只用于获取上游历史。
+- 常规同步先检查 `git status --short --branch`，提交后使用 `git push origin HEAD`。推送只更新中央裸仓库，不会自动更新其他工作目录。
+- 更新目标工作目录前必须确认没有未提交修改，再执行 `git fetch origin --prune --tags` 和 `git pull --ff-only`。如果目录有改动、分支分叉或无法快进，立即停止并说明，不得强制覆盖。
+- 同步全部本地分支和标签只在用户明确要求时使用 `git push origin --all` 和 `git push origin --tags`。
+- 已由 Git 管理的源码只通过 Git 同步，不用 `scp`、`rsync` 或直接复制目录替代 Git。
+- 中央仓库拒绝新提交中单个超过 10 MiB 的文件。模型、数据集、HDF5、checkpoint、日志、缓存和运行结果不得提交。
 - 源码优先在本机工作区修改并提交，再同步到测评机 `/home/a6000/gwl/ETP-R1`。
 - 同步时保留远端生成的数据、checkpoint 和日志，不使用带删除语义的命令覆盖这些目录。
 - 全量 DINO HDF5、预训练权重、SFT/GRPO checkpoint、评测结果和日志都保存在测评机的 ETP-R1 项目目录或其明确的数据目录中。

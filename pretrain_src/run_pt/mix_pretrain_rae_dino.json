@@ -25,8 +25,9 @@
     "warmup_steps": 20000,
     "seed": 0,
     "fp16": false,
-    "n_workers": 1,
-    "pin_mem": true,
+    "n_workers": 0,
+    "pin_mem": false,
+    "thread_prefetch": true,
     "init_pretrained": "roberta",
 
     "train_datasets": {

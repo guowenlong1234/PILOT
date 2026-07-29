@@ -38,6 +38,12 @@ class TensorboardLogger(object):
     def step(self):
         self._global_step += 1
 
+    def set_step(self, step):
+        step = int(step)
+        if step < 0:
+            raise ValueError("TensorBoard step must be non-negative")
+        self._global_step = step
+
     @property
     def global_step(self):
         return self._global_step
@@ -50,8 +56,7 @@ class TensorboardLogger(object):
             prefix = f'{prefix}_'
         for name, value in log_dict.items():
             if isinstance(value, dict):
-                self.log_scalar_dict(value, self._global_step,
-                                     prefix=f'{prefix}{name}')
+                self.log_scalar_dict(value, prefix=f'{prefix}{name}')
             else:
                 self._logger.add_scalar(f'{prefix}{name}', value,
                                         self._global_step)

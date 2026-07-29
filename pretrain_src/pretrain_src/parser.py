@@ -127,6 +127,14 @@ def load_parser():
         "--n_workers", type=int, default=4, help="number of data workers"
     )
     parser.add_argument("--pin_mem", action="store_true", help="pin memory")
+    parser.add_argument(
+        "--thread_prefetch",
+        action="store_true",
+        help=(
+            "prepare CPU batches in one background thread; intended for "
+            "n_workers=0 to avoid multiprocessing fork"
+        ),
+    )
 
     # distributed computing
     parser.add_argument(

@@ -41,7 +41,12 @@ from optim.misc import build_optimizer
 
 from parser import load_parser, parse_with_config
 
-from data.loader import MetaLoader, PrefetchLoader, build_dataloader
+from data.loader import (
+    MetaLoader,
+    PrefetchLoader,
+    ThreadPrefetchLoader,
+    build_dataloader,
+)
 from data.dataset import R2RTextPathData
 from data.tasks import (
     MlmDataset, mlm_collate,
@@ -269,15 +274,24 @@ def main(opts):
         data_cfg, val_rxr_nav_db, tokenizer, False, device, opts
     )
 
+    use_thread_prefetch = getattr(opts, "thread_prefetch", False)
+    if use_thread_prefetch and opts.n_workers != 0:
+        raise ValueError("thread_prefetch requires n_workers=0")
+    if use_thread_prefetch and opts.local_rank != -1:
+        raise ValueError("thread_prefetch does not support distributed training")
+
     meta_loader = MetaLoader(
         train_dataloaders,
         data_cfg.mix_ratio,
         accum_steps=opts.gradient_accumulation_steps,
         distributed=opts.local_rank != -1,
-        device=device
+        device=torch.device("cpu") if use_thread_prefetch else device,
     )
-    
-    meta_loader = PrefetchLoader(meta_loader, device)
+
+    if use_thread_prefetch:
+        meta_loader = ThreadPrefetchLoader(meta_loader, device)
+    else:
+        meta_loader = PrefetchLoader(meta_loader, device)
 
     # Prepare optimizer
     optimizer = build_optimizer(model, opts)
@@ -308,6 +322,7 @@ def main(opts):
             f"Resume step {global_step} is not below num_train_steps "
             f"{opts.num_train_steps}"
         )
+    TB_LOGGER.set_step(global_step)
     LOGGER.info(f"***** Running training with {opts.world_size} GPUs *****")
     LOGGER.info("  Batch size = %d", opts.train_batch_size if opts.local_rank == -1 else opts.train_batch_size * opts.world_size)
     LOGGER.info("  Accumulate steps = %d", opts.gradient_accumulation_steps)
@@ -369,10 +384,10 @@ def main(opts):
             TB_LOGGER.add_scalar('lr', lr_this_step, global_step)
 
             # NOTE: not gathered across GPUs for efficiency
+            TB_LOGGER.step()
             TB_LOGGER.log_scalar_dict({ll.name: ll.val
                                        for ll in task2loss.values()
                                        if ll.val is not None})
-            TB_LOGGER.step()
 
             # update model params
             if opts.grad_norm != -1:

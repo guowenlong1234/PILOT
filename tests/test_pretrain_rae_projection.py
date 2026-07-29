@@ -436,6 +436,9 @@ def test_rae_pretrain_config_keeps_data_contract_and_uses_safe_single_gpu_batch(
             "gradient_accumulation_steps": 8,
             "keep_last_checkpoints": 3,
             "keep_every_n_steps": 25000,
+            "n_workers": 0,
+            "pin_mem": False,
+            "thread_prefetch": True,
         }
     )
 
