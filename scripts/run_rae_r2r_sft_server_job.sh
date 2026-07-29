@@ -38,6 +38,9 @@ mkdir -p "$(dirname -- "$LOG_FILE")"
 cd "$REPO_ROOT"
 
 export MPLCONFIGDIR=/tmp/matplotlib-etpr1-server
+export GLOG_minloglevel=${GLOG_minloglevel:-2}
+export MAGNUM_LOG=${MAGNUM_LOG:-quiet}
+export HABITAT_SIM_LOG=${HABITAT_SIM_LOG:-quiet}
 export PYTHONPATH="${REPO_ROOT}/scripts/benchmark_shims:${REPO_ROOT}:${REPO_ROOT}/vendor/legacy_clip:${HABITAT_LAB_ROOT}:${RUNTIME_PYTHON}"
 export LD_PRELOAD=/lib/x86_64-linux-gnu/libGLdispatch.so.0
 export ETPR1_BENCH_HABITAT_BASELINES_ROOT="$HABITAT_BASELINES_ROOT"
