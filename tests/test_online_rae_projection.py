@@ -611,8 +611,8 @@ def test_rae_yaml_only_changes_allowed_fields(
         "projection_hidden_size": 768,
     }
     assert rae["MODEL"]["pretrained_path"] == (
-        "pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp/ckpts/"
-        "model_step_500000.pt"
+        "pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp/best/"
+        "model_best_step_452500.pt"
     )
     assert rae["TENSORBOARD_DIR"] == (
         f"data/logs/rae_dinov2/{task_name}/tensorboard/"
