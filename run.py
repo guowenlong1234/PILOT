@@ -40,7 +40,14 @@ def main():
         nargs=argparse.REMAINDER,
         help="Modify config options from command line",
     )
-    parser.add_argument('--local_rank', type=int, default=0, help="local gpu id")
+    parser.add_argument(
+        "--local_rank",
+        "--local-rank",
+        dest="local_rank",
+        type=int,
+        default=int(os.environ.get("LOCAL_RANK", 0)),
+        help="local gpu id",
+    )
     args = parser.parse_args()
     run_exp(**vars(args))
 
