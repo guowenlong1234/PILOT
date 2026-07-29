@@ -107,7 +107,7 @@ set +e
     pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp/best/model_best_step_452500.pt \
     MODEL.RGB_ENCODER.precision bf16 \
     2>&1 \
-    | sed -u '/^PluginManager::Manager: duplicate static plugin .* ignoring$/d' \
+    | "$PYTHON_BIN" -u scripts/filter_habitat_startup_noise.py \
     | tee -a "$LOG_FILE"
 exit_code=${PIPESTATUS[0]}
 set -e
