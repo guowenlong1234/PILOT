@@ -69,6 +69,42 @@ from torch.nn.utils.rnn import pad_sequence
 import cv2
 from collections import OrderedDict
 
+
+def _load_adamw_optimizer_state(
+    optimizer,
+    optimizer_state,
+    use_fused_adamw,
+):
+    """Load AdamW state while preserving the current implementation mode."""
+    saved_param_groups = optimizer_state.get("param_groups")
+    if not isinstance(saved_param_groups, list):
+        raise ValueError("AdamW optimizer state is missing param_groups")
+
+    use_fused_adamw = bool(use_fused_adamw)
+    for param_group in saved_param_groups:
+        param_group["fused"] = use_fused_adamw
+        if use_fused_adamw:
+            param_group["foreach"] = None
+
+    optimizer.load_state_dict(optimizer_state)
+    for param_group in optimizer.param_groups:
+        param_group["fused"] = use_fused_adamw
+        if use_fused_adamw:
+            param_group["foreach"] = None
+
+    migrated_tensors = 0
+    if use_fused_adamw:
+        for parameter, state in optimizer.state.items():
+            for name, value in tuple(state.items()):
+                if (
+                    torch.is_tensor(value)
+                    and value.device != parameter.device
+                ):
+                    state[name] = value.to(device=parameter.device)
+                    migrated_tensors += 1
+    return migrated_tensors
+
+
 @baseline_registry.register_trainer(name="SS-ETP-R1")
 class RLTrainer(BaseVLNCETrainer):
     def __init__(self, config=None):
@@ -414,14 +450,17 @@ class RLTrainer(BaseVLNCETrainer):
                 )
 
             if config.IL.is_requeue:
-                self.optimizer.load_state_dict(
-                    training_state["optim_state"]
+                migrated_optimizer_tensors = _load_adamw_optimizer_state(
+                    self.optimizer,
+                    training_state["optim_state"],
+                    use_fused_adamw,
                 )
-                # Optimizer state dicts also carry implementation flags.
-                # Keep the current run's fused choice when resuming a state
-                # produced by the former non-fused AdamW implementation.
-                for param_group in self.optimizer.param_groups:
-                    param_group["fused"] = use_fused_adamw
+                logger.info(
+                    "Loaded AdamW state with fused=%s; migrated %d state "
+                    "tensor(s) to parameter devices",
+                    use_fused_adamw,
+                    migrated_optimizer_tensors,
+                )
                 self.scheduler.load_state_dict(
                     training_state["scheduler_state"]
                 )

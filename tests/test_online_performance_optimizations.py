@@ -1,13 +1,17 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 from vlnce_baselines.common import environments as environments_module
 from vlnce_baselines.common.environments import VLNCEDaggerEnv
 from vlnce_baselines.models.R1Policy import pack_panoramic_observations
 from vlnce_baselines.models.graph_utils import GraphMap
-from vlnce_baselines.ss_trainer_ETP_R1 import RLTrainer
+from vlnce_baselines.ss_trainer_ETP_R1 import (
+    RLTrainer,
+    _load_adamw_optimizer_state,
+)
 
 
 def _sensor(value, batch_size=2):
@@ -112,6 +116,45 @@ def test_r2r_teacher_action_uses_cached_goal_distance():
     )
 
     assert action.tolist() == [2]
+
+
+@torch.no_grad()
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="fused AdamW requires CUDA",
+)
+def test_legacy_adamw_state_can_resume_with_fused_implementation():
+    legacy_parameter = torch.nn.Parameter(torch.ones(1, device="cuda"))
+    legacy_optimizer = torch.optim.AdamW([legacy_parameter], lr=1e-5)
+    legacy_parameter.grad = torch.ones_like(legacy_parameter)
+    legacy_optimizer.step()
+    legacy_state = legacy_optimizer.state_dict()
+
+    resumed_parameter = torch.nn.Parameter(torch.ones(1, device="cuda"))
+    fused_optimizer = torch.optim.AdamW(
+        [resumed_parameter],
+        lr=1e-5,
+        fused=True,
+    )
+    _load_adamw_optimizer_state(
+        fused_optimizer,
+        legacy_state,
+        use_fused_adamw=True,
+    )
+
+    assert all(
+        group["fused"] is True
+        for group in fused_optimizer.param_groups
+    )
+    assert all(
+        value.device == resumed_parameter.device
+        for state in fused_optimizer.state.values()
+        for value in state.values()
+        if torch.is_tensor(value)
+    )
+
+    resumed_parameter.grad = torch.ones_like(resumed_parameter)
+    fused_optimizer.step()
 
 
 class _Rotation:
