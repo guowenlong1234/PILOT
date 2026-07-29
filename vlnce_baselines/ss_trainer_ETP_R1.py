@@ -265,11 +265,12 @@ class RLTrainer(BaseVLNCETrainer):
         torch.cuda.set_device(self.device)
         if self.world_size > 1:
             distr.init_process_group(backend='nccl', init_method='env://')
-            self.device = self.config.TORCH_GPU_IDS[self.local_rank]
+            device_id = int(self.config.TORCH_GPU_IDS[self.local_rank])
+            self.device = torch.device("cuda", device_id)
             self.config.defrost()
-            self.config.TORCH_GPU_ID = self.config.TORCH_GPU_IDS[self.local_rank]
+            self.config.TORCH_GPU_ID = device_id
             self.config.freeze()
-            torch.cuda.set_device(self.device)
+            torch.cuda.set_device(device_id)
 
     def _init_envs(self):
         # for DDP to load different data
@@ -324,8 +325,9 @@ class RLTrainer(BaseVLNCETrainer):
         if self.config.GPU_NUMBERS > 1:
             print('Using', self.config.GPU_NUMBERS,'GPU!')
             # find_unused_parameters=False fix ddp bug
-            self.policy.net = DDP(self.policy.net.to(self.device), device_ids=[self.device],
-                output_device=self.device, find_unused_parameters=False, broadcast_buffers=False)
+            device_id = self.device.index
+            self.policy.net = DDP(self.policy.net.to(self.device), device_ids=[device_id],
+                output_device=device_id, find_unused_parameters=False, broadcast_buffers=False)
         
         param_optimizer = list(self.policy.named_parameters())
         no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
@@ -1012,10 +1014,11 @@ class RLTrainer(BaseVLNCETrainer):
         self.local_rank = self.config.local_rank
         if self.world_size > 1:
             distr.init_process_group(backend='nccl', init_method='env://')
-            self.device = self.config.TORCH_GPU_IDS[self.local_rank]
-            torch.cuda.set_device(self.device)
+            device_id = int(self.config.TORCH_GPU_IDS[self.local_rank])
+            self.device = torch.device("cuda", device_id)
+            torch.cuda.set_device(device_id)
             self.config.defrost()
-            self.config.TORCH_GPU_ID = self.config.TORCH_GPU_IDS[self.local_rank]
+            self.config.TORCH_GPU_ID = device_id
             self.config.freeze()
         self.traj = self.collect_infer_traj()
         
