@@ -61,7 +61,9 @@ def _projection_by_suffix(checkpoint):
     return projection
 
 
-def _assert_online_checkpoint(checkpoint, expected_iteration):
+def _assert_online_checkpoint(
+    checkpoint, expected_iteration, training_state=None
+):
     state = _state_dict(checkpoint)
     backbone_keys = [key for key in state if is_rgb_backbone_key(key)]
     if backbone_keys:
@@ -79,10 +81,18 @@ def _assert_online_checkpoint(checkpoint, expected_iteration):
             "checkpoint iteration mismatch: "
             f"expected {expected_iteration}, got {checkpoint.get('iteration')}"
         )
-    optimizer = checkpoint.get("optim_state")
+    if training_state is None:
+        training_state = checkpoint
+    if training_state.get("iteration", expected_iteration) != expected_iteration:
+        raise ValueError(
+            "training-state iteration mismatch: "
+            f"expected {expected_iteration}, "
+            f"got {training_state.get('iteration')}"
+        )
+    optimizer = training_state.get("optim_state")
     if not isinstance(optimizer, Mapping) or not optimizer.get("state"):
         raise ValueError("online checkpoint optimizer state is empty")
-    scheduler = checkpoint.get("scheduler_state")
+    scheduler = training_state.get("scheduler_state")
     if not isinstance(scheduler, Mapping) or not scheduler:
         raise ValueError("online checkpoint scheduler_state is missing or empty")
     last_epoch = scheduler.get("last_epoch")
@@ -130,11 +140,16 @@ def audit_pretrain(path, initial_projection_path=None):
     print(f"AUDIT_PRETRAIN_PASS parameters={len(projection)} path={path}")
 
 
-def audit_sft(pretrain_path, checkpoint_path, iteration):
+def audit_sft(
+    pretrain_path, checkpoint_path, iteration, training_state_path=None
+):
     pretrain = _projection_by_suffix(_load(pretrain_path))
     checkpoint = _load(checkpoint_path)
     online = _projection_by_suffix(checkpoint)
-    _assert_online_checkpoint(checkpoint, iteration)
+    training_state = (
+        _load(training_state_path) if training_state_path else None
+    )
+    _assert_online_checkpoint(checkpoint, iteration, training_state)
     for suffix in EXPECTED_SUFFIXES:
         difference = (online[suffix] - pretrain[suffix]).abs()
         changed = int(torch.count_nonzero(difference))
@@ -178,6 +193,7 @@ def main():
     sft.add_argument("pretrain_checkpoint")
     sft.add_argument("online_checkpoint")
     sft.add_argument("--iteration", type=int, required=True)
+    sft.add_argument("--train-state")
 
     frozen = subparsers.add_parser("frozen")
     frozen.add_argument("before_checkpoint")
@@ -192,6 +208,7 @@ def main():
             args.pretrain_checkpoint,
             args.online_checkpoint,
             args.iteration,
+            args.train_state,
         )
     else:
         audit_frozen(

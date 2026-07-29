@@ -4,13 +4,22 @@ import pytest
 
 from vlnce_baselines.common.online_checkpoint import (
     checkpoint_iteration,
+    latest_complete_checkpoint_pair,
     latest_checkpoint_path,
-    prune_checkpoints,
+    prune_training_states,
+    training_state_iteration,
 )
 
 
 def _checkpoint(directory, iteration):
     path = directory / f"ckpt.iter{iteration}.pth"
+    path.write_bytes(str(iteration).encode())
+    return path
+
+
+def _training_state(directory, iteration):
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"train_state.iter{iteration}.pth"
     path.write_bytes(str(iteration).encode())
     return path
 
@@ -23,28 +32,47 @@ def test_latest_checkpoint_uses_numeric_iteration(tmp_path):
     assert latest_checkpoint_path(tmp_path) == str(expected)
 
 
-def test_prune_keeps_recent_and_milestones(tmp_path):
+def test_latest_complete_pair_ignores_unpaired_files(tmp_path):
+    state_dir = tmp_path / "train_states"
+    expected_model = _checkpoint(tmp_path, 800)
+    expected_state = _training_state(state_dir, 800)
+    _checkpoint(tmp_path, 1000)
+    _training_state(state_dir, 600)
+
+    assert latest_complete_checkpoint_pair(tmp_path) == (
+        str(expected_model),
+        str(expected_state),
+    )
+
+
+def test_prune_keeps_all_models_but_only_recent_and_milestone_states(tmp_path):
+    state_dir = tmp_path / "train_states"
     for iteration in range(200, 6200, 200):
         _checkpoint(tmp_path, iteration)
+        _training_state(state_dir, iteration)
 
-    removed = prune_checkpoints(
-        tmp_path,
+    removed = prune_training_states(
+        state_dir,
         keep_last=3,
         keep_every_n_iters=5000,
     )
 
-    retained = {
-        checkpoint_iteration(path)
-        for path in Path(tmp_path).glob("ckpt.iter*.pth")
+    retained_models = {
+        checkpoint_iteration(path) for path in tmp_path.glob("ckpt.iter*.pth")
     }
-    assert retained == {5000, 5600, 5800, 6000}
+    retained_states = {
+        training_state_iteration(path)
+        for path in state_dir.glob("train_state.iter*.pth")
+    }
+    assert retained_models == set(range(200, 6200, 200))
+    assert retained_states == {5000, 5600, 5800, 6000}
     assert len(removed) == 26
 
 
 @pytest.mark.parametrize("keep_last", (0, -1))
 def test_prune_rejects_invalid_keep_last(tmp_path, keep_last):
     with pytest.raises(ValueError, match="keep_last"):
-        prune_checkpoints(tmp_path, keep_last, 0)
+        prune_training_states(tmp_path, keep_last, 0)
 
 
 def test_formal_r2r_sft_job_preserves_original_global_batch_and_schedule():
@@ -56,6 +84,8 @@ def test_formal_r2r_sft_job_preserves_original_global_batch_and_schedule():
         "NUM_ENVIRONMENTS 8",
         "IL.batch_size 8",
         "IL.gradient_accumulation_steps 4",
+        "IL.keep_last_train_states 3",
+        "IL.keep_train_state_every_n_iters 5000",
         "IL.iters 30000",
         "IL.lr 1e-5",
         "IL.sample_ratio 0.75",

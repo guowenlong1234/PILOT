@@ -257,6 +257,20 @@ def test_online_audit_rejects_missing_scheduler_state(tmp_path, monkeypatch):
         _assert_online_checkpoint(checkpoint, 1)
 
 
+def test_online_audit_accepts_separate_training_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(checkpoint_module, "_PROJECT_ROOT", tmp_path)
+    checkpoint = _online_audit_checkpoint(tmp_path)
+    training_state = {
+        "iteration": checkpoint["iteration"],
+        "optim_state": checkpoint.pop("optim_state"),
+        "scheduler_state": checkpoint.pop("scheduler_state"),
+    }
+
+    metadata = _assert_online_checkpoint(checkpoint, 1, training_state)
+
+    assert metadata["type"] == "rae_dinov2"
+
+
 @pytest.mark.parametrize(
     ("missing_field", "message"),
     (

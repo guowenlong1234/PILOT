@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vlnce_baselines.GRPO_trainer_ETP_R1 import RLTrainer as GrpoTrainer
+from vlnce_baselines import ss_trainer_ETP_R1 as sft_trainer_module
 from vlnce_baselines.models import checkpoint_utils as checkpoint_module
 from vlnce_baselines.models.checkpoint_utils import (
     navigation_state_dict,
@@ -543,3 +544,52 @@ def test_trainer_save_branches_include_rgb_metadata_and_keep_sft_projection_trai
         assert all(
             parameter.requires_grad for parameter in projection.parameters()
         )
+
+
+def test_resumable_sft_saves_model_and_training_state_separately(
+    tmp_path, monkeypatch
+):
+    config, _, _ = _config(tmp_path)
+    config.CHECKPOINT_FOLDER = str(tmp_path)
+    config.ONLY_LAST_SAVEALL = True
+    config.IL = SimpleNamespace(
+        iters=2,
+        resumable_checkpoints=True,
+        keep_last_train_states=3,
+        keep_train_state_every_n_iters=5000,
+    )
+    trainer = object.__new__(SftTrainer)
+    trainer.config = config
+    trainer.policy = _FakePolicy()
+    trainer.optimizer = _StateHolder()
+    trainer.scheduler = _StateHolder()
+    trainer.scaler = _StateHolder()
+    saved = []
+    monkeypatch.setattr(
+        sft_trainer_module,
+        "atomic_torch_save",
+        lambda obj, path: saved.append((obj, path)),
+    )
+    monkeypatch.setattr(
+        sft_trainer_module,
+        "prune_training_states",
+        lambda *args: [],
+    )
+
+    trainer.save_checkpoint(1)
+
+    assert len(saved) == 2
+    model, model_path = saved[0]
+    training_state, training_state_path = saved[1]
+    assert model_path.endswith("ckpt.iter1.pth")
+    assert training_state_path.endswith(
+        "train_states/train_state.iter1.pth"
+    )
+    assert "optim_state" not in model
+    assert "scheduler_state" not in model
+    assert "scaler_state" not in model
+    assert training_state["model_checkpoint"] == "ckpt.iter1.pth"
+    assert training_state["iteration"] == 1
+    assert training_state["optim_state"] == {"value": 1}
+    assert training_state["scheduler_state"] == {"value": 1}
+    assert training_state["scaler_state"] == {"value": 1}

@@ -13,6 +13,7 @@ else
     OUTPUT_PATH=${REPO_ROOT}/${OUTPUT_ROOT}
 fi
 CHECKPOINT_DIR=${OUTPUT_PATH}/checkpoints/${EXP_NAME}
+TRAIN_STATE_DIR=${CHECKPOINT_DIR}/train_states
 SUPERVISOR_DIR=${OUTPUT_PATH}/supervisor
 LATEST_LOG=${SUPERVISOR_DIR}/latest.log
 JOB_SCRIPT=${REPO_ROOT}/scripts/run_rae_r2r_sft_job.sh
@@ -53,13 +54,14 @@ launch() {
     ln -sfn "$(basename -- "$log_file")" "$LATEST_LOG"
 
     if [ "$mode" = start ]; then
-        if compgen -G "${CHECKPOINT_DIR}/ckpt.iter*.pth" >/dev/null; then
+        if compgen -G "${CHECKPOINT_DIR}/ckpt.iter*.pth" >/dev/null \
+            || compgen -G "${TRAIN_STATE_DIR}/train_state.iter*.pth" >/dev/null; then
             echo "Existing checkpoints found; use resume." >&2
             exit 1
         fi
     else
-        if ! compgen -G "${CHECKPOINT_DIR}/ckpt.iter*.pth" >/dev/null; then
-            echo "No resumable checkpoint found in ${CHECKPOINT_DIR}" >&2
+        if ! compgen -G "${TRAIN_STATE_DIR}/train_state.iter*.pth" >/dev/null; then
+            echo "No resumable training state found in ${TRAIN_STATE_DIR}" >&2
             exit 1
         fi
     fi
@@ -91,6 +93,9 @@ show_status() {
         --format=csv,noheader
     df -h "$OUTPUT_PATH" 2>/dev/null || df -h "$REPO_ROOT"
     find "$CHECKPOINT_DIR" -maxdepth 1 -name 'ckpt.iter*.pth' \
+        -printf '%T@ %f %s bytes\n' 2>/dev/null \
+        | sort -nr | head -n 10 || true
+    find "$TRAIN_STATE_DIR" -maxdepth 1 -name 'train_state.iter*.pth' \
         -printf '%T@ %f %s bytes\n' 2>/dev/null \
         | sort -nr | head -n 10 || true
     if [ -e "$LATEST_LOG" ]; then

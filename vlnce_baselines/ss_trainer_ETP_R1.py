@@ -61,8 +61,9 @@ from torch.cuda.amp import autocast, GradScaler
 from vlnce_baselines.common.ops import pad_tensors_wgrad, gen_seq_masks
 from vlnce_baselines.common.online_checkpoint import (
     atomic_torch_save,
+    latest_complete_checkpoint_pair,
     latest_checkpoint_path,
-    prune_checkpoints,
+    prune_training_states,
 )
 from torch.nn.utils.rnn import pad_sequence
 import cv2
@@ -103,17 +104,47 @@ class RLTrainer(BaseVLNCETrainer):
         resumable = bool(
             getattr(self.config.IL, "resumable_checkpoints", False)
         )
-        save_training_state = (
-            resumable
-            or not self.config.ONLY_LAST_SAVEALL
-            or iteration == self.config.IL.iters
-        )
         checkpoint = {
             "state_dict": state_dict,
             "rgb_encoder": rgb_encoder_meta,
             "config": self.config,
             "iteration": iteration,
         }
+        checkpoint_path = os.path.join(
+            self.config.CHECKPOINT_FOLDER, f"ckpt.iter{iteration}.pth"
+        )
+        if resumable:
+            training_state = {
+                "format_version": 1,
+                "iteration": iteration,
+                "model_checkpoint": os.path.basename(checkpoint_path),
+                "optim_state": self.optimizer.state_dict(),
+                "scheduler_state": self.scheduler.state_dict(),
+                "scaler_state": self.scaler.state_dict(),
+            }
+            training_state_path = os.path.join(
+                self.config.CHECKPOINT_FOLDER,
+                "train_states",
+                f"train_state.iter{iteration}.pth",
+            )
+            atomic_torch_save(checkpoint, checkpoint_path)
+            atomic_torch_save(training_state, training_state_path)
+            removed = prune_training_states(
+                os.path.dirname(training_state_path),
+                int(self.config.IL.keep_last_train_states),
+                int(self.config.IL.keep_train_state_every_n_iters),
+            )
+            if removed:
+                logger.info(
+                    "Pruned old SFT training states: %s",
+                    ", ".join(path.name for path in removed),
+                )
+            return
+
+        save_training_state = (
+            not self.config.ONLY_LAST_SAVEALL
+            or iteration == self.config.IL.iters
+        )
         if save_training_state:
             checkpoint.update(
                 {
@@ -124,26 +155,10 @@ class RLTrainer(BaseVLNCETrainer):
             if hasattr(self, "scaler"):
                 checkpoint["scaler_state"] = self.scaler.state_dict()
 
-        checkpoint_path = os.path.join(
-            self.config.CHECKPOINT_FOLDER, f"ckpt.iter{iteration}.pth"
+        torch.save(
+            obj=checkpoint,
+            f=checkpoint_path,
         )
-        if resumable:
-            atomic_torch_save(checkpoint, checkpoint_path)
-            removed = prune_checkpoints(
-                self.config.CHECKPOINT_FOLDER,
-                int(self.config.IL.keep_last_checkpoints),
-                int(self.config.IL.keep_every_n_iters),
-            )
-            if removed:
-                logger.info(
-                    "Pruned old SFT checkpoints: %s",
-                    ", ".join(path.name for path in removed),
-                )
-        else:
-            torch.save(
-                obj=checkpoint,
-                f=checkpoint_path,
-            )
 
     def _set_config(self):
         self.split = self.config.TASK_CONFIG.DATASET.SPLIT
@@ -304,16 +319,59 @@ class RLTrainer(BaseVLNCETrainer):
         # self.scheduler.step()
 
         if load_from_ckpt:
+            training_state = None
             if config.IL.is_requeue:
-                ckpt_path = latest_checkpoint_path(
-                    config.CHECKPOINT_FOLDER
-                )
+                if config.IL.resumable_checkpoints:
+                    ckpt_path, training_state_path = (
+                        latest_complete_checkpoint_pair(
+                            config.CHECKPOINT_FOLDER
+                        )
+                    )
+                    training_state = torch.load(
+                        training_state_path, map_location="cpu"
+                    )
+                else:
+                    ckpt_path = latest_checkpoint_path(
+                        config.CHECKPOINT_FOLDER
+                    )
             else:
                 ckpt_path = config.IL.ckpt_to_load
             ckpt_dict = self.load_checkpoint(ckpt_path, map_location="cpu")
             validate_rgb_checkpoint_metadata(ckpt_dict, config)
             if config.IL.is_requeue:
-                start_iter = ckpt_dict["iteration"]
+                if training_state is None:
+                    training_state = ckpt_dict
+                required_training_state = {
+                    "optim_state",
+                    "scheduler_state",
+                    "scaler_state",
+                    "iteration",
+                }
+                missing_training_state = sorted(
+                    required_training_state.difference(training_state)
+                )
+                if missing_training_state:
+                    raise ValueError(
+                        "SFT resume training state is incomplete; missing "
+                        f"{missing_training_state}: {ckpt_path}"
+                    )
+                start_iter = training_state["iteration"]
+                if ckpt_dict.get("iteration") != start_iter:
+                    raise ValueError(
+                        "SFT model and training-state iteration mismatch: "
+                        f"model={ckpt_dict.get('iteration')} "
+                        f"state={start_iter}"
+                    )
+                if config.IL.resumable_checkpoints:
+                    referenced_model = training_state.get(
+                        "model_checkpoint"
+                    )
+                    if referenced_model != os.path.basename(ckpt_path):
+                        raise ValueError(
+                            "SFT training state references the wrong model: "
+                            f"{referenced_model!r} != "
+                            f"{os.path.basename(ckpt_path)!r}"
+                        )
             else:
                 start_iter = 0
 
@@ -343,22 +401,15 @@ class RLTrainer(BaseVLNCETrainer):
                 )
 
             if config.IL.is_requeue:
-                required_training_state = {
-                    "optim_state",
-                    "scheduler_state",
-                    "scaler_state",
-                }
-                missing_training_state = sorted(
-                    required_training_state.difference(ckpt_dict)
+                self.optimizer.load_state_dict(
+                    training_state["optim_state"]
                 )
-                if missing_training_state:
-                    raise ValueError(
-                        "SFT resume checkpoint is incomplete; missing "
-                        f"{missing_training_state}: {ckpt_path}"
-                    )
-                self.optimizer.load_state_dict(ckpt_dict["optim_state"])
-                self.scheduler.load_state_dict(ckpt_dict["scheduler_state"])
-                self.scaler.load_state_dict(ckpt_dict["scaler_state"])
+                self.scheduler.load_state_dict(
+                    training_state["scheduler_state"]
+                )
+                self.scaler.load_state_dict(
+                    training_state["scaler_state"]
+                )
             logger.info(f"Loaded weights from checkpoint: {ckpt_path}, iteration: {start_iter}")
 			
         params = sum(param.numel() for param in self.policy.parameters())

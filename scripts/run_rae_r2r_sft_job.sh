@@ -80,8 +80,8 @@ scripts/etpr1_rae_runtime_exec.sh python run.py \
     IL.waypoint_aug True \
     IL.amp_init_scale 16384.0 \
     IL.resumable_checkpoints True \
-    IL.keep_last_checkpoints 3 \
-    IL.keep_every_n_iters 5000 \
+    IL.keep_last_train_states 3 \
+    IL.keep_train_state_every_n_iters 5000 \
     "${resume_args[@]}" \
     TASK_CONFIG.SIMULATOR.HABITAT_SIM_V0.ALLOW_SLIDING True \
     TASK_CONFIG.DATASET.SUFFIX _90 \
