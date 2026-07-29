@@ -59,6 +59,11 @@ import json
 from copy import deepcopy
 from torch.cuda.amp import autocast, GradScaler
 from vlnce_baselines.common.ops import pad_tensors_wgrad, gen_seq_masks
+from vlnce_baselines.common.online_checkpoint import (
+    atomic_torch_save,
+    latest_checkpoint_path,
+    prune_checkpoints,
+)
 from torch.nn.utils.rnn import pad_sequence
 import cv2
 from collections import OrderedDict
@@ -95,27 +100,49 @@ class RLTrainer(BaseVLNCETrainer):
         state_dict, rgb_encoder_meta = navigation_state_dict(
             self.policy, self.config
         )
-        if self.config.ONLY_LAST_SAVEALL and (not iteration == self.config.IL.iters):
-            torch.save(
-                        obj={
-                            "state_dict": state_dict,
-                            "rgb_encoder": rgb_encoder_meta,
-                            "config": self.config,
-                            "iteration": iteration
-                        },
-                        f=os.path.join(self.config.CHECKPOINT_FOLDER, f"ckpt.iter{iteration}.pth"),
-                    )
-        else:
-            torch.save(
-                obj={
-                    "state_dict": state_dict,
-                    "rgb_encoder": rgb_encoder_meta,
-                    "config": self.config,
+        resumable = bool(
+            getattr(self.config.IL, "resumable_checkpoints", False)
+        )
+        save_training_state = (
+            resumable
+            or not self.config.ONLY_LAST_SAVEALL
+            or iteration == self.config.IL.iters
+        )
+        checkpoint = {
+            "state_dict": state_dict,
+            "rgb_encoder": rgb_encoder_meta,
+            "config": self.config,
+            "iteration": iteration,
+        }
+        if save_training_state:
+            checkpoint.update(
+                {
                     "optim_state": self.optimizer.state_dict(),
                     "scheduler_state": self.scheduler.state_dict(),
-                    "iteration": iteration,
-                },
-                f=os.path.join(self.config.CHECKPOINT_FOLDER, f"ckpt.iter{iteration}.pth"),
+                }
+            )
+            if hasattr(self, "scaler"):
+                checkpoint["scaler_state"] = self.scaler.state_dict()
+
+        checkpoint_path = os.path.join(
+            self.config.CHECKPOINT_FOLDER, f"ckpt.iter{iteration}.pth"
+        )
+        if resumable:
+            atomic_torch_save(checkpoint, checkpoint_path)
+            removed = prune_checkpoints(
+                self.config.CHECKPOINT_FOLDER,
+                int(self.config.IL.keep_last_checkpoints),
+                int(self.config.IL.keep_every_n_iters),
+            )
+            if removed:
+                logger.info(
+                    "Pruned old SFT checkpoints: %s",
+                    ", ".join(path.name for path in removed),
+                )
+        else:
+            torch.save(
+                obj=checkpoint,
+                f=checkpoint_path,
             )
 
     def _set_config(self):
@@ -278,11 +305,9 @@ class RLTrainer(BaseVLNCETrainer):
 
         if load_from_ckpt:
             if config.IL.is_requeue:
-                import glob
-                search_pattern = os.path.join(config.CHECKPOINT_FOLDER, "*.pth")
-                ckpt_list = glob.glob(search_pattern)
-                ckpt_list.sort(key=os.path.getmtime)
-                ckpt_path = ckpt_list[-1]
+                ckpt_path = latest_checkpoint_path(
+                    config.CHECKPOINT_FOLDER
+                )
             else:
                 ckpt_path = config.IL.ckpt_to_load
             ckpt_dict = self.load_checkpoint(ckpt_path, map_location="cpu")
@@ -318,9 +343,22 @@ class RLTrainer(BaseVLNCETrainer):
                 )
 
             if config.IL.is_requeue:
+                required_training_state = {
+                    "optim_state",
+                    "scheduler_state",
+                    "scaler_state",
+                }
+                missing_training_state = sorted(
+                    required_training_state.difference(ckpt_dict)
+                )
+                if missing_training_state:
+                    raise ValueError(
+                        "SFT resume checkpoint is incomplete; missing "
+                        f"{missing_training_state}: {ckpt_path}"
+                    )
                 self.optimizer.load_state_dict(ckpt_dict["optim_state"])
-                if "scheduler_state" in ckpt_dict:
-                    self.scheduler.load_state_dict(ckpt_dict["scheduler_state"])
+                self.scheduler.load_state_dict(ckpt_dict["scheduler_state"])
+                self.scaler.load_state_dict(ckpt_dict["scaler_state"])
             logger.info(f"Loaded weights from checkpoint: {ckpt_path}, iteration: {start_iter}")
 			
         params = sum(param.numel() for param in self.policy.parameters())
@@ -537,6 +575,7 @@ class RLTrainer(BaseVLNCETrainer):
                     self.gt_data.update(json.load(f))
 
         observation_space, action_space = self._init_envs()
+        self.scaler = self._create_grad_scaler()
         start_iter = self._initialize_policy(
             self.config,
             self.config.IL.load_from_ckpt,
@@ -548,7 +587,6 @@ class RLTrainer(BaseVLNCETrainer):
         log_every  = self.config.IL.log_every
         writer     = TensorboardWriter(self.config.TENSORBOARD_DIR if self.local_rank < 1 else None)
 
-        self.scaler = self._create_grad_scaler()
         logger.info('Traning Starts... GOOD LUCK!')
 
         if self.config.local_rank < 1:
@@ -597,13 +635,22 @@ class RLTrainer(BaseVLNCETrainer):
         self.logs = defaultdict(list)
 
         self.sap_loss = 0.
+        accumulation_steps = int(
+            getattr(self.config.IL, "gradient_accumulation_steps", 1)
+        )
+        if accumulation_steps < 1:
+            raise ValueError(
+                "IL.gradient_accumulation_steps must be at least 1"
+            )
         for idx in pbar:
             self.optimizer.zero_grad()
-            self.loss = 0.
-            
-            with autocast():
-                self.rollout('train', ml_weight, sample_ratio)
-            self.scaler.scale(self.loss).backward()
+            for _ in range(accumulation_steps):
+                self.loss = 0.
+                with autocast():
+                    self.rollout('train', ml_weight, sample_ratio)
+                self.scaler.scale(
+                    self.loss / accumulation_steps
+                ).backward()
             step_amp_optimizer(
                 self.scaler,
                 self.optimizer,

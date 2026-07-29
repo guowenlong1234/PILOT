@@ -81,6 +81,10 @@ _C.IL.load_from_ckpt = False
 _C.IL.ckpt_to_load = "data/checkpoints/ckpt.0.pth"
 # if True, loads the optimizer state, epoch, and step_id from the ckpt dict.
 _C.IL.is_requeue = False
+_C.IL.gradient_accumulation_steps = 1
+_C.IL.resumable_checkpoints = False
+_C.IL.keep_last_checkpoints = 3
+_C.IL.keep_every_n_iters = 0
 # it True, start training from the saved epoch
 # -----------------------------------------------------------------------------
 # IL: RXR TRAINER CONFIG
