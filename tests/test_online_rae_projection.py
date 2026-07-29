@@ -50,6 +50,9 @@ def _model_config(encoder_type):
         ),
         RGB_ENCODER=SimpleNamespace(
             type=encoder_type,
+            precision=(
+                "bf16" if encoder_type == "rae_dinov2" else "float32"
+            ),
             model_dir="rae-model",
             stat_path="rae-stat.pt",
             raw_output_size=768 if encoder_type == "rae_dinov2" else 512,
@@ -182,12 +185,12 @@ class _FakeRaeEncoder(torch.nn.Module):
     is_blind = False
     calls = []
 
-    def __init__(self, model_dir, stat_path, device):
+    def __init__(self, model_dir, stat_path, device, precision):
         super().__init__()
         self.backbone_weight = torch.nn.Parameter(
             torch.ones(1), requires_grad=False
         )
-        self.calls.append((model_dir, stat_path, device))
+        self.calls.append((model_dir, stat_path, device, precision))
 
 
 class _ConcreteETP(policy_module.ETP):
@@ -233,7 +236,7 @@ def test_etp_builds_configured_rgb_encoder(
     assert isinstance(policy.rgb_encoder, expected_class)
     if encoder_type == "rae_dinov2":
         assert _FakeRaeEncoder.calls == [
-            ("rae-model", "rae-stat.pt", torch.device("cpu"))
+            ("rae-model", "rae-stat.pt", torch.device("cpu"), "bf16")
         ]
 
 
@@ -335,6 +338,13 @@ def test_waypoint_projects_once_and_returns_only_512_dim_features(
         "rgb": torch.zeros(1, 224, 224, 3, dtype=torch.uint8),
         "depth": torch.zeros(1, 256, 256, 1),
     }
+    for heading in range(30, 360, 30):
+        observations[f"rgb_{heading}"] = torch.zeros(
+            1, 224, 224, 3, dtype=torch.uint8
+        )
+        observations[f"depth_{heading}"] = torch.zeros(
+            1, 256, 256, 1
+        )
 
     try:
         outputs = policy(
@@ -369,6 +379,7 @@ def test_online_default_config_explicitly_preserves_clip():
 
     assert rgb.cnn_type == "TorchVisionResNet50"
     assert rgb.type == "clip"
+    assert rgb.precision == "float32"
     assert rgb.model_dir == ""
     assert rgb.stat_path == ""
     assert rgb.raw_output_size == 512
