@@ -1,3 +1,4 @@
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 
 import numpy as np
@@ -12,6 +13,7 @@ from vlnce_baselines.ss_trainer_ETP_R1 import (
     RLTrainer,
     _load_adamw_optimizer_state,
 )
+from vlnce_baselines import ss_trainer_ETP_R1 as sft_trainer_module
 
 
 def _sensor(value, batch_size=2):
@@ -116,6 +118,115 @@ def test_r2r_teacher_action_uses_cached_goal_distance():
     )
 
     assert action.tolist() == [2]
+
+
+class _EvalOnlyModule:
+    def eval(self):
+        return self
+
+
+class _RecordingDdpNet:
+    def __init__(self):
+        self.module = SimpleNamespace(
+            rgb_encoder=_EvalOnlyModule(),
+            depth_encoder=_EvalOnlyModule(),
+        )
+        self.no_sync_active = False
+        self.no_sync_calls = 0
+
+    @contextmanager
+    def no_sync(self):
+        assert not self.no_sync_active
+        self.no_sync_calls += 1
+        self.no_sync_active = True
+        try:
+            yield
+        finally:
+            self.no_sync_active = False
+
+
+class _FakePolicy:
+    def __init__(self, net):
+        self.net = net
+
+    def train(self):
+        return self
+
+
+class _FakeOptimizer:
+    def zero_grad(self, set_to_none=False):
+        assert set_to_none is True
+
+
+class _FakeScaler:
+    def __init__(self):
+        self._scale = 1.0
+
+    def get_scale(self):
+        return self._scale
+
+    @staticmethod
+    def scale(loss):
+        return loss
+
+    @staticmethod
+    def step(_optimizer):
+        return None
+
+    @staticmethod
+    def update():
+        return None
+
+
+def test_sft_gradient_accumulation_only_syncs_final_microbatch(monkeypatch):
+    trainer = object.__new__(RLTrainer)
+    net = _RecordingDdpNet()
+    trainer.policy = _FakePolicy(net)
+    trainer.waypoint_predictor = _EvalOnlyModule()
+    trainer.world_size = 2
+    trainer.local_rank = 1
+    trainer.device = torch.device("cpu")
+    trainer.config = SimpleNamespace(
+        IL=SimpleNamespace(
+            gradient_accumulation_steps=2,
+            log_cuda_memory=False,
+        )
+    )
+    trainer.optimizer = _FakeOptimizer()
+    trainer.scheduler = None
+    trainer.scaler = _FakeScaler()
+
+    forward_no_sync_states = []
+    backward_no_sync_states = []
+
+    def fake_rollout(_mode, _ml_weight, _sample_ratio):
+        forward_no_sync_states.append(net.no_sync_active)
+        loss = torch.ones((), requires_grad=True)
+        loss.register_hook(
+            lambda grad: (
+                backward_no_sync_states.append(net.no_sync_active)
+                or grad
+            )
+        )
+        trainer.loss += loss
+        trainer.logs["IL_loss"].append(float(loss))
+
+    trainer.rollout = fake_rollout
+    monkeypatch.setattr(
+        sft_trainer_module,
+        "autocast",
+        nullcontext,
+    )
+
+    trainer._train_interval(
+        interval=1,
+        ml_weight=1.0,
+        sample_ratio=0.75,
+    )
+
+    assert net.no_sync_calls == 1
+    assert forward_no_sync_states == [True, False]
+    assert backward_no_sync_states == [True, False]
 
 
 @torch.no_grad()

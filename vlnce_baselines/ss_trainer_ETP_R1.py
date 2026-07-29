@@ -3,6 +3,7 @@ import os
 import sys
 import random
 from collections import defaultdict
+from contextlib import nullcontext
 from typing import Dict, List
 import jsonlines
 
@@ -802,13 +803,23 @@ class RLTrainer(BaseVLNCETrainer):
             )
         for idx in pbar:
             self.optimizer.zero_grad(set_to_none=True)
-            for _ in range(accumulation_steps):
-                self.loss = 0.
-                with autocast():
-                    self.rollout('train', ml_weight, sample_ratio)
-                self.scaler.scale(
-                    self.loss / accumulation_steps
-                ).backward()
+            for accumulation_idx in range(accumulation_steps):
+                should_sync = (
+                    self.world_size <= 1
+                    or accumulation_idx == accumulation_steps - 1
+                )
+                sync_context = (
+                    nullcontext()
+                    if should_sync
+                    else self.policy.net.no_sync()
+                )
+                with sync_context:
+                    self.loss = 0.
+                    with autocast():
+                        self.rollout('train', ml_weight, sample_ratio)
+                    self.scaler.scale(
+                        self.loss / accumulation_steps
+                    ).backward()
             step_amp_optimizer(
                 self.scaler,
                 self.optimizer,
