@@ -15,6 +15,11 @@ from scipy.spatial.transform import Rotation as R
 import cv2
 import os
 
+from vlnce_baselines.common.episode_iterator_state import (
+    capture_episode_iterator_state,
+    restore_episode_iterator_state,
+)
+
 
 class _LegacyRootDictConfig(DictConfig):
     def __deepcopy__(self, memo):
@@ -751,7 +756,14 @@ class VLNCEDaggerEnv(habitat.RLEnv):
                 )
             ]
         return observations
-    
+
+    def get_episode_iterator_state(self):
+        return capture_episode_iterator_state(self._env)
+
+    def set_episode_iterator_state(self, state):
+        restore_episode_iterator_state(self._env, state)
+        self.prev_episode_id = "something different"
+
     def reset_current_episode(self):
         self._env._reset_stats()
         self.prev_episode_id = "something different"

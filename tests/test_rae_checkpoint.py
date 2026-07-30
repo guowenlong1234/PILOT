@@ -500,6 +500,19 @@ class _StateHolder:
         return {"value": 1}
 
 
+class _FakeVectorEnvs:
+    def __init__(self, environment_states):
+        self.num_envs = len(environment_states)
+        self.environment_states = environment_states
+        self.calls = []
+
+    def call(self, function_names, function_args_list=None):
+        self.calls.append((function_names, function_args_list))
+        if function_names[0] == "get_episode_iterator_state":
+            return self.environment_states
+        return [None for _ in function_names]
+
+
 @pytest.mark.parametrize(
     ("trainer_class", "stage", "iteration", "only_last"),
     (
@@ -575,8 +588,16 @@ def test_resumable_sft_saves_model_and_training_state_separately(
         "prune_training_states",
         lambda *args: [],
     )
+    episode_iterator_state = {
+        "format_version": 1,
+        "world_size": 1,
+        "ranks": [],
+    }
 
-    trainer.save_checkpoint(1)
+    trainer.save_checkpoint(
+        1,
+        episode_iterator_state=episode_iterator_state,
+    )
 
     assert len(saved) == 2
     model, model_path = saved[0]
@@ -593,3 +614,57 @@ def test_resumable_sft_saves_model_and_training_state_separately(
     assert training_state["optim_state"] == {"value": 1}
     assert training_state["scheduler_state"] == {"value": 1}
     assert training_state["scaler_state"] == {"value": 1}
+    assert training_state["format_version"] == 2
+    assert (
+        training_state["episode_iterator_state"]
+        is episode_iterator_state
+    )
+
+
+def test_sft_captures_and_restores_all_local_episode_iterators():
+    environment_states = [{"worker": 0}, {"worker": 1}]
+    trainer = object.__new__(SftTrainer)
+    trainer.local_rank = 0
+    trainer.world_size = 1
+    trainer.envs = _FakeVectorEnvs(environment_states)
+
+    captured = trainer._capture_episode_iterator_state()
+
+    assert captured == {
+        "format_version": 1,
+        "world_size": 1,
+        "ranks": [
+            {
+                "rank": 0,
+                "num_envs": 2,
+                "environments": environment_states,
+            }
+        ],
+    }
+
+    trainer._restore_episode_iterator_state(captured)
+
+    function_names, function_args_list = trainer.envs.calls[-1]
+    assert function_names == [
+        "set_episode_iterator_state",
+        "set_episode_iterator_state",
+    ]
+    assert function_args_list == [
+        {"state": environment_states[0]},
+        {"state": environment_states[1]},
+    ]
+
+
+def test_sft_episode_restore_rejects_changed_parallelism():
+    trainer = object.__new__(SftTrainer)
+    trainer.local_rank = 0
+    trainer.world_size = 1
+    trainer.envs = _FakeVectorEnvs([{"worker": 0}])
+    state = {
+        "format_version": 1,
+        "world_size": 2,
+        "ranks": [],
+    }
+
+    with pytest.raises(ValueError, match="number of training ranks"):
+        trainer._restore_episode_iterator_state(state)

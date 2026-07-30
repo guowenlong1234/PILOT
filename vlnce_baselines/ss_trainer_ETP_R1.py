@@ -134,7 +134,11 @@ class RLTrainer(BaseVLNCETrainer):
             if self.config.EVAL.SAVE_RESULTS:
                 self._make_results_dir()
 
-    def save_checkpoint(self, iteration: int):
+    def save_checkpoint(
+        self,
+        iteration: int,
+        episode_iterator_state=None,
+    ):
         state_dict, rgb_encoder_meta = navigation_state_dict(
             self.policy, self.config
         )
@@ -151,13 +155,18 @@ class RLTrainer(BaseVLNCETrainer):
             self.config.CHECKPOINT_FOLDER, f"ckpt.iter{iteration}.pth"
         )
         if resumable:
+            if episode_iterator_state is None:
+                raise ValueError(
+                    "Resumable SFT checkpoints require episode iterator state"
+                )
             training_state = {
-                "format_version": 1,
+                "format_version": 2,
                 "iteration": iteration,
                 "model_checkpoint": os.path.basename(checkpoint_path),
                 "optim_state": self.optimizer.state_dict(),
                 "scheduler_state": self.scheduler.state_dict(),
                 "scaler_state": self.scaler.state_dict(),
+                "episode_iterator_state": episode_iterator_state,
             }
             training_state_path = os.path.join(
                 self.config.CHECKPOINT_FOLDER,
@@ -195,6 +204,94 @@ class RLTrainer(BaseVLNCETrainer):
         torch.save(
             obj=checkpoint,
             f=checkpoint_path,
+        )
+
+    def _capture_episode_iterator_state(self):
+        environment_states = self.envs.call(
+            ["get_episode_iterator_state"] * self.envs.num_envs
+        )
+        local_state = {
+            "rank": int(self.local_rank),
+            "num_envs": int(self.envs.num_envs),
+            "environments": environment_states,
+        }
+        if self.world_size > 1:
+            rank_states = [None for _ in range(self.world_size)]
+            distr.all_gather_object(rank_states, local_state)
+        else:
+            rank_states = [local_state]
+        return {
+            "format_version": 1,
+            "world_size": int(self.world_size),
+            "ranks": rank_states,
+        }
+
+    def _restore_episode_iterator_state(self, state):
+        if not isinstance(state, dict):
+            raise TypeError(
+                "SFT episode iterator checkpoint state must be a dictionary"
+            )
+        if state.get("format_version") != 1:
+            raise ValueError(
+                "Unsupported SFT episode iterator checkpoint format: "
+                f"{state.get('format_version')!r}"
+            )
+
+        saved_world_size = state.get("world_size")
+        if saved_world_size != self.world_size:
+            raise ValueError(
+                "Cannot preserve SFT episode order after changing the number "
+                f"of training ranks: checkpoint={saved_world_size}, "
+                f"current={self.world_size}"
+            )
+
+        rank_states = state.get("ranks")
+        if not isinstance(rank_states, list):
+            raise ValueError(
+                "SFT episode iterator checkpoint is missing rank states"
+            )
+        if len(rank_states) != self.world_size:
+            raise ValueError(
+                "SFT episode iterator checkpoint has the wrong number of "
+                f"rank states: checkpoint={len(rank_states)}, "
+                f"expected={self.world_size}"
+            )
+        by_rank = {
+            rank_state.get("rank"): rank_state
+            for rank_state in rank_states
+            if isinstance(rank_state, dict)
+        }
+        expected_ranks = set(range(self.world_size))
+        if set(by_rank) != expected_ranks:
+            raise ValueError(
+                "SFT episode iterator checkpoint has the wrong ranks: "
+                f"checkpoint={sorted(by_rank)}, "
+                f"expected={sorted(expected_ranks)}"
+            )
+
+        local_state = by_rank[self.local_rank]
+        environment_states = local_state.get("environments")
+        saved_num_envs = local_state.get("num_envs")
+        if (
+            saved_num_envs != self.envs.num_envs
+            or not isinstance(environment_states, list)
+            or len(environment_states) != self.envs.num_envs
+        ):
+            raise ValueError(
+                "Cannot preserve SFT episode order after changing the number "
+                f"of environments on rank {self.local_rank}: "
+                f"checkpoint={saved_num_envs}, current={self.envs.num_envs}"
+            )
+
+        self.envs.call(
+            ["set_episode_iterator_state"] * self.envs.num_envs,
+            [{"state": item} for item in environment_states],
+        )
+        logger.info(
+            "Restored exact SFT episode iterator state for rank %d "
+            "across %d environment(s)",
+            self.local_rank,
+            self.envs.num_envs,
         )
 
     def _set_config(self):
@@ -470,6 +567,33 @@ class RLTrainer(BaseVLNCETrainer):
                 self.scaler.load_state_dict(
                     training_state["scaler_state"]
                 )
+                training_state_format = training_state.get(
+                    "format_version", 1
+                )
+                if training_state_format not in (1, 2):
+                    raise ValueError(
+                        "Unsupported SFT training-state format: "
+                        f"{training_state_format!r}"
+                    )
+                episode_iterator_state = training_state.get(
+                    "episode_iterator_state"
+                )
+                if episode_iterator_state is None:
+                    if training_state_format >= 2:
+                        raise ValueError(
+                            "SFT training state format 2 is incomplete; "
+                            "missing episode_iterator_state"
+                        )
+                    logger.warning(
+                        "SFT checkpoint predates episode-order state; model, "
+                        "optimizer, scheduler, scaler, and iteration were "
+                        "restored, but episode iteration starts from the newly "
+                        "constructed environment queues"
+                    )
+                else:
+                    self._restore_episode_iterator_state(
+                        episode_iterator_state
+                    )
             logger.info(f"Loaded weights from checkpoint: {ckpt_path}, iteration: {start_iter}")
 			
         params = sum(param.numel() for param in self.policy.parameters())
@@ -760,6 +884,12 @@ class RLTrainer(BaseVLNCETrainer):
             logger.info(f"sample ratio: {sample_ratio}")
             logs = self._train_interval(interval, self.config.IL.ml_weight, sample_ratio)
 
+            episode_iterator_state = None
+            if self.config.IL.resumable_checkpoints:
+                episode_iterator_state = (
+                    self._capture_episode_iterator_state()
+                )
+
             if self.local_rank < 1:
                 loss_str = f'iter {cur_iter}: '
                 for k, v in logs.items():
@@ -770,7 +900,10 @@ class RLTrainer(BaseVLNCETrainer):
                 writer.add_scalar('train/lr', current_lr, cur_iter)
                 logger.info(loss_str)
                 logger.info(f"lr: {current_lr}")
-                self.save_checkpoint(cur_iter)
+                self.save_checkpoint(
+                    cur_iter,
+                    episode_iterator_state=episode_iterator_state,
+                )
         
     def _train_interval(self, interval, ml_weight, sample_ratio):
         self.policy.train()
