@@ -207,6 +207,10 @@ class RLTrainer(BaseVLNCETrainer):
         )
 
     def _capture_episode_iterator_state(self):
+        # Training rollouts pause workers as their episodes finish. Restore
+        # every worker before snapshotting, otherwise interval-boundary
+        # checkpoints incorrectly record an empty VectorEnv.
+        self.envs.resume_all()
         environment_states = self.envs.call(
             ["get_episode_iterator_state"] * self.envs.num_envs
         )
@@ -268,6 +272,20 @@ class RLTrainer(BaseVLNCETrainer):
                 f"checkpoint={sorted(by_rank)}, "
                 f"expected={sorted(expected_ranks)}"
             )
+
+        all_ranks_empty = all(
+            rank_state.get("num_envs") == 0
+            and rank_state.get("environments") == []
+            for rank_state in by_rank.values()
+        )
+        if all_ranks_empty:
+            logger.warning(
+                "SFT checkpoint contains the legacy empty episode-order "
+                "snapshot; model, optimizer, scheduler, scaler, and "
+                "iteration are restored, but episode iteration starts from "
+                "the newly constructed environment queues"
+            )
+            return
 
         local_state = by_rank[self.local_rank]
         environment_states = local_state.get("environments")

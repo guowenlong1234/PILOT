@@ -505,6 +505,10 @@ class _FakeVectorEnvs:
         self.num_envs = len(environment_states)
         self.environment_states = environment_states
         self.calls = []
+        self.resume_count = 0
+
+    def resume_all(self):
+        self.resume_count += 1
 
     def call(self, function_names, function_args_list=None):
         self.calls.append((function_names, function_args_list))
@@ -630,6 +634,7 @@ def test_sft_captures_and_restores_all_local_episode_iterators():
 
     captured = trainer._capture_episode_iterator_state()
 
+    assert trainer.envs.resume_count == 1
     assert captured == {
         "format_version": 1,
         "world_size": 1,
@@ -668,3 +673,22 @@ def test_sft_episode_restore_rejects_changed_parallelism():
 
     with pytest.raises(ValueError, match="number of training ranks"):
         trainer._restore_episode_iterator_state(state)
+
+
+def test_sft_episode_restore_accepts_legacy_empty_snapshot():
+    trainer = object.__new__(SftTrainer)
+    trainer.local_rank = 0
+    trainer.world_size = 2
+    trainer.envs = _FakeVectorEnvs([{"worker": 0}])
+    state = {
+        "format_version": 1,
+        "world_size": 2,
+        "ranks": [
+            {"rank": 0, "num_envs": 0, "environments": []},
+            {"rank": 1, "num_envs": 0, "environments": []},
+        ],
+    }
+
+    trainer._restore_episode_iterator_state(state)
+
+    assert trainer.envs.calls == []

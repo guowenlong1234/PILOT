@@ -56,9 +56,18 @@ launch() {
     mkdir -p "$SUPERVISOR_DIR"
 
     if [ "$mode" = resume ]; then
-        if [ ! -f "${CHECKPOINT_DIR}/ckpt.iter200.pth" ] \
-            || [ ! -f "${TRAIN_STATE_DIR}/train_state.iter200.pth" ]; then
-            echo "Complete iter200 checkpoint pair is missing." >&2
+        local checkpoint iteration complete_pair_found=false
+        for checkpoint in "${CHECKPOINT_DIR}"/ckpt.iter*.pth; do
+            [ -e "$checkpoint" ] || continue
+            iteration=${checkpoint##*ckpt.iter}
+            iteration=${iteration%.pth}
+            if [ -f "${TRAIN_STATE_DIR}/train_state.iter${iteration}.pth" ]; then
+                complete_pair_found=true
+                break
+            fi
+        done
+        if [ "$complete_pair_found" != true ]; then
+            echo "No complete model/training-state checkpoint pair found." >&2
             exit 1
         fi
     fi
