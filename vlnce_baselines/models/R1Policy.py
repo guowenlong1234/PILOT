@@ -24,7 +24,7 @@ from vlnce_baselines.models.encoders.resnet_encoders import (
     CLIPEncoder,
 )
 from vlnce_baselines.models.encoders.rae_dinov2_encoder import (
-    RaeDinov2ClsEncoder,
+    RaeDinov2RgbEncoder,
 )
 from vlnce_baselines.models.policy import ILPolicy
 
@@ -133,15 +133,6 @@ class ETP(Net):
 
         print('\nInitalizing the ETP model ...')
         self.vln_bert = get_vlnbert_models(config=model_config, dropout_rate=dropout_rate)
-        # if model_config.task_type == 'r2r':
-        #     self.rgb_projection = nn.Linear(2048, 768)
-        # elif model_config.task_type == 'rxr':
-        #     self.rgb_projection = nn.Linear(2048, 512)
-        # self.rgb_projection = nn.Linear(2048, 768) # for vit 768 compability
-        # if model_config.task_type == 'r2r':
-        #     self.rgb_projection = nn.Linear(512, 768)
-        # else:
-        #     self.rgb_projection = None
         self.drop_env = nn.Dropout(p=0.4)
 
         # self.pos_encoder = nn.Sequential(
@@ -181,20 +172,42 @@ class ETP(Net):
         rgb_encoder_type = str(model_config.RGB_ENCODER.type).lower()
         if rgb_encoder_type == "clip":
             self.rgb_encoder = CLIPEncoder(self.device)
+            self.rgb_output_size = 512
         elif rgb_encoder_type == "rae_dinov2":
-            self.rgb_encoder = RaeDinov2ClsEncoder(
+            self.rgb_encoder = RaeDinov2RgbEncoder(
                 model_config.RGB_ENCODER.model_dir,
-                model_config.RGB_ENCODER.stat_path,
                 self.device,
                 precision=getattr(
                     model_config.RGB_ENCODER,
                     "precision",
-                    "float32",
+                    "ambient",
+                ),
+                cls_residual_mlp_enabled=getattr(
+                    model_config.RGB_ENCODER,
+                    "cls_residual_mlp_enabled",
+                    False,
+                ),
+                cls_residual_mlp_hidden_dim=getattr(
+                    model_config.RGB_ENCODER,
+                    "cls_residual_mlp_hidden_dim",
+                    768,
+                ),
+                cls_residual_mlp_zero_init=getattr(
+                    model_config.RGB_ENCODER,
+                    "cls_residual_mlp_zero_init",
+                    True,
                 ),
             )
+            self.rgb_output_size = 768
         else:
             raise ValueError(
                 f"Unsupported RGB encoder: {model_config.RGB_ENCODER.type}"
+            )
+        configured_rgb_output_size = int(model_config.RGB_ENCODER.output_size)
+        if configured_rgb_output_size != self.rgb_output_size:
+            raise ValueError(
+                f"{rgb_encoder_type} RGB encoder requires output_size="
+                f"{self.rgb_output_size}, got {configured_rgb_output_size}"
             )
         self.space_pool_rgb = nn.Sequential(nn.AdaptiveAvgPool2d((1,1)), nn.Flatten(start_dim=2))
     
@@ -252,10 +265,7 @@ class ETP(Net):
             obs_view12['depth'] = depth_batch
             obs_view12['rgb'] = rgb_batch
             depth_embedding = self.depth_encoder(obs_view12)  # torch.Size([bs, 128, 4, 4])
-            raw_rgb_embedding = self.rgb_encoder(obs_view12)
-            rgb_embedding = self.vln_bert.img_embeddings.project_rgb(
-                raw_rgb_embedding
-            )
+            rgb_embedding = self.rgb_encoder(obs_view12)
 
             ''' waypoint prediction ----------------------------- '''
             # Waypoint selection is discrete and contributes no gradient.
@@ -268,7 +278,7 @@ class ETP(Net):
 
             # reverse the order of images back to counter-clockwise
             rgb_embed_reshape = rgb_embedding.reshape(
-                batch_size, NUM_IMGS, 512, 1, 1)
+                batch_size, NUM_IMGS, self.rgb_output_size, 1, 1)
             depth_embed_reshape = depth_embedding.reshape(
                 batch_size, NUM_IMGS, 128, 4, 4)
             rgb_feats = torch.cat((

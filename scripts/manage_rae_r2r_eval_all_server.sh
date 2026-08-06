@@ -4,15 +4,15 @@ set -uo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
 
-EXP_NAME=${ETPR1_R2R_EVAL_EXP_NAME:-rae_dinov2_r2r_sft_eporder_20260730_all_ckpts_val_unseen}
-TRAIN_ROOT=${ETPR1_R2R_EVAL_TRAIN_ROOT:-data/logs/rae_dinov2/r2r_sft_eporder_20260730}
+EXP_NAME=${ETPR1_R2R_EVAL_EXP_NAME:-rae_dinov2_etpnav_cls_768_r2r_sft_all_ckpts_val_unseen}
+TRAIN_ROOT=${ETPR1_R2R_EVAL_TRAIN_ROOT:-data/logs/rae_dinov2_etpnav_cls_768/r2r_sft_formal}
 EVAL_ROOT=${ETPR1_R2R_EVAL_OUTPUT_ROOT:-${TRAIN_ROOT}/eval_all_checkpoints_val_unseen}
-CKPT_DIR=${ETPR1_R2R_EVAL_CKPT_DIR:-${TRAIN_ROOT}/checkpoints/rae_dinov2_r2r_sft_eporder_20260730}
+CKPT_DIR=${ETPR1_R2R_EVAL_CKPT_DIR:-${TRAIN_ROOT}/checkpoints/rae_dinov2_etpnav_cls_768_r2r_sft}
 RESULT_DIR=${EVAL_ROOT}/results/${EXP_NAME}/eval_results
 PID_DIR=${EVAL_ROOT}/pids
 PYTHON_BIN=${ETPR1_SERVER_PYTHON:-/home/gwl/miniconda3/envs/etpnav_unified/bin/python}
 RUNTIME_ROOT=${ETPR1_SERVER_RUNTIME_ROOT:-${REPO_ROOT}/.runtime/server_sft}
-PRETRAIN_PATH=${ETPR1_R2R_EVAL_PRETRAIN_PATH:-pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp/best/model_best_step_452500.pt}
+PRETRAIN_PATH=${ETPR1_R2R_EVAL_PRETRAIN_PATH:-pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768/best/model_best_step_452500.pt}
 NUM_WORKERS=${ETPR1_R2R_EVAL_WORKERS:-2}
 NUM_ENVIRONMENTS=${ETPR1_R2R_EVAL_NUM_ENVIRONMENTS:-8}
 
@@ -119,7 +119,7 @@ run_worker() {
             TENSORBOARD_DIR "$EVAL_ROOT/tensorboard/" \
             RESULTS_DIR "$EVAL_ROOT/results/" \
             MODEL.pretrained_path "$PRETRAIN_PATH" \
-            MODEL.RGB_ENCODER.precision bf16 \
+            MODEL.RGB_ENCODER.precision ambient \
             2>&1 | "$PYTHON_BIN" -u scripts/filter_habitat_startup_noise.py
         exit_code=${PIPESTATUS[0]}
 

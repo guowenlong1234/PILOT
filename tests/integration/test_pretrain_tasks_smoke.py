@@ -28,7 +28,7 @@ IMAGE_FEATURES = (
     PROJECT_ROOT
     / "pretrain_src"
     / "img_features"
-    / "RAE-DINOv2-B-14-CLS-views-habitat.hdf5"
+    / "RAE-DINOv2-B-14-RAW-CLS-views-habitat.hdf5"
 )
 DEPTH_FEATURES = (
     PROJECT_ROOT
@@ -53,7 +53,7 @@ MODEL_CONFIG = (
     / "mix_model_config_rae_dino.json"
 )
 TOKENIZER = PROJECT_ROOT / "bert_config" / "xlm-roberta-base"
-PROJECTION_PREFIX = "bert.img_embeddings.rgb_projection."
+IMG_LINEAR_PREFIX = "bert.img_embeddings.img_linear."
 SMOKE_SEED = 20260710
 
 
@@ -116,7 +116,7 @@ def _move_batch(batch, device):
 def real_pretrain_context(tmp_path_factory):
     _seed_pretrain_smoke()
     _assert_real_assets_exist()
-    assert torch.cuda.is_available(), "pretrain smoke requires the eval GPU"
+    assert torch.cuda.is_available(), "pretrain smoke requires a CUDA GPU"
     device = torch.device("cuda", 0)
 
     tmp_dir = tmp_path_factory.mktemp("real_pretrain_record")
@@ -129,7 +129,7 @@ def real_pretrain_context(tmp_path_factory):
         str(DEPTH_FEATURES),
         str(SCANVP_CANDIDATES),
         str(CONNECTIVITY),
-        image_feat_size=512,
+        image_feat_size=768,
         image_prob_size=0,
         depth_feat_size=128,
         angle_feat_size=4,
@@ -168,14 +168,14 @@ def real_pretrain_context(tmp_path_factory):
 def _run_task_backward(context, task):
     model = context.model
     batch = context.batches[task]
-    projection = model.bert.img_embeddings.rgb_projection
-    projection_inputs = []
-    projection_outputs = []
-    def record_projection_dimensions(_module, inputs, output):
-        projection_inputs.append(inputs[0].shape[-1])
-        projection_outputs.append(output.shape[-1])
+    img_linear = model.bert.img_embeddings.img_linear
+    img_linear_inputs = []
+    img_linear_outputs = []
+    def record_img_linear_dimensions(_module, inputs, output):
+        img_linear_inputs.append(inputs[0].shape[-1])
+        img_linear_outputs.append(output.shape[-1])
 
-    hook = projection.register_forward_hook(record_projection_dimensions)
+    hook = img_linear.register_forward_hook(record_img_linear_dimensions)
     try:
         _seed_pretrain_smoke(SMOKE_SEED + {"mlm": 1, "sap": 2}[task])
         model.zero_grad(set_to_none=True)
@@ -186,9 +186,9 @@ def _run_task_backward(context, task):
     finally:
         hook.remove()
 
-    grad = projection[0].weight.grad
-    assert projection_inputs == [768]
-    assert projection_outputs == [512]
+    grad = img_linear.weight.grad
+    assert img_linear_inputs == [768]
+    assert img_linear_outputs == [768]
     assert grad is not None
     assert torch.isfinite(grad).all()
     assert torch.count_nonzero(grad) > 0
@@ -215,7 +215,7 @@ def _run_seeded_mlm_step(batch, device):
     optimizer.step()
     state = {
         name: value.detach().cpu().clone()
-        for name, value in model.bert.img_embeddings.rgb_projection.state_dict().items()
+        for name, value in model.bert.img_embeddings.img_linear.state_dict().items()
     }
 
     del optimizer, model
@@ -223,31 +223,31 @@ def _run_seeded_mlm_step(batch, device):
     return state
 
 
-def test_real_mlm_batch_forward_backward_updates_projection(
+def test_real_mlm_batch_forward_backward_updates_img_linear(
     real_pretrain_context,
 ):
     loss = _run_task_backward(real_pretrain_context, "mlm")
     assert loss.item() > 0
 
 
-def test_real_sap_batch_forward_backward_updates_projection(
+def test_real_sap_batch_forward_backward_updates_img_linear(
     real_pretrain_context,
 ):
     loss = _run_task_backward(real_pretrain_context, "sap")
     assert loss.item() >= 0
 
 
-def test_real_pretrain_one_step_writes_minimal_projection_checkpoint(
+def test_real_pretrain_one_step_writes_minimal_img_linear_checkpoint(
     real_pretrain_context, tmp_path
 ):
     model = real_pretrain_context.model
-    projection = model.bert.img_embeddings.rgb_projection
-    before = projection[0].weight.detach().clone()
+    img_linear = model.bert.img_embeddings.img_linear
+    before = img_linear.weight.detach().clone()
     optimizer = torch.optim.SGD(model.parameters(), lr=1e-4)
 
     _run_task_backward(real_pretrain_context, "mlm")
     optimizer.step()
-    assert not torch.equal(projection[0].weight.detach(), before)
+    assert not torch.equal(img_linear.weight.detach(), before)
 
     output_root = Path(
         os.environ.get("ETPR1_RAE_SMOKE_PRETRAIN_DIR", str(tmp_path))
@@ -256,18 +256,18 @@ def test_real_pretrain_one_step_writes_minimal_projection_checkpoint(
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = checkpoint_dir / "model_step_1.pt"
     checkpoint = {
-        PROJECTION_PREFIX + name: value.detach().cpu()
-        for name, value in projection.state_dict().items()
+        IMG_LINEAR_PREFIX + name: value.detach().cpu()
+        for name, value in img_linear.state_dict().items()
     }
     torch.save(checkpoint, checkpoint_path)
 
     reloaded = torch.load(checkpoint_path, map_location="cpu")
     assert list(reloaded) == [
-        PROJECTION_PREFIX + name for name in projection.state_dict()
+        IMG_LINEAR_PREFIX + name for name in img_linear.state_dict()
     ]
-    for name, value in projection.state_dict().items():
+    for name, value in img_linear.state_dict().items():
         torch.testing.assert_close(
-            reloaded[PROJECTION_PREFIX + name],
+            reloaded[IMG_LINEAR_PREFIX + name],
             value.detach().cpu(),
             rtol=0,
             atol=0,
@@ -282,7 +282,7 @@ def test_real_pretrain_fixture_explicitly_seeds_all_random_sources():
     assert source.count("_seed_pretrain_smoke") >= 3
 
 
-def test_same_seed_reproduces_all_six_projection_parameters_after_one_step(
+def test_same_seed_reproduces_both_img_linear_parameters_after_one_step(
     real_pretrain_context,
 ):
     first = _run_seeded_mlm_step(
@@ -295,6 +295,6 @@ def test_same_seed_reproduces_all_six_projection_parameters_after_one_step(
     )
 
     assert list(first) == list(second)
-    assert len(first) == 6
+    assert len(first) == 2
     for name in first:
         torch.testing.assert_close(first[name], second[name], rtol=0, atol=0)

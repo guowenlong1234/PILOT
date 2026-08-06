@@ -1,5 +1,11 @@
 # RAE/DINOv2 联合预训练运行手册
 
+> 当前视觉契约已切换为 ETPNav 导航链路：原始 768 维 CLS、不对 CLS
+> 使用 `stat.pt`、下游直接 `img_linear(768→768)`。旧的
+> `rae_dinov2_cls_mlp` 目录、归一化 HDF5 和对应 checkpoint 与当前代码
+> 不兼容，不能续训；当前脚本使用独立目录
+> `rae_dinov2_etpnav_cls_768`。
+
 ## 当前正式配置
 
 - 测评机：单张 RTX 4090 24GB。
@@ -36,7 +42,7 @@ SAP平均准确率 = (R2R SAP gacc + RxR SAP gacc) / 2
 只有新总分严格高于历史最高分时，才更新：
 
 ```text
-pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp/best/
+pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768/best/
   model_best_step_<step>.pt
   best_metrics.json
 ```
@@ -82,7 +88,7 @@ ssh 4090 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_pretrain_host.sh stop'
 托管会话名默认为 `etpr1-rae-pretrain`，日志位于：
 
 ```text
-pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp/supervisor/
+pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768/supervisor/
 ```
 
 每次启动还会在同一目录生成 `*_source_identity.json` 和 `*_source_manifest.sha256`。测评机的 `.git` 指针不可用时，以逐文件清单的整体校验和标识真实训练源码，不依赖远端 Git 提交号。

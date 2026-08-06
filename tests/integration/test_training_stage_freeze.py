@@ -20,7 +20,7 @@ from vlnce_baselines.common.amp_utils import step_amp_optimizer
 from vlnce_baselines.common.base_il_trainer import BaseVLNCETrainer
 from vlnce_baselines.models.encoders import rae_dinov2_encoder as encoder_module
 from vlnce_baselines.models.encoders.rae_dinov2_encoder import (
-    RaeDinov2ClsEncoder,
+    RaeDinov2RgbEncoder,
 )
 from vlnce_baselines.models.etp.ETP_R1_vilmodel_cmt import (
     ImageEmbeddings as OnlineImageEmbeddings,
@@ -146,9 +146,7 @@ def test_sft_grad_scaler_rejects_invalid_init_scale(invalid):
 def _image_config():
     return PretrainedConfig(
         rgb_encoder_type="rae_dinov2",
-        raw_image_feat_size=768,
-        image_feat_size=512,
-        projection_hidden_size=768,
+        image_feat_size=768,
         hidden_size=768,
         depth_feat_size=128,
         angle_feat_size=4,
@@ -166,7 +164,7 @@ class _FakeBackbone(torch.nn.Module):
         self.scale = torch.nn.Parameter(torch.tensor(2.0))
         self.layernorm = torch.nn.LayerNorm(768)
 
-    def forward(self, pixel_values):
+    def forward(self, pixel_values, **_kwargs):
         cls = self.scale * torch.ones(
             pixel_values.shape[0],
             1,
@@ -194,59 +192,87 @@ def _fake_dino(monkeypatch, tmp_path):
             )
         ),
     )
-    stat_path = tmp_path / "stat.pt"
-    torch.save({"mean": None, "var": torch.ones(768, 2, 2)}, stat_path)
-    return RaeDinov2ClsEncoder(
+    return RaeDinov2RgbEncoder(
         tmp_path / "fake-model",
-        stat_path,
         torch.device("cpu"),
+        cls_residual_mlp_enabled=True,
+        cls_residual_mlp_hidden_dim=768,
+        cls_residual_mlp_zero_init=True,
     )
 
 
-def _assert_finite_nonzero_projection_grad(projection):
-    grad = projection[0].weight.grad
+def _assert_finite_nonzero_linear_grad(linear):
+    grad = linear.weight.grad
     assert grad is not None
     assert torch.isfinite(grad).all()
     assert torch.count_nonzero(grad) > 0
 
 
-def _one_projection_update(projection, raw_features):
-    optimizer = torch.optim.SGD(projection.parameters(), lr=1e-3)
-    before = projection[0].weight.detach().clone()
-    loss = projection(raw_features).square().mean()
+def _one_linear_update(linear, features):
+    optimizer = torch.optim.SGD(linear.parameters(), lr=1e-3)
+    before = linear.weight.detach().clone()
+    loss = linear(features).square().mean()
     loss.backward()
-    _assert_finite_nonzero_projection_grad(projection)
+    _assert_finite_nonzero_linear_grad(linear)
     optimizer.step()
-    assert not torch.equal(projection[0].weight.detach(), before)
+    assert not torch.equal(linear.weight.detach(), before)
 
 
-def test_pretrain_and_sft_update_projection_but_never_dino(
+def test_pretrain_and_sft_update_etpnav_visual_layers_but_never_dino(
     monkeypatch, tmp_path
 ):
     torch.manual_seed(7)
     pretrain = PretrainImageEmbeddings(_image_config())
-    _one_projection_update(pretrain.rgb_projection, torch.randn(2, 768))
+    _one_linear_update(pretrain.img_linear, torch.randn(2, 768))
 
     dino = _fake_dino(monkeypatch, tmp_path)
     online = OnlineImageEmbeddings(_image_config())
-    harness = torch.nn.ModuleDict({"dino": dino, "online": online})
-    harness.train()
+    dino.eval()
+    optimizer = torch.optim.SGD(
+        list(dino.cls_residual_mlp.parameters())
+        + list(online.img_linear.parameters()),
+        lr=1e-3,
+    )
+    img_linear_before = online.img_linear.weight.detach().clone()
+    residual_before = (
+        dino.cls_residual_mlp.layers[-1].weight.detach().clone()
+    )
     raw_features = dino(
         {"rgb": torch.zeros(2, 224, 224, 3, dtype=torch.uint8)}
     )
-    _one_projection_update(online.rgb_projection, raw_features)
+    loss = online.img_linear(raw_features).square().mean()
+    loss.backward()
+    _assert_finite_nonzero_linear_grad(online.img_linear)
+    residual_grad = dino.cls_residual_mlp.layers[-1].weight.grad
+    assert residual_grad is not None
+    assert torch.isfinite(residual_grad).all()
+    assert torch.count_nonzero(residual_grad) > 0
+    optimizer.step()
 
     assert not dino.training
     assert not dino.backbone.training
-    assert all(not parameter.requires_grad for parameter in dino.parameters())
-    assert all(parameter.grad is None for parameter in dino.parameters())
     assert all(
-        parameter.requires_grad
-        for parameter in pretrain.rgb_projection.parameters()
+        not parameter.requires_grad for parameter in dino.backbone.parameters()
+    )
+    assert all(
+        parameter.grad is None for parameter in dino.backbone.parameters()
+    )
+    assert not torch.equal(online.img_linear.weight, img_linear_before)
+    assert not torch.equal(
+        dino.cls_residual_mlp.layers[-1].weight,
+        residual_before,
     )
     assert all(
         parameter.requires_grad
-        for parameter in online.rgb_projection.parameters()
+        for parameter in pretrain.img_linear.parameters()
+    )
+    assert all(
+        parameter.requires_grad
+        for parameter in online.img_linear.parameters()
+    )
+    assert all(
+        parameter.requires_grad
+        for parameter in dino.cls_residual_mlp.parameters()
     )
 
 
@@ -271,7 +297,7 @@ class _FakePolicy(torch.nn.Module):
         self.net = _FakeNet(dino)
 
 
-def test_grpo_freezes_projection_and_dino_and_only_unfreezes_global_module(
+def test_grpo_freezes_etpnav_visual_path_and_only_unfreezes_global_module(
     monkeypatch, tmp_path
 ):
     trainer = object.__new__(GrpoTrainer)
@@ -281,9 +307,9 @@ def test_grpo_freezes_projection_and_dino_and_only_unfreezes_global_module(
 
     trainer.setup_training_parts()
 
-    projection = trainer.policy.net.vln_bert.img_embeddings.rgb_projection
+    img_linear = trainer.policy.net.vln_bert.img_embeddings.img_linear
     dino = trainer.policy.net.rgb_encoder
-    assert all(not parameter.requires_grad for parameter in projection.parameters())
+    assert all(not parameter.requires_grad for parameter in img_linear.parameters())
     assert all(not parameter.requires_grad for parameter in dino.parameters())
     assert all(parameter.grad is None for parameter in dino.parameters())
     assert not dino.training
@@ -297,20 +323,32 @@ def test_grpo_freezes_projection_and_dino_and_only_unfreezes_global_module(
 
 def test_real_dino_asset_probe_is_frozen_and_eval():
     model_path = REAL_MODEL_DIR / "model.safetensors"
-    stat_path = REAL_MODEL_DIR / "stat.pt"
     assert model_path.is_file(), f"missing real DINO asset: {model_path}"
-    assert stat_path.is_file(), f"missing real RAE statistics: {stat_path}"
 
-    encoder = RaeDinov2ClsEncoder(
+    encoder = RaeDinov2RgbEncoder(
         REAL_MODEL_DIR,
-        stat_path,
         torch.device("cpu"),
+        cls_residual_mlp_enabled=True,
+        cls_residual_mlp_hidden_dim=768,
+        cls_residual_mlp_zero_init=True,
     )
     encoder.train(True)
 
-    assert not encoder.training
+    assert encoder.training
     assert not encoder.backbone.training
-    assert all(not parameter.requires_grad for parameter in encoder.parameters())
+    assert all(
+        not parameter.requires_grad
+        for parameter in encoder.backbone.parameters()
+    )
+    assert all(
+        parameter.requires_grad
+        for parameter in encoder.cls_residual_mlp.parameters()
+    )
+    assert encoder.backbone.layernorm.elementwise_affine is False
+    assert encoder.backbone.layernorm.weight is None
+    assert encoder.backbone.layernorm.bias is None
+    assert not hasattr(encoder, "latent_mean")
+    assert not hasattr(encoder, "latent_var")
 
 
 def test_sft_trainer_initialization_uses_legacy_output_directories(

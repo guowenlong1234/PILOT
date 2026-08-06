@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render MP3D panoramas and write normalized RAE/DINOv2 CLS features."""
+"""Render MP3D panoramas and write ETPNav-compatible raw DINOv2 CLS."""
 
 import argparse
 import hashlib
@@ -21,7 +21,7 @@ DEFAULT_MODEL_DIR = "pretrained/rae_dinov2_with_registers_base"
 DEFAULT_CONNECTIVITY_DIR = "precompute_img_features/connectivity"
 DEFAULT_SCENES_DIR = "data/scene_datasets/mp3d"
 DEFAULT_OUTPUT_FILE = (
-    "pretrain_src/img_features/RAE-DINOv2-B-14-CLS-views-habitat.hdf5"
+    "pretrain_src/img_features/RAE-DINOv2-B-14-RAW-CLS-views-habitat.hdf5"
 )
 
 LOGGER = logging.getLogger("rae_dinov2_feature_extractor")
@@ -46,25 +46,22 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def build_metadata(model_dir, stat_path):
+def build_metadata(model_dir):
     model_path = Path(model_dir) / "model.safetensors"
-    stat_path = Path(stat_path)
     if not model_path.is_file():
         raise FileNotFoundError(f"DINO weights not found: {model_path}")
-    if not stat_path.is_file():
-        raise FileNotFoundError(f"RAE stat not found: {stat_path}")
     return {
-        "feature_extractor": "rae_dinov2_with_registers_base_cls",
+        "feature_extractor": "rae_dinov2_with_registers_base_raw_cls",
         "feature_dim": 768,
         "dtype": "float32",
         "num_views": 36,
         "image_size": 224,
         "vfov": 60,
         "sensor_height": 1.25,
-        "latent_normalized": True,
+        "cls_normalization": "none",
+        "rae_stat_applied_to_cls": False,
         "dino_weights_sha256": sha256_file(model_path),
-        "rae_stat_sha256": sha256_file(stat_path),
-        "preprocess_version": "rae_native_224_rgb_v1",
+        "preprocess_version": "etpnav_rae_navigation_cls_v1",
     }
 
 
@@ -394,10 +391,9 @@ def write_feature_file(
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="Generate 36-view normalized RAE/DINOv2 CLS HDF5 features."
+        description="Generate 36-view ETPNav-compatible raw DINOv2 CLS features."
     )
     parser.add_argument("--model_dir", default=DEFAULT_MODEL_DIR)
-    parser.add_argument("--stat_path", default=f"{DEFAULT_MODEL_DIR}/stat.pt")
     parser.add_argument("--connectivity_dir", default=DEFAULT_CONNECTIVITY_DIR)
     parser.add_argument("--scenes_dir", default=DEFAULT_SCENES_DIR)
     parser.add_argument("--output_file", default=DEFAULT_OUTPUT_FILE)
@@ -447,8 +443,8 @@ def main(argv=None):
     viewpoints = all_viewpoints
     if args.max_viewpoints > 0:
         viewpoints = viewpoints[: args.max_viewpoints]
-    metadata = build_metadata(args.model_dir, args.stat_path)
-    encoder = RaeDinov2ClsEncoder(args.model_dir, args.stat_path, device)
+    metadata = build_metadata(args.model_dir)
+    encoder = RaeDinov2ClsEncoder(args.model_dir, device)
 
     scenes_dir = Path(args.scenes_dir)
 

@@ -1,35 +1,44 @@
 import torch
 
 
-_RGB_PROJECTION_PARAMETER_NAMES = (
-    '0.weight',
-    '0.bias',
-    '2.weight',
-    '2.bias',
-    '4.weight',
-    '4.bias',
-)
-
-
-def _validate_pretrain_rgb_projection(state_dict, rgb_encoder_type):
-    prefix = 'bert.img_embeddings.rgb_projection.'
-    expected = {prefix + name for name in _RGB_PROJECTION_PARAMETER_NAMES}
-    present = {key for key in state_dict if key.startswith(prefix)}
-
-    if rgb_encoder_type == 'rae_dinov2':
-        missing = sorted(expected - present)
-        extra = sorted(present - expected)
-        if present != expected:
-            raise ValueError(
-                'RAE/DINOv2 pretrained checkpoint requires a complete '
-                'and exact rgb_projection parameter set; '
-                f'missing={missing}, extra={extra}'
-            )
-    elif present:
+def _validate_pretrain_rgb_interface(state_dict, rgb_encoder_type):
+    projection_marker = 'bert.img_embeddings.rgb_projection.'
+    legacy_projection = sorted(
+        key for key in state_dict if key.startswith(projection_marker)
+    )
+    if legacy_projection:
         raise ValueError(
-            'CLIP cannot load a RAE/DINOv2 pretrained checkpoint containing '
-            + ', '.join(sorted(present))
+            'The pretrained checkpoint uses the retired 768->512 '
+            'rgb_projection pipeline and is incompatible with the '
+            'ETPNav-compatible RGB interface: '
+            + ', '.join(legacy_projection)
         )
+
+    if rgb_encoder_type != 'rae_dinov2':
+        return
+
+    weight_key = 'bert.img_embeddings.img_linear.weight'
+    bias_key = 'bert.img_embeddings.img_linear.bias'
+    missing = [
+        key for key in (weight_key, bias_key) if key not in state_dict
+    ]
+    if missing:
+        raise ValueError(
+            'RAE/DINOv2 pretrained checkpoint is missing the 768-dimensional '
+            'ETPNav visual interface: ' + ', '.join(missing)
+        )
+    expected_shapes = {
+        weight_key: (768, 768),
+        bias_key: (768,),
+    }
+    for key, expected_shape in expected_shapes.items():
+        value = state_dict[key]
+        actual_shape = tuple(value.shape) if torch.is_tensor(value) else None
+        if actual_shape != expected_shape:
+            raise ValueError(
+                f'RAE/DINOv2 pretrained checkpoint {key} must have shape '
+                f'{expected_shape}, got {actual_shape}'
+            )
 
 
 def get_tokenizer(args):
@@ -67,7 +76,7 @@ def get_vlnbert_models(config=None, dropout_rate=0.1):
             new_ckpt_weights[normalized_key] = value
 
     rgb_encoder_type = str(config.RGB_ENCODER.type).lower()
-    _validate_pretrain_rgb_projection(new_ckpt_weights, rgb_encoder_type)
+    _validate_pretrain_rgb_interface(new_ckpt_weights, rgb_encoder_type)
     
     cfg_name = 'bert_config/xlm-roberta-base'
     vis_config = PretrainedConfig.from_pretrained(cfg_name)
@@ -76,9 +85,7 @@ def get_vlnbert_models(config=None, dropout_rate=0.1):
 
     vis_config.max_action_steps = 100
     vis_config.rgb_encoder_type = config.RGB_ENCODER.type
-    vis_config.raw_image_feat_size = config.RGB_ENCODER.raw_output_size
     vis_config.image_feat_size = config.RGB_ENCODER.output_size
-    vis_config.projection_hidden_size = config.RGB_ENCODER.projection_hidden_size
     vis_config.use_depth_embedding = config.use_depth_embedding
     vis_config.depth_feat_size = 128
     vis_config.angle_feat_size = 4

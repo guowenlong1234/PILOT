@@ -114,7 +114,7 @@ def validate_feature_file(
                         f"({type(expected).__name__}), got {got!r} "
                         f"({type(got).__name__})"
                     )
-        for hash_key in ("dino_weights_sha256", "rae_stat_sha256"):
+        for hash_key in ("dino_weights_sha256",):
             hash_value = _normalize_attribute(handle.attrs.get(hash_key))
             if not isinstance(hash_value, str) or not SHA256_PATTERN.fullmatch(hash_value):
                 add_error(
@@ -203,27 +203,27 @@ def build_parser():
     parser.add_argument("--clip_features", default=DEFAULT_CLIP_FEATURES)
     parser.add_argument("--expected_count", type=int, default=10567)
     parser.add_argument("--model_dir", default=DEFAULT_MODEL_DIR)
-    parser.add_argument("--stat_path", default=f"{DEFAULT_MODEL_DIR}/stat.pt")
     parser.add_argument("--max_error_examples", type=int, default=20)
     parser.add_argument(
         "--skip_asset_hash_check",
         action="store_true",
-        help="Validate hash syntax without recomputing local model/stat hashes.",
+        help="Validate hash syntax without recomputing the local model hash.",
     )
     return parser
 
 
 def _metadata_without_asset_hashes():
     return {
-        "feature_extractor": "rae_dinov2_with_registers_base_cls",
+        "feature_extractor": "rae_dinov2_with_registers_base_raw_cls",
         "feature_dim": 768,
         "dtype": "float32",
         "num_views": 36,
         "image_size": 224,
         "vfov": 60,
         "sensor_height": 1.25,
-        "latent_normalized": True,
-        "preprocess_version": "rae_native_224_rgb_v1",
+        "cls_normalization": "none",
+        "rae_stat_applied_to_cls": False,
+        "preprocess_version": "etpnav_rae_navigation_cls_v1",
     }
 
 
@@ -234,7 +234,7 @@ def main(argv=None):
         expected_metadata = (
             _metadata_without_asset_hashes()
             if args.skip_asset_hash_check
-            else build_metadata(args.model_dir, args.stat_path)
+            else build_metadata(args.model_dir)
         )
         summary = validate_feature_file(
             Path(args.features),

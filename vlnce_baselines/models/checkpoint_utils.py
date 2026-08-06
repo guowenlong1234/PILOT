@@ -2,13 +2,15 @@ import hashlib
 from collections.abc import Mapping
 from pathlib import Path
 
+import torch
+
 
 _RAE_TYPE = "rae_dinov2"
 _CLIP_TYPE = "clip"
-_RAE_RAW_OUTPUT_SIZE = 768
-_NAVIGATION_OUTPUT_SIZE = 512
+_RAE_OUTPUT_SIZE = 768
+_RAE_PIPELINE = "etpnav_raw_cls_residual_mlp_v1"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_PROJECTION_PARAMETER_SUFFIXES = (
+_RESIDUAL_MLP_PARAMETER_SUFFIXES = (
     "0.weight",
     "0.bias",
     "2.weight",
@@ -16,6 +18,14 @@ _PROJECTION_PARAMETER_SUFFIXES = (
     "4.weight",
     "4.bias",
 )
+_RESIDUAL_MLP_PARAMETER_SHAPES = {
+    "0.weight": (768, 768),
+    "0.bias": (768,),
+    "2.weight": (768, 768),
+    "2.bias": (768,),
+    "4.weight": (768, 768),
+    "4.bias": (768,),
+}
 
 
 def sha256_file(path):
@@ -67,101 +77,92 @@ def is_rgb_backbone_key(key):
 _is_rgb_backbone_key = is_rgb_backbone_key
 
 
-def _is_rgb_projection_key(key):
+def _is_legacy_rgb_projection_key(key):
     return _key_has_adjacent_parts(key, "img_embeddings", "rgb_projection")
 
 
-def _rgb_projection_parameter_groups(state_dict):
-    groups = {}
-    marker = ("img_embeddings", "rgb_projection")
-    expected_suffixes = set(_PROJECTION_PARAMETER_SUFFIXES)
-    for key in state_dict:
-        parts = str(key).split(".")
-        for index in range(len(parts) - 1):
-            if tuple(parts[index:index + 2]) != marker:
-                continue
-            suffix = ".".join(parts[index + 2:])
-            if suffix in expected_suffixes:
-                prefix = ".".join(parts[:index + 2])
-                groups.setdefault(prefix, set()).add(suffix)
-            break
-    return groups
+def _is_cls_residual_mlp_key(key):
+    return _key_has_adjacent_parts(key, "rgb_encoder", "cls_residual_mlp")
 
 
-def _validate_complete_rgb_projection(state_dict):
-    groups = _rgb_projection_parameter_groups(state_dict)
-    expected_suffixes = set(_PROJECTION_PARAMETER_SUFFIXES)
-    if any(expected_suffixes.issubset(suffixes) for suffixes in groups.values()):
-        return
-
-    missing_keys = []
-    if groups:
-        for prefix, suffixes in sorted(groups.items()):
-            for suffix in _PROJECTION_PARAMETER_SUFFIXES:
-                if suffix not in suffixes:
-                    missing_keys.append(f"{prefix}.{suffix}")
-    else:
-        missing_keys = [
-            f"img_embeddings.rgb_projection.{suffix}"
-            for suffix in _PROJECTION_PARAMETER_SUFFIXES
-        ]
-    raise ValueError(
-        "RAE/DINOv2 checkpoint requires a complete rgb_projection parameter "
-        "set; missing expected semantic keys: "
-        + ", ".join(missing_keys)
-    )
-
-
-def _rae_dimensions(config):
-    rgb_config = _rgb_config(config)
+def _exact_config_bool(rgb_config, field):
     try:
-        raw_output_size = rgb_config.raw_output_size
-        output_size = rgb_config.output_size
+        value = getattr(rgb_config, field)
     except AttributeError as error:
         raise ValueError(
-            "RAE/DINOv2 config must define integer raw_output_size and output_size"
+            f"RAE/DINOv2 config must define {field}"
         ) from error
-    for field, value in (
-        ("raw_output_size", raw_output_size),
-        ("output_size", output_size),
-    ):
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise ValueError(
-                f"RAE/DINOv2 config {field} must be an integer, got {value!r}"
-            )
-    if raw_output_size != _RAE_RAW_OUTPUT_SIZE:
+    if type(value) is not bool:
         raise ValueError(
-            "RAE/DINOv2 config raw_output_size must be "
-            f"{_RAE_RAW_OUTPUT_SIZE}, got {raw_output_size}"
+            f"RAE/DINOv2 config {field} must be a boolean, got {value!r}"
         )
-    if output_size != _NAVIGATION_OUTPUT_SIZE:
+    return value
+
+
+def _rae_config_contract(config):
+    rgb_config = _rgb_config(config)
+    try:
+        output_size = rgb_config.output_size
+        hidden_dim = rgb_config.cls_residual_mlp_hidden_dim
+    except AttributeError as error:
+        raise ValueError(
+            "RAE/DINOv2 config must define output_size and the CLS residual "
+            "MLP settings"
+        ) from error
+    if isinstance(output_size, bool) or not isinstance(output_size, int):
+        raise ValueError(
+            "RAE/DINOv2 config output_size must be an integer, "
+            f"got {output_size!r}"
+        )
+    if output_size != _RAE_OUTPUT_SIZE:
         raise ValueError(
             "RAE/DINOv2 config output_size must be "
-            f"{_NAVIGATION_OUTPUT_SIZE}, got {output_size}"
+            f"{_RAE_OUTPUT_SIZE}, got {output_size}"
         )
-    return raw_output_size, output_size
+    if isinstance(hidden_dim, bool) or not isinstance(hidden_dim, int):
+        raise ValueError(
+            "RAE/DINOv2 config cls_residual_mlp_hidden_dim must be an "
+            f"integer, got {hidden_dim!r}"
+        )
+    if hidden_dim != _RAE_OUTPUT_SIZE:
+        raise ValueError(
+            "ETPNav-compatible CLS residual MLP hidden dimension must be "
+            f"{_RAE_OUTPUT_SIZE}, got {hidden_dim}"
+        )
+    enabled = _exact_config_bool(rgb_config, "cls_residual_mlp_enabled")
+    zero_init = _exact_config_bool(rgb_config, "cls_residual_mlp_zero_init")
+    if not enabled:
+        raise ValueError(
+            "ETPNav rgb17400 compatibility requires "
+            "cls_residual_mlp_enabled=True"
+        )
+    if not zero_init:
+        raise ValueError(
+            "ETPNav rgb17400 compatibility requires "
+            "cls_residual_mlp_zero_init=True"
+        )
+    return {
+        "output_size": output_size,
+        "cls_residual_mlp_enabled": enabled,
+        "cls_residual_mlp_hidden_dim": hidden_dim,
+        "cls_residual_mlp_zero_init": zero_init,
+    }
 
 
 def _rae_asset_metadata(config):
     rgb_config = _rgb_config(config)
-    raw_output_size, output_size = _rae_dimensions(config)
+    contract = _rae_config_contract(config)
     try:
         configured_model_dir = Path(rgb_config.model_dir)
-        configured_stat_path = Path(rgb_config.stat_path)
     except (AttributeError, TypeError) as error:
         raise ValueError(
-            "RAE/DINOv2 config must define model_dir and stat_path"
+            "RAE/DINOv2 config must define model_dir"
         ) from error
     project_root = _PROJECT_ROOT.resolve()
     model_dir = (
         configured_model_dir
         if configured_model_dir.is_absolute()
         else project_root / configured_model_dir
-    ).resolve()
-    stat_path = (
-        configured_stat_path
-        if configured_stat_path.is_absolute()
-        else project_root / configured_stat_path
     ).resolve()
     try:
         relative_model_dir = model_dir.relative_to(project_root)
@@ -172,11 +173,11 @@ def _rae_asset_metadata(config):
         ) from error
     return {
         "type": _RAE_TYPE,
+        "pipeline": _RAE_PIPELINE,
         "model_dir": relative_model_dir.as_posix(),
         "model_sha256": sha256_file(model_dir / "model.safetensors"),
-        "stat_sha256": sha256_file(stat_path),
-        "raw_output_size": raw_output_size,
-        "output_size": output_size,
+        "cls_normalization": "none",
+        **contract,
     }
 
 
@@ -206,11 +207,79 @@ def _checkpoint_state_dict(checkpoint):
     return state_dict
 
 
+def _residual_mlp_groups(state_dict):
+    marker = ("rgb_encoder", "cls_residual_mlp", "layers")
+    groups = {}
+    for key, value in state_dict.items():
+        parts = str(key).split(".")
+        for index in range(len(parts) - len(marker) + 1):
+            if tuple(parts[index:index + len(marker)]) != marker:
+                continue
+            prefix_parts = parts[:index + len(marker)]
+            prefix = ".".join(prefix_parts)
+            suffix = ".".join(parts[index + len(marker):])
+            groups.setdefault(prefix, {})[suffix] = (key, value)
+            break
+    return groups
+
+
+def _validate_complete_cls_residual_mlp(state_dict):
+    groups = _residual_mlp_groups(state_dict)
+    expected = set(_RESIDUAL_MLP_PARAMETER_SUFFIXES)
+    if not groups:
+        raise ValueError(
+            "RAE/DINOv2 checkpoint is missing the ETPNav CLS residual MLP"
+        )
+
+    errors = []
+    complete_groups = []
+    for prefix, values in sorted(groups.items()):
+        suffixes = set(values)
+        missing = sorted(expected - suffixes)
+        extra = sorted(suffixes - expected)
+        if missing or extra:
+            errors.append(
+                f"{prefix}: missing={missing}, extra={extra}"
+            )
+            continue
+        complete_groups.append((prefix, values))
+    if errors or not complete_groups:
+        detail = "; ".join(errors) if errors else "no complete parameter group"
+        raise ValueError(
+            "RAE/DINOv2 checkpoint requires one complete ETPNav CLS residual "
+            f"MLP parameter set; {detail}"
+        )
+    if len(complete_groups) != 1:
+        raise ValueError(
+            "RAE/DINOv2 checkpoint contains multiple CLS residual MLP "
+            f"parameter groups: {[prefix for prefix, _ in complete_groups]}"
+        )
+
+    _prefix, values = complete_groups[0]
+    for suffix, expected_shape in _RESIDUAL_MLP_PARAMETER_SHAPES.items():
+        key, value = values[suffix]
+        actual_shape = tuple(value.shape) if torch.is_tensor(value) else None
+        if actual_shape != expected_shape:
+            raise ValueError(
+                f"RAE/DINOv2 checkpoint {key} must have shape "
+                f"{expected_shape}, got {actual_shape}"
+            )
+
+
 def validate_rgb_checkpoint_metadata(checkpoint, config):
     """Validate RGB checkpoint compatibility before loading policy weights."""
     state_dict = _checkpoint_state_dict(checkpoint)
     encoder_type = _encoder_type(config)
     metadata = checkpoint.get("rgb_encoder")
+
+    legacy_projection_keys = sorted(
+        key for key in state_dict if _is_legacy_rgb_projection_key(key)
+    )
+    if legacy_projection_keys:
+        raise ValueError(
+            "Checkpoint uses the retired RAE/DINOv2 rgb_projection pipeline: "
+            + ", ".join(legacy_projection_keys)
+        )
 
     if encoder_type == _CLIP_TYPE:
         if metadata is not None:
@@ -222,9 +291,9 @@ def validate_rgb_checkpoint_metadata(checkpoint, config):
                     "CLIP config cannot load RAE/DINOv2 checkpoint metadata "
                     f"(got type {checkpoint_type or '<missing>'})"
                 )
-        if any(_is_rgb_projection_key(key) for key in state_dict):
+        if any(_is_cls_residual_mlp_key(key) for key in state_dict):
             raise ValueError(
-                "CLIP config cannot load a RAE/DINOv2 rgb_projection MLP"
+                "CLIP config cannot load a RAE/DINOv2 CLS residual MLP"
             )
         return None
 
@@ -241,37 +310,31 @@ def validate_rgb_checkpoint_metadata(checkpoint, config):
         )
 
     expected = _rae_asset_metadata(config)
-    actual_model_dir = metadata.get("model_dir")
-    if actual_model_dir != expected["model_dir"]:
-        raise ValueError(
-            "RAE/DINOv2 model_dir mismatch: expected "
-            f"{expected['model_dir']}, got {actual_model_dir}"
-        )
-    for field, label in (
-        ("model_sha256", "model SHA256"),
-        ("stat_sha256", "stat SHA256"),
+    for field in (
+        "pipeline",
+        "model_dir",
+        "model_sha256",
+        "cls_normalization",
+        "output_size",
+        "cls_residual_mlp_enabled",
+        "cls_residual_mlp_hidden_dim",
+        "cls_residual_mlp_zero_init",
     ):
         actual_value = metadata.get(field)
-        if actual_value != expected[field]:
+        expected_value = expected[field]
+        if type(actual_value) is not type(expected_value):
             raise ValueError(
-                f"RAE/DINOv2 {label} mismatch: expected {expected[field]}, "
-                f"got {actual_value}"
+                f"RAE/DINOv2 metadata {field} has invalid type: expected "
+                f"{type(expected_value).__name__}, got "
+                f"{type(actual_value).__name__}"
+            )
+        if actual_value != expected_value:
+            raise ValueError(
+                f"RAE/DINOv2 {field} mismatch: expected "
+                f"{expected_value}, got {actual_value}"
             )
 
-    for field in ("raw_output_size", "output_size"):
-        actual_value = metadata.get(field)
-        if isinstance(actual_value, bool) or not isinstance(actual_value, int):
-            raise ValueError(
-                f"RAE/DINOv2 metadata {field} must be a non-boolean "
-                f"integer, got {actual_value!r}"
-            )
-        if actual_value != expected[field]:
-            raise ValueError(
-                f"RAE/DINOv2 {field} mismatch: expected {expected[field]}, "
-                f"got {actual_value}"
-            )
-
-    _validate_complete_rgb_projection(state_dict)
+    _validate_complete_cls_residual_mlp(state_dict)
     return None
 
 
@@ -280,7 +343,7 @@ def report_navigation_incompatible_keys(
     config,
     print_fn=print,
 ):
-    """Report all load mismatches while separating expected RAE backbone gaps."""
+    """Report load mismatches while separating expected frozen-backbone gaps."""
     encoder_type = _encoder_type(config)
     missing_keys = sorted(incompatible_keys.missing_keys)
     unexpected_keys = sorted(incompatible_keys.unexpected_keys)

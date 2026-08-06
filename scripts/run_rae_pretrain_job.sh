@@ -6,7 +6,7 @@ REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
 MODE=${1:?Usage: run_rae_pretrain_job.sh <start|resume> <log_file>}
 LOG_FILE=${2:?Usage: run_rae_pretrain_job.sh <start|resume> <log_file>}
 MASTER_PORT=${ETPR1_PRETRAIN_MASTER_PORT:-29531}
-OUTPUT_DIR=${ETPR1_PRETRAIN_OUTPUT_DIR:-pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp}
+OUTPUT_DIR=${ETPR1_PRETRAIN_OUTPUT_DIR:-pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768}
 
 case "$MODE" in
     start|resume) ;;

@@ -5,8 +5,8 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
 MODE=${1:?Usage: run_rae_r2r_sft_job.sh <start|resume> <log_file>}
 LOG_FILE=${2:?Usage: run_rae_r2r_sft_job.sh <start|resume> <log_file>}
-EXP_NAME=${ETPR1_R2R_SFT_EXP_NAME:-rae_dinov2_r2r_sft}
-OUTPUT_ROOT=${ETPR1_R2R_SFT_OUTPUT_ROOT:-data/logs/rae_dinov2/r2r_sft_formal}
+EXP_NAME=${ETPR1_R2R_SFT_EXP_NAME:-rae_dinov2_etpnav_cls_768_r2r_sft}
+OUTPUT_ROOT=${ETPR1_R2R_SFT_OUTPUT_ROOT:-data/logs/rae_dinov2_etpnav_cls_768/r2r_sft_formal}
 
 case "$MODE" in
     start|resume) ;;
@@ -94,8 +94,8 @@ scripts/etpr1_rae_runtime_exec.sh python run.py \
     TENSORBOARD_DIR "$OUTPUT_ROOT/tensorboard/" \
     RESULTS_DIR "$OUTPUT_ROOT/results/" \
     MODEL.pretrained_path \
-    pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp/best/model_best_step_452500.pt \
-    MODEL.RGB_ENCODER.precision bf16 \
+    pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768/best/model_best_step_452500.pt \
+    MODEL.RGB_ENCODER.precision ambient \
     2>&1 | tee -a "$LOG_FILE"
 exit_code=${PIPESTATUS[0]}
 set -e

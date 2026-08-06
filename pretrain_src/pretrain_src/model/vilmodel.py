@@ -15,8 +15,6 @@ from torch import Tensor, device, dtype
 
 from transformers import BertPreTrainedModel
 
-from model_components.rgb_projection import build_rgb_projection
-
 from .ops import create_transformer_encoder
 from .ops import extend_neg_masks, gen_seq_masks, pad_tensors_wgrad
 
@@ -456,22 +454,20 @@ class ImageEmbeddings(nn.Module):
         super().__init__()
 
         rgb_encoder_type = getattr(config, 'rgb_encoder_type', 'clip')
-        raw_image_feat_size = getattr(
-            config, 'raw_image_feat_size', config.image_feat_size
-        )
-        image_feat_size = config.image_feat_size
-        projection_hidden_size = getattr(
-            config, 'projection_hidden_size', config.hidden_size
-        )
-        self.rgb_projection = build_rgb_projection(
-            rgb_encoder_type,
-            raw_image_feat_size,
-            image_feat_size,
-            projection_hidden_size,
-        )
         self.rgb_encoder_type = str(rgb_encoder_type).lower()
-        self.raw_image_feat_size = int(raw_image_feat_size)
-        self.image_feat_size = int(image_feat_size)
+        if self.rgb_encoder_type not in {'clip', 'rae_dinov2'}:
+            raise ValueError(
+                f'Unsupported RGB encoder type: {self.rgb_encoder_type}'
+            )
+        self.image_feat_size = int(config.image_feat_size)
+        expected_image_feat_size = (
+            768 if self.rgb_encoder_type == 'rae_dinov2' else 512
+        )
+        if self.image_feat_size != expected_image_feat_size:
+            raise ValueError(
+                f'{self.rgb_encoder_type} image_feat_size must be '
+                f'{expected_image_feat_size}, got {self.image_feat_size}'
+            )
         self.img_linear = nn.Linear(config.image_feat_size, config.hidden_size) 
         self.img_layer_norm = BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.loc_linear = nn.Linear(config.angle_feat_size, config.hidden_size) 
@@ -502,24 +498,6 @@ class ImageEmbeddings(nn.Module):
         else:
             self.pano_encoder = None
 
-    def project_rgb(self, features):
-        if features.ndim < 1 or features.shape[-1] != self.raw_image_feat_size:
-            actual_size = features.shape[-1] if features.ndim >= 1 else None
-            raise ValueError(
-                'RGB features last dimension must be '
-                f'{self.raw_image_feat_size}, got {actual_size}'
-            )
-
-        projected = self.rgb_projection(features)
-        if projected.shape[-1] != self.image_feat_size:
-            raise ValueError(
-                'RGB projection must output '
-                f'{self.image_feat_size} dims, got {projected.shape[-1]}'
-            )
-        if not torch.isfinite(projected).all():
-            raise FloatingPointError('RGB projection contains NaN or infinity')
-        return projected
-
     def forward(
         self, traj_view_img_fts, traj_view_dep_fts, traj_obj_img_fts, traj_loc_fts, traj_nav_types, 
         traj_step_lens, traj_vp_view_lens, traj_vp_obj_lens, type_embed_layer
@@ -527,7 +505,6 @@ class ImageEmbeddings(nn.Module):
         device = traj_view_img_fts.device
         has_obj = traj_obj_img_fts is not None 
 
-        traj_view_img_fts = self.project_rgb(traj_view_img_fts)
         traj_view_img_embeds = self.img_layer_norm(self.img_linear(traj_view_img_fts)) 
         if self.dep_linear is not None:
             traj_view_img_embeds = traj_view_img_embeds + \

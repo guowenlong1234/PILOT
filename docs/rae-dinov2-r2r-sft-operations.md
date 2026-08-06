@@ -1,5 +1,9 @@
 # RAE/DINOv2 R2R SFT 运行手册
 
+> 当前视觉契约已切换为 ETPNav 导航链路。旧的 512 维视觉接口、旧
+> `rae_dinov2_cls_mlp` 预训练权重和旧 SFT checkpoint 均不兼容，不能
+> 恢复到当前实验；新实验使用 `rae_dinov2_etpnav_cls_768` 隔离目录。
+
 ## 正式配置
 
 - 测评机：单张 RTX 4090 24GB。
@@ -15,7 +19,7 @@
 - 路点增强：开启。
 - 训练数据：R2R `train_90`。
 - 预训练初始化：
-  `pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp/best/model_best_step_452500.pt`。
+  `pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768/best/model_best_step_452500.pt`。
 
 单卡有效 batch 与原四卡相同，因此训练样本量和优化器更新次数保持
 一致。代价是单卡需要串行完成四个 micro-batch。正式权重短测中一次
@@ -54,7 +58,7 @@
 输出目录：
 
 ```text
-data/logs/rae_dinov2/r2r_sft_formal/
+data/logs/rae_dinov2_etpnav_cls_768/r2r_sft_formal/
 ```
 
 ## 启动与管理

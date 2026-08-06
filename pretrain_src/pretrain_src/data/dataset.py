@@ -18,13 +18,14 @@ MAX_STEP = 10   # normalize
 TRAIN_MAX_STEP = 20
 
 RAE_DINO_HDF5_METADATA = {
-    'feature_extractor': 'rae_dinov2_with_registers_base_cls',
+    'feature_extractor': 'rae_dinov2_with_registers_base_raw_cls',
     'feature_dim': 768,
     'dtype': 'float32',
     'num_views': 36,
     'image_size': 224,
     'vfov': 60,
-    'latent_normalized': True,
+    'cls_normalization': 'none',
+    'rae_stat_applied_to_cls': False,
 }
 
 

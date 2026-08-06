@@ -12,8 +12,10 @@ from vlnce_baselines.models.checkpoint_utils import (
 )
 
 
-PROJECTION_MARKER = "rgb_projection."
-EXPECTED_SUFFIXES = (
+IMG_LINEAR_MARKER = "img_embeddings.img_linear."
+IMG_LINEAR_SUFFIXES = ("weight", "bias")
+RESIDUAL_MLP_MARKER = "rgb_encoder.cls_residual_mlp.layers."
+RESIDUAL_MLP_SUFFIXES = (
     "0.weight",
     "0.bias",
     "2.weight",
@@ -40,25 +42,43 @@ def _state_dict(checkpoint):
     raise ValueError("checkpoint must contain a state mapping")
 
 
-def _projection_by_suffix(checkpoint):
-    projection = {}
+def _parameters_by_suffix(checkpoint, marker, expected_suffixes):
+    parameters = {}
+    expected_suffixes = set(expected_suffixes)
     for key, value in _state_dict(checkpoint).items():
-        if PROJECTION_MARKER not in key:
+        if marker not in key:
             continue
-        suffix = key.split(PROJECTION_MARKER, 1)[1]
-        if suffix in EXPECTED_SUFFIXES:
-            if suffix in projection:
-                raise ValueError(f"duplicate projection suffix: {suffix}")
-            if not torch.is_tensor(value) or not torch.isfinite(value).all():
-                raise ValueError(f"projection parameter is invalid: {key}")
-            projection[suffix] = value.cpu()
-    if set(projection) != set(EXPECTED_SUFFIXES):
-        missing = sorted(set(EXPECTED_SUFFIXES) - set(projection))
-        extra = sorted(set(projection) - set(EXPECTED_SUFFIXES))
+        suffix = key.split(marker, 1)[1]
+        if suffix not in expected_suffixes:
+            continue
+        if suffix in parameters:
+            raise ValueError(f"duplicate {marker} suffix: {suffix}")
+        if not torch.is_tensor(value) or not torch.isfinite(value).all():
+            raise ValueError(f"visual parameter is invalid: {key}")
+        parameters[suffix] = value.cpu()
+    if set(parameters) != expected_suffixes:
+        missing = sorted(expected_suffixes - set(parameters))
+        extra = sorted(set(parameters) - expected_suffixes)
         raise ValueError(
-            f"projection parameter mismatch; missing={missing}, extra={extra}"
+            f"{marker} parameter mismatch; missing={missing}, extra={extra}"
         )
-    return projection
+    return parameters
+
+
+def _img_linear(checkpoint):
+    return _parameters_by_suffix(
+        checkpoint,
+        IMG_LINEAR_MARKER,
+        IMG_LINEAR_SUFFIXES,
+    )
+
+
+def _residual_mlp(checkpoint):
+    return _parameters_by_suffix(
+        checkpoint,
+        RESIDUAL_MLP_MARKER,
+        RESIDUAL_MLP_SUFFIXES,
+    )
 
 
 def _assert_online_checkpoint(
@@ -108,10 +128,10 @@ def _assert_online_checkpoint(
     return metadata
 
 
-def audit_pretrain(path, initial_projection_path=None):
+def audit_pretrain(path, initial_img_linear_path=None):
     checkpoint = _load(path)
     state = _state_dict(checkpoint)
-    projection = _projection_by_suffix(checkpoint)
+    img_linear = _img_linear(checkpoint)
     required_prefixes = (
         "bert.embeddings.",
         "bert.global_encoder.",
@@ -126,55 +146,64 @@ def audit_pretrain(path, initial_projection_path=None):
             "pretrain checkpoint is not a complete formal model; "
             f"missing key prefixes: {missing}"
         )
-    if initial_projection_path is not None:
-        initial = _projection_by_suffix(_load(initial_projection_path))
-        for suffix in EXPECTED_SUFFIXES:
-            if torch.equal(projection[suffix], initial[suffix]):
+    if initial_img_linear_path is not None:
+        initial = _img_linear(_load(initial_img_linear_path))
+        for suffix in IMG_LINEAR_SUFFIXES:
+            if torch.equal(img_linear[suffix], initial[suffix]):
                 raise ValueError(
-                    f"formal pretrain did not update projection parameter {suffix}"
+                    f"formal pretrain did not update img_linear {suffix}"
                 )
         print(
             "AUDIT_PRETRAIN_UPDATE_PASS "
-            f"parameters={len(projection)} initial={initial_projection_path}"
+            f"parameters={len(img_linear)} initial={initial_img_linear_path}"
         )
-    print(f"AUDIT_PRETRAIN_PASS parameters={len(projection)} path={path}")
+    print(f"AUDIT_PRETRAIN_PASS parameters={len(img_linear)} path={path}")
 
 
 def audit_sft(
     pretrain_path, checkpoint_path, iteration, training_state_path=None
 ):
-    pretrain = _projection_by_suffix(_load(pretrain_path))
+    pretrain = _img_linear(_load(pretrain_path))
     checkpoint = _load(checkpoint_path)
-    online = _projection_by_suffix(checkpoint)
+    online = _img_linear(checkpoint)
+    residual = _residual_mlp(checkpoint)
     training_state = (
         _load(training_state_path) if training_state_path else None
     )
     _assert_online_checkpoint(checkpoint, iteration, training_state)
-    for suffix in EXPECTED_SUFFIXES:
+    for suffix in IMG_LINEAR_SUFFIXES:
         difference = (online[suffix] - pretrain[suffix]).abs()
         changed = int(torch.count_nonzero(difference))
         if changed == 0:
-            raise ValueError(f"SFT did not update projection parameter {suffix}")
+            raise ValueError(f"SFT did not update img_linear {suffix}")
         print(
-            f"AUDIT_SFT_PARAMETER suffix={suffix} changed={changed} "
+            f"AUDIT_SFT_IMG_LINEAR suffix={suffix} changed={changed} "
             f"max_abs={float(difference.max())}"
         )
+    if not any(torch.count_nonzero(residual[suffix]) for suffix in ("4.weight", "4.bias")):
+        raise ValueError("SFT did not update the zero-initialized CLS residual MLP")
     print(f"AUDIT_SFT_PASS path={checkpoint_path}")
 
 
 def audit_frozen(before_path, after_path, iteration):
     before_checkpoint = _load(before_path)
     after_checkpoint = _load(after_path)
-    before = _projection_by_suffix(before_checkpoint)
-    after = _projection_by_suffix(after_checkpoint)
+    before_parameters = {
+        **{f"img_linear.{k}": v for k, v in _img_linear(before_checkpoint).items()},
+        **{f"residual_mlp.{k}": v for k, v in _residual_mlp(before_checkpoint).items()},
+    }
+    after_parameters = {
+        **{f"img_linear.{k}": v for k, v in _img_linear(after_checkpoint).items()},
+        **{f"residual_mlp.{k}": v for k, v in _residual_mlp(after_checkpoint).items()},
+    }
     before_metadata = before_checkpoint.get("rgb_encoder")
     after_metadata = _assert_online_checkpoint(after_checkpoint, iteration)
     if after_metadata != before_metadata:
         raise ValueError("GRPO changed RGB encoder metadata")
-    for suffix in EXPECTED_SUFFIXES:
+    for name, before_value in before_parameters.items():
         torch.testing.assert_close(
-            after[suffix],
-            before[suffix],
+            after_parameters[name],
+            before_value,
             rtol=0,
             atol=0,
         )
@@ -187,7 +216,7 @@ def main():
 
     pretrain = subparsers.add_parser("pretrain")
     pretrain.add_argument("checkpoint")
-    pretrain.add_argument("--initial-projection")
+    pretrain.add_argument("--initial-img-linear")
 
     sft = subparsers.add_parser("sft")
     sft.add_argument("pretrain_checkpoint")
@@ -202,7 +231,7 @@ def main():
 
     args = parser.parse_args()
     if args.command == "pretrain":
-        audit_pretrain(args.checkpoint, args.initial_projection)
+        audit_pretrain(args.checkpoint, args.initial_img_linear)
     elif args.command == "sft":
         audit_sft(
             args.pretrain_checkpoint,

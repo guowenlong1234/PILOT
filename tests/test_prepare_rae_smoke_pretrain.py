@@ -10,7 +10,7 @@ from scripts.audit_rae_smoke import _assert_online_checkpoint, audit_pretrain
 from vlnce_baselines.models import checkpoint_utils as checkpoint_module
 from scripts.prepare_rae_smoke_pretrain import (
     prepare_smoke_config,
-    snapshot_initial_projection,
+    snapshot_initial_img_linear,
 )
 
 
@@ -125,12 +125,18 @@ def test_prepare_smoke_config_rejects_empty_source_jsonl(tmp_path):
         prepare_smoke_config(source_path, tmp_path / "out" / "smoke.json")
 
 
-def test_pretrain_audit_rejects_projection_only_checkpoint(tmp_path):
-    checkpoint = {
-        f"bert.img_embeddings.rgb_projection.{suffix}": torch.ones(1)
-        for suffix in ("0.weight", "0.bias", "2.weight", "2.bias", "4.weight", "4.bias")
+def _img_linear_state(value=1.0):
+    return {
+        "bert.img_embeddings.img_linear.weight": torch.full(
+            (768, 768), value
+        ),
+        "bert.img_embeddings.img_linear.bias": torch.full((768,), value),
     }
-    path = tmp_path / "projection_only.pt"
+
+
+def test_pretrain_audit_rejects_img_linear_only_checkpoint(tmp_path):
+    checkpoint = _img_linear_state()
+    path = tmp_path / "img_linear_only.pt"
     torch.save(checkpoint, path)
 
     with pytest.raises(ValueError, match="complete formal model"):
@@ -138,10 +144,7 @@ def test_pretrain_audit_rejects_projection_only_checkpoint(tmp_path):
 
 
 def test_pretrain_audit_accepts_complete_formal_checkpoint(tmp_path):
-    checkpoint = {
-        f"bert.img_embeddings.rgb_projection.{suffix}": torch.ones(1)
-        for suffix in ("0.weight", "0.bias", "2.weight", "2.bias", "4.weight", "4.bias")
-    }
+    checkpoint = _img_linear_state()
     checkpoint["bert.embeddings.word_embeddings.weight"] = torch.ones(1)
     checkpoint["bert.global_encoder.encoder.x_layers.0.lang_self_att.self.query.weight"] = torch.ones(1)
     path = tmp_path / "formal.pt"
@@ -152,7 +155,7 @@ def test_pretrain_audit_accepts_complete_formal_checkpoint(tmp_path):
         {
             key: torch.zeros_like(value)
             for key, value in checkpoint.items()
-            if "rgb_projection." in key
+            if "img_embeddings.img_linear." in key
         },
         initial_path,
     )
@@ -160,11 +163,8 @@ def test_pretrain_audit_accepts_complete_formal_checkpoint(tmp_path):
     audit_pretrain(path, initial_path)
 
 
-def test_pretrain_audit_rejects_unchanged_formal_projection(tmp_path):
-    checkpoint = {
-        f"bert.img_embeddings.rgb_projection.{suffix}": torch.ones(1)
-        for suffix in ("0.weight", "0.bias", "2.weight", "2.bias", "4.weight", "4.bias")
-    }
+def test_pretrain_audit_rejects_unchanged_formal_img_linear(tmp_path):
+    checkpoint = _img_linear_state()
     checkpoint["bert.embeddings.word_embeddings.weight"] = torch.ones(1)
     checkpoint["bert.global_encoder.encoder.x_layers.0.lang_self_att.self.query.weight"] = torch.ones(1)
     formal_path = tmp_path / "formal.pt"
@@ -174,7 +174,7 @@ def test_pretrain_audit_rejects_unchanged_formal_projection(tmp_path):
         {
             key: value
             for key, value in checkpoint.items()
-            if "rgb_projection." in key
+            if "img_embeddings.img_linear." in key
         },
         initial_path,
     )
@@ -183,60 +183,67 @@ def test_pretrain_audit_rejects_unchanged_formal_projection(tmp_path):
         audit_pretrain(formal_path, initial_path)
 
 
-def test_snapshot_initial_projection_saves_exactly_six_parameters(tmp_path):
+def test_snapshot_initial_img_linear_saves_weight_and_bias(tmp_path):
     class FakeModel(torch.nn.Module):
         def __init__(self):
             super().__init__()
             self.bert = torch.nn.Module()
             self.bert.img_embeddings = torch.nn.Module()
-            self.bert.img_embeddings.rgb_projection = torch.nn.Sequential(
-                torch.nn.Linear(3, 3),
-                torch.nn.GELU(),
-                torch.nn.Linear(3, 3),
-                torch.nn.GELU(),
-                torch.nn.Linear(3, 2),
-            )
+            self.bert.img_embeddings.img_linear = torch.nn.Linear(3, 2)
             self.other = torch.nn.Linear(2, 2)
 
     path = tmp_path / "initial.pt"
 
-    snapshot_initial_projection(FakeModel(), path)
+    snapshot_initial_img_linear(FakeModel(), path)
 
     checkpoint = torch.load(path, map_location="cpu")
-    assert len(checkpoint) == 6
-    assert all("rgb_projection." in key for key in checkpoint)
+    assert len(checkpoint) == 2
+    assert set(checkpoint) == {
+        "bert.img_embeddings.img_linear.weight",
+        "bert.img_embeddings.img_linear.bias",
+    }
 
 
 def _online_audit_checkpoint(tmp_path):
     model_dir = tmp_path / "pretrained" / "rae"
     model_dir.mkdir(parents=True)
     model_path = model_dir / "model.safetensors"
-    stat_path = model_dir / "stat.pt"
     model_path.write_bytes(b"model")
-    stat_path.write_bytes(b"stats")
     config = SimpleNamespace(
         MODEL=SimpleNamespace(
             RGB_ENCODER=SimpleNamespace(
                 type="rae_dinov2",
                 model_dir=str(model_dir),
-                stat_path=str(stat_path),
-                raw_output_size=768,
-                output_size=512,
+                output_size=768,
+                cls_residual_mlp_enabled=True,
+                cls_residual_mlp_hidden_dim=768,
+                cls_residual_mlp_zero_init=True,
             )
         )
     )
     state = {
-        f"net.vln_bert.img_embeddings.rgb_projection.{suffix}": torch.ones(1)
-        for suffix in ("0.weight", "0.bias", "2.weight", "2.bias", "4.weight", "4.bias")
+        "net.vln_bert.img_embeddings.img_linear.weight": torch.ones(768, 768),
+        "net.vln_bert.img_embeddings.img_linear.bias": torch.ones(768),
     }
+    for suffix in ("0.weight", "2.weight", "4.weight"):
+        state[
+            f"net.rgb_encoder.cls_residual_mlp.layers.{suffix}"
+        ] = torch.zeros(768, 768)
+    for suffix in ("0.bias", "2.bias", "4.bias"):
+        state[
+            f"net.rgb_encoder.cls_residual_mlp.layers.{suffix}"
+        ] = torch.zeros(768)
     state["net.vln_bert.global_encoder.weight"] = torch.ones(1)
     metadata = {
         "type": "rae_dinov2",
+        "pipeline": "etpnav_raw_cls_residual_mlp_v1",
         "model_dir": "pretrained/rae",
         "model_sha256": hashlib.sha256(b"model").hexdigest(),
-        "stat_sha256": hashlib.sha256(b"stats").hexdigest(),
-        "raw_output_size": 768,
-        "output_size": 512,
+        "cls_normalization": "none",
+        "output_size": 768,
+        "cls_residual_mlp_enabled": True,
+        "cls_residual_mlp_hidden_dim": 768,
+        "cls_residual_mlp_zero_init": True,
     }
     return {
         "state_dict": state,
@@ -274,9 +281,11 @@ def test_online_audit_accepts_separate_training_state(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ("missing_field", "message"),
     (
+        ("pipeline", "pipeline"),
         ("model_dir", "model_dir"),
-        ("model_sha256", "model SHA256"),
-        ("stat_sha256", "stat SHA256"),
+        ("model_sha256", "model_sha256"),
+        ("cls_normalization", "cls_normalization"),
+        ("cls_residual_mlp_enabled", "cls_residual_mlp_enabled"),
     ),
 )
 def test_online_audit_rejects_incomplete_rae_metadata(

@@ -41,7 +41,7 @@
             "val_unseen_r2r_traj_files": ["pretrain_src/datasets/R2R/annotations/pretrain_R2R_RxR/R2R_val_unseen_enc_xlmr.jsonl"],
             "val_unseen_rxr_traj_files": ["pretrain_src/datasets/R2R/annotations/pretrain_R2R_RxR/rxr_val_unseen_guide_xlmr.jsonl"],
             "connectivity_dir": "pretrain_src/datasets/R2R/connectivity",
-            "img_ft_file": "pretrain_src/img_features/RAE-DINOv2-B-14-CLS-views-habitat.hdf5",
+            "img_ft_file": "pretrain_src/img_features/RAE-DINOv2-B-14-RAW-CLS-views-habitat.hdf5",
             "dep_ft_file": "pretrain_src/img_features/ddppo_resnet50_depth_features.hdf5",
             "scanvp_cands_file": "pretrain_src/datasets/R2R/annotations/scanvp_candview_relangles.json",
             "tasks": ["mlm", "sap"],

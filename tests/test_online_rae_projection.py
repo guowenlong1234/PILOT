@@ -21,12 +21,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _image_config(encoder_type="rae_dinov2"):
-    is_rae = encoder_type == "rae_dinov2"
     return PretrainedConfig(
         rgb_encoder_type=encoder_type,
-        raw_image_feat_size=768 if is_rae else 512,
-        image_feat_size=512,
-        projection_hidden_size=768,
+        image_feat_size=768 if encoder_type == "rae_dinov2" else 512,
         hidden_size=768,
         depth_feat_size=128,
         angle_feat_size=4,
@@ -39,6 +36,7 @@ def _image_config(encoder_type="rae_dinov2"):
 
 
 def _model_config(encoder_type):
+    is_rae = encoder_type == "rae_dinov2"
     return SimpleNamespace(
         TORCH_GPU_ID=0,
         spatial_output=False,
@@ -50,26 +48,23 @@ def _model_config(encoder_type):
         ),
         RGB_ENCODER=SimpleNamespace(
             type=encoder_type,
-            precision=(
-                "bf16" if encoder_type == "rae_dinov2" else "float32"
-            ),
+            precision="ambient",
             model_dir="rae-model",
-            stat_path="rae-stat.pt",
-            raw_output_size=768 if encoder_type == "rae_dinov2" else 512,
-            output_size=512,
-            projection_hidden_size=768,
+            output_size=768 if is_rae else 512,
+            cls_residual_mlp_enabled=is_rae,
+            cls_residual_mlp_hidden_dim=768,
+            cls_residual_mlp_zero_init=True,
         ),
     )
 
 
 def _init_config(encoder_type="rae_dinov2", pretrained_path="pretrain.pt"):
+    is_rae = encoder_type == "rae_dinov2"
     return SimpleNamespace(
         pretrained_path=pretrained_path,
         RGB_ENCODER=SimpleNamespace(
             type=encoder_type,
-            raw_output_size=768 if encoder_type == "rae_dinov2" else 512,
-            output_size=512,
-            projection_hidden_size=768,
+            output_size=768 if is_rae else 512,
         ),
         use_depth_embedding=True,
         use_sprels=True,
@@ -78,11 +73,14 @@ def _init_config(encoder_type="rae_dinov2", pretrained_path="pretrain.pt"):
     )
 
 
-def _module_projection_checkpoint():
-    projection = PretrainImageEmbeddings(_image_config()).rgb_projection
+def _pretrain_visual_checkpoint(encoder_type="rae_dinov2", prefix="module."):
+    input_size = 768 if encoder_type == "rae_dinov2" else 512
     return {
-        f"module.bert.img_embeddings.rgb_projection.{name}": value
-        for name, value in projection.state_dict().items()
+        f"{prefix}bert.img_embeddings.img_linear.weight": torch.randn(
+            768,
+            input_size,
+        ),
+        f"{prefix}bert.img_embeddings.img_linear.bias": torch.randn(768),
     }
 
 
@@ -95,39 +93,18 @@ def _flatten(value, prefix=()):
     return {prefix: value}
 
 
-def test_online_image_embeddings_matches_pretrain_projection_structure():
+def test_online_image_embeddings_matches_pretrain_direct_interface():
     config = _image_config()
     online = ImageEmbeddings(config)
     offline = PretrainImageEmbeddings(config)
 
-    assert list(online.rgb_projection.state_dict()) == list(
-        offline.rgb_projection.state_dict()
-    )
-    assert [
-        (layer.in_features, layer.out_features)
-        for layer in online.rgb_projection
-        if isinstance(layer, torch.nn.Linear)
-    ] == [(768, 768), (768, 768), (768, 512)]
-
-    projected = online.project_rgb(torch.randn(4, 768))
-    assert projected.shape == (4, 512)
-    assert torch.isfinite(projected).all()
+    assert not hasattr(online, "rgb_projection")
+    assert not hasattr(offline, "rgb_projection")
+    assert online.img_linear.in_features == offline.img_linear.in_features == 768
+    assert online.img_linear.out_features == offline.img_linear.out_features == 768
 
 
-def test_online_clip_projection_is_identity_for_legacy_dimensions():
-    config = _image_config("clip")
-    del config.rgb_encoder_type
-    del config.raw_image_feat_size
-    del config.projection_hidden_size
-    module = ImageEmbeddings(config)
-    features = torch.randn(4, 512)
-
-    assert isinstance(module.rgb_projection, torch.nn.Identity)
-    assert module.project_rgb(features) is features
-    assert not list(module.rgb_projection.parameters())
-
-
-def test_forward_panorama_consumes_512_without_projecting_again():
+def test_forward_panorama_consumes_raw_768_cls_directly():
     image_embeddings = ImageEmbeddings(_image_config())
     holder = SimpleNamespace(
         img_embeddings=image_embeddings,
@@ -135,31 +112,24 @@ def test_forward_panorama_consumes_512_without_projecting_again():
             token_type_embeddings=torch.nn.Embedding(2, 768)
         ),
     )
-    projection_calls = []
     linear_inputs = []
-    projection_hook = image_embeddings.rgb_projection.register_forward_hook(
-        lambda *_args: projection_calls.append(True)
-    )
-    linear_hook = image_embeddings.img_linear.register_forward_pre_hook(
+    hook = image_embeddings.img_linear.register_forward_pre_hook(
         lambda _module, inputs: linear_inputs.append(inputs[0])
     )
 
     try:
         outputs = GlocalTextPathNavCMT.forward_panorama(
             holder,
-            rgb_fts=torch.randn(2, 12, 512),
+            rgb_fts=torch.randn(2, 12, 768),
             dep_fts=torch.randn(2, 12, 128),
             loc_fts=torch.randn(2, 12, 4),
             nav_types=torch.zeros(2, 12, dtype=torch.long),
             view_lens=torch.tensor([12, 12]),
         )
     finally:
-        projection_hook.remove()
-        linear_hook.remove()
+        hook.remove()
 
-    assert projection_calls == []
-    assert len(linear_inputs) == 1
-    assert linear_inputs[0].shape == (2, 12, 512)
+    assert linear_inputs[0].shape == (2, 12, 768)
     assert outputs[0].shape == (2, 12, 768)
 
 
@@ -185,12 +155,26 @@ class _FakeRaeEncoder(torch.nn.Module):
     is_blind = False
     calls = []
 
-    def __init__(self, model_dir, stat_path, device, precision):
+    def __init__(
+        self,
+        model_dir,
+        device,
+        precision,
+        cls_residual_mlp_enabled,
+        cls_residual_mlp_hidden_dim,
+        cls_residual_mlp_zero_init,
+    ):
         super().__init__()
-        self.backbone_weight = torch.nn.Parameter(
-            torch.ones(1), requires_grad=False
+        self.calls.append(
+            (
+                model_dir,
+                device,
+                precision,
+                cls_residual_mlp_enabled,
+                cls_residual_mlp_hidden_dim,
+                cls_residual_mlp_zero_init,
+            )
         )
-        self.calls.append((model_dir, stat_path, device, precision))
 
 
 class _ConcreteETP(policy_module.ETP):
@@ -204,25 +188,24 @@ class _ConcreteETP(policy_module.ETP):
 
 
 @pytest.mark.parametrize(
-    ("encoder_type", "expected_class"),
-    (("clip", _FakeClipEncoder), ("rae_dinov2", _FakeRaeEncoder)),
+    ("encoder_type", "expected_class", "expected_size"),
+    (
+        ("clip", _FakeClipEncoder, 512),
+        ("rae_dinov2", _FakeRaeEncoder, 768),
+    ),
 )
 def test_etp_builds_configured_rgb_encoder(
-    monkeypatch, encoder_type, expected_class
+    monkeypatch,
+    encoder_type,
+    expected_class,
+    expected_size,
 ):
     monkeypatch.setattr(
         policy_module, "get_vlnbert_models", lambda **_kwargs: torch.nn.Module()
     )
-    monkeypatch.setattr(
-        policy_module, "VlnResnetDepthEncoder", _FakeDepthEncoder
-    )
+    monkeypatch.setattr(policy_module, "VlnResnetDepthEncoder", _FakeDepthEncoder)
     monkeypatch.setattr(policy_module, "CLIPEncoder", _FakeClipEncoder)
-    monkeypatch.setattr(
-        policy_module,
-        "RaeDinov2ClsEncoder",
-        _FakeRaeEncoder,
-        raising=False,
-    )
+    monkeypatch.setattr(policy_module, "RaeDinov2RgbEncoder", _FakeRaeEncoder)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     _FakeRaeEncoder.calls.clear()
 
@@ -234,29 +217,18 @@ def test_etp_builds_configured_rgb_encoder(
     )
 
     assert isinstance(policy.rgb_encoder, expected_class)
+    assert policy.rgb_output_size == expected_size
     if encoder_type == "rae_dinov2":
         assert _FakeRaeEncoder.calls == [
-            ("rae-model", "rae-stat.pt", torch.device("cpu"), "bf16")
+            (
+                "rae-model",
+                torch.device("cpu"),
+                "ambient",
+                True,
+                768,
+                True,
+            )
         ]
-
-
-def test_etp_rejects_unknown_rgb_encoder(monkeypatch):
-    monkeypatch.setattr(
-        policy_module, "get_vlnbert_models", lambda **_kwargs: torch.nn.Module()
-    )
-    monkeypatch.setattr(
-        policy_module, "VlnResnetDepthEncoder", _FakeDepthEncoder
-    )
-    monkeypatch.setattr(policy_module, "CLIPEncoder", _FakeClipEncoder)
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-
-    with pytest.raises(ValueError, match="Unsupported RGB encoder.*mystery"):
-        _ConcreteETP(
-            observation_space=None,
-            model_config=_model_config("mystery"),
-            num_actions=1,
-            dropout_rate=0.0,
-        )
 
 
 class _WaypointRgbEncoder(torch.nn.Module):
@@ -265,27 +237,16 @@ class _WaypointRgbEncoder(torch.nn.Module):
     def __init__(self, output_size):
         super().__init__()
         self.output_size = output_size
-        self.frozen_weight = torch.nn.Parameter(
-            torch.ones(1), requires_grad=False
-        )
 
     def forward(self, observations):
-        count = observations["rgb"].shape[0]
-        return torch.ones(count, self.output_size)
+        return torch.ones(observations["rgb"].shape[0], self.output_size)
 
 
 class _WaypointDepthEncoder(torch.nn.Module):
     is_blind = False
 
     def forward(self, observations):
-        count = observations["depth"].shape[0]
-        return torch.ones(count, 128, 4, 4)
-
-
-class _ProjectionHolder(torch.nn.Module):
-    def __init__(self, image_embeddings):
-        super().__init__()
-        self.img_embeddings = image_embeddings
+        return torch.ones(observations["depth"].shape[0], 128, 4, 4)
 
 
 class _WaypointPredictor(torch.nn.Module):
@@ -295,32 +256,34 @@ class _WaypointPredictor(torch.nn.Module):
 
     def forward(self, rgb, depth):
         self.rgb_inputs.append(rgb)
-        assert depth.shape == (12, 128, 4, 4)
         return torch.zeros(1, 120, 12)
 
 
-def _waypoint_policy(encoder_type):
+def _waypoint_policy(output_size):
     policy = object.__new__(_ConcreteETP)
     torch.nn.Module.__init__(policy)
-    raw_size = 768 if encoder_type == "rae_dinov2" else 512
     policy.device = torch.device("cpu")
-    policy.rgb_encoder = _WaypointRgbEncoder(raw_size)
+    policy.rgb_output_size = output_size
+    policy.rgb_encoder = _WaypointRgbEncoder(output_size)
     policy.depth_encoder = _WaypointDepthEncoder()
-    policy.vln_bert = _ProjectionHolder(ImageEmbeddings(_image_config(encoder_type)))
     policy.space_pool_rgb = torch.nn.Sequential(
         torch.nn.AdaptiveAvgPool2d((1, 1)), torch.nn.Flatten(start_dim=2)
     )
     policy.space_pool_depth = torch.nn.Sequential(
         torch.nn.AdaptiveAvgPool2d((1, 1)), torch.nn.Flatten(start_dim=2)
     )
-    policy.pano_img_idxes = policy_module.np.arange(12, dtype=policy_module.np.int64)
+    policy.pano_img_idxes = policy_module.np.arange(
+        12,
+        dtype=policy_module.np.int64,
+    )
     policy.pano_angle_fts = torch.zeros(12, 4)
     return policy
 
 
-@pytest.mark.parametrize("encoder_type", ("rae_dinov2", "clip"))
-def test_waypoint_projects_once_and_returns_only_512_dim_features(
-    monkeypatch, encoder_type
+@pytest.mark.parametrize("output_size", (768, 512))
+def test_waypoint_preserves_encoder_dimension_without_projection(
+    monkeypatch,
+    output_size,
 ):
     def fake_nms(values, **_kwargs):
         output = torch.zeros_like(values)
@@ -328,12 +291,8 @@ def test_waypoint_projects_once_and_returns_only_512_dim_features(
         return output
 
     monkeypatch.setattr(policy_module, "nms", fake_nms)
-    policy = _waypoint_policy(encoder_type)
+    policy = _waypoint_policy(output_size)
     predictor = _WaypointPredictor()
-    projection_calls = []
-    hook = policy.vln_bert.img_embeddings.rgb_projection.register_forward_hook(
-        lambda *_args: projection_calls.append(True)
-    )
     observations = {
         "rgb": torch.zeros(1, 224, 224, 3, dtype=torch.uint8),
         "depth": torch.zeros(1, 256, 256, 1),
@@ -342,34 +301,18 @@ def test_waypoint_projects_once_and_returns_only_512_dim_features(
         observations[f"rgb_{heading}"] = torch.zeros(
             1, 224, 224, 3, dtype=torch.uint8
         )
-        observations[f"depth_{heading}"] = torch.zeros(
-            1, 256, 256, 1
-        )
+        observations[f"depth_{heading}"] = torch.zeros(1, 256, 256, 1)
 
-    try:
-        outputs = policy(
-            mode="waypoint",
-            observations=observations,
-            waypoint_predictor=predictor,
-            in_train=False,
-        )
-    finally:
-        hook.remove()
-
-    assert len(projection_calls) == 1
-    assert len(predictor.rgb_inputs) == 1
-    assert predictor.rgb_inputs[0].shape == (12, 512)
-    assert outputs["pano_rgb"].shape == (1, 12, 512)
-    assert all(candidate.shape[-1] == 512 for candidate in outputs["cand_rgb"])
-    assert all(not p.requires_grad for p in policy.rgb_encoder.parameters())
-    projection_parameters = list(
-        policy.vln_bert.img_embeddings.rgb_projection.parameters()
+    outputs = policy(
+        mode="waypoint",
+        observations=observations,
+        waypoint_predictor=predictor,
+        in_train=False,
     )
-    if encoder_type == "rae_dinov2":
-        assert projection_parameters
-        assert all(p.requires_grad for p in projection_parameters)
-    else:
-        assert projection_parameters == []
+
+    assert predictor.rgb_inputs[0].shape == (12, output_size)
+    assert outputs["pano_rgb"].shape == (1, 12, output_size)
+    assert all(candidate.shape[-1] == output_size for candidate in outputs["cand_rgb"])
 
 
 def test_online_default_config_explicitly_preserves_clip():
@@ -377,18 +320,18 @@ def test_online_default_config_explicitly_preserves_clip():
 
     rgb = get_config().MODEL.RGB_ENCODER
 
-    assert rgb.cnn_type == "TorchVisionResNet50"
     assert rgb.type == "clip"
-    assert rgb.precision == "float32"
-    assert rgb.model_dir == ""
-    assert rgb.stat_path == ""
-    assert rgb.raw_output_size == 512
     assert rgb.output_size == 512
-    assert rgb.projection_hidden_size == 768
+    assert rgb.cls_residual_mlp_enabled is False
+    assert rgb.cls_residual_mlp_hidden_dim == 768
+    assert rgb.cls_residual_mlp_zero_init is True
+    assert "stat_path" not in rgb
+    assert "raw_output_size" not in rgb
+    assert "projection_hidden_size" not in rgb
 
 
-def test_vlnbert_receives_rgb_config_and_normalizes_module_checkpoint(
-    monkeypatch
+def test_vlnbert_receives_direct_768_config_and_normalizes_module_checkpoint(
+    monkeypatch,
 ):
     captured = {}
 
@@ -398,11 +341,8 @@ def test_vlnbert_receives_rgb_config_and_normalizes_module_checkpoint(
             captured.update(kwargs)
             return kwargs
 
-    monkeypatch.setattr(
-        init_module.torch,
-        "load",
-        lambda *_args, **_kwargs: _module_projection_checkpoint(),
-    )
+    checkpoint = _pretrain_visual_checkpoint()
+    monkeypatch.setattr(init_module.torch, "load", lambda *_args, **_kwargs: checkpoint)
     monkeypatch.setattr(
         "vlnce_baselines.models.etp.ETP_R1_vilmodel_cmt.GlocalTextPathNavCMT",
         FakeModel,
@@ -412,190 +352,85 @@ def test_vlnbert_receives_rgb_config_and_normalizes_module_checkpoint(
 
     config = captured["config"]
     assert config.rgb_encoder_type == "rae_dinov2"
-    assert config.raw_image_feat_size == 768
-    assert config.image_feat_size == 512
-    assert config.projection_hidden_size == 768
-    assert "bert.img_embeddings.rgb_projection.0.weight" in captured["state_dict"]
+    assert config.image_feat_size == 768
+    assert not hasattr(config, "raw_image_feat_size")
+    assert not hasattr(config, "projection_hidden_size")
+    assert "bert.img_embeddings.img_linear.weight" in captured["state_dict"]
 
 
-def test_module_checkpoint_keys_are_canonicalized_once_and_load_real_model(
-    monkeypatch
-):
-    real_model_class = GlocalTextPathNavCMT
-    projection_weight = torch.full((768, 768), 0.125)
-    sap_weight = torch.full((1, 1536), -0.25)
-    sap_bias = torch.full((1,), -0.75)
-    checkpoint = _module_projection_checkpoint()
-    checkpoint.update({
-        "module.bert.img_embeddings.rgb_projection.0.weight": projection_weight,
-        "module.bert.global_sap_head.net.4.weight": sap_weight,
-        "module.global_sap_head.net.4.bias": sap_bias,
-    })
-    captured = {}
-
-    class InspectingModel:
-        @classmethod
-        def from_pretrained(cls, **kwargs):
-            captured["state_dict"] = kwargs["state_dict"]
-            model, loading_info = real_model_class.from_pretrained(
-                output_loading_info=True,
-                **kwargs,
-            )
-            captured["loading_info"] = loading_info
-            return model
-
-    monkeypatch.setattr(
-        init_module.torch,
-        "load",
-        lambda *_args, **_kwargs: checkpoint,
-    )
-    monkeypatch.setattr(
-        "vlnce_baselines.models.etp.ETP_R1_vilmodel_cmt.GlocalTextPathNavCMT",
-        InspectingModel,
-    )
+def test_module_checkpoint_loads_direct_img_linear_into_real_model(monkeypatch):
+    checkpoint = _pretrain_visual_checkpoint()
+    expected_weight = checkpoint[
+        "module.bert.img_embeddings.img_linear.weight"
+    ].clone()
+    monkeypatch.setattr(init_module.torch, "load", lambda *_args, **_kwargs: checkpoint)
 
     model = init_module.get_vlnbert_models(_init_config())
 
-    expected_keys = {
-        key.removeprefix("module.")
-        for key in _module_projection_checkpoint()
-    } | {
-        "bert.global_sap_head.net.4.weight",
-        "bert.global_sap_head.net.4.bias",
-    }
-    assert set(captured["state_dict"]) == expected_keys
-    assert not any(
-        key.startswith("module.")
-        or "bert.module." in key
-        or key.startswith("bert.bert.")
-        for key in captured["state_dict"]
-    )
-    torch.testing.assert_close(
-        model.img_embeddings.rgb_projection[0].weight,
-        projection_weight,
-    )
-    torch.testing.assert_close(model.global_sap_head.net[4].weight, sap_weight)
-    torch.testing.assert_close(model.global_sap_head.net[4].bias, sap_bias)
-
-    relevant_unexpected = [
-        key
-        for key in captured["loading_info"]["unexpected_keys"]
-        if "rgb_projection" in key
-        or "global_sap_head" in key
-        or "module." in key
-    ]
-    assert relevant_unexpected == []
-
-
-def test_clip_checkpoint_without_rae_projection_still_loads(monkeypatch):
-    captured = {}
-
-    class FakeModel:
-        @classmethod
-        def from_pretrained(cls, **kwargs):
-            captured.update(kwargs)
-            return kwargs
-
-    checkpoint = {
-        "bert.embeddings.word_embeddings.weight": torch.ones(2, 2)
-    }
-    monkeypatch.setattr(
-        init_module.torch,
-        "load",
-        lambda *_args, **_kwargs: checkpoint,
-    )
-    monkeypatch.setattr(
-        "vlnce_baselines.models.etp.ETP_R1_vilmodel_cmt.GlocalTextPathNavCMT",
-        FakeModel,
-    )
-
-    init_module.get_vlnbert_models(_init_config("clip"))
-
-    assert captured["state_dict"] == checkpoint
-    assert captured["config"].rgb_encoder_type == "clip"
+    torch.testing.assert_close(model.img_embeddings.img_linear.weight, expected_weight)
+    assert not hasattr(model.img_embeddings, "rgb_projection")
 
 
 @pytest.mark.parametrize(
-    ("encoder_type", "checkpoint", "message"),
+    ("checkpoint", "message"),
     (
-        ("rae_dinov2", {}, "RAE/DINOv2.*missing.*rgb_projection.0.weight"),
         (
-            "clip",
-            {"bert.img_embeddings.rgb_projection.0.weight": torch.ones(1)},
-            "CLIP.*RAE/DINOv2.*rgb_projection.0.weight",
+            {
+                "module.bert.img_embeddings.rgb_projection.0.weight": torch.ones(1),
+                **_pretrain_visual_checkpoint(prefix="module."),
+            },
+            "retired 768->512 rgb_projection",
         ),
         (
-            "clip",
-            {"module.bert.img_embeddings.rgb_projection.0.weight": torch.ones(1)},
-            "CLIP.*RAE/DINOv2.*rgb_projection.0.weight",
+            {
+                "module.bert.img_embeddings.img_linear.weight": torch.ones(768, 512),
+                "module.bert.img_embeddings.img_linear.bias": torch.ones(768),
+            },
+            "img_linear.weight.*\(768, 768\).*\(768, 512\)",
         ),
+        ({}, "missing.*img_linear.weight"),
     ),
 )
-def test_pretrained_checkpoint_type_guard(
-    monkeypatch, encoder_type, checkpoint, message
+def test_rae_pretrained_checkpoint_guard_rejects_old_interface(
+    monkeypatch,
+    checkpoint,
+    message,
 ):
     class FakeModel:
         @classmethod
         def from_pretrained(cls, **kwargs):
             return kwargs
 
-    monkeypatch.setattr(
-        init_module.torch, "load", lambda *_args, **_kwargs: checkpoint
-    )
+    monkeypatch.setattr(init_module.torch, "load", lambda *_args, **_kwargs: checkpoint)
     monkeypatch.setattr(
         "vlnce_baselines.models.etp.ETP_R1_vilmodel_cmt.GlocalTextPathNavCMT",
         FakeModel,
     )
 
     with pytest.raises(ValueError, match=message):
-        init_module.get_vlnbert_models(_init_config(encoder_type))
-
-
-def test_rae_pretrained_projection_guard_rejects_extra_projection_key():
-    checkpoint = _module_projection_checkpoint()
-    checkpoint[
-        "module.bert.img_embeddings.rgb_projection.extra.weight"
-    ] = torch.ones(1)
-    normalized = {
-        key.removeprefix("module."): value
-        for key, value in checkpoint.items()
-    }
-
-    with pytest.raises(
-        ValueError,
-        match=r"missing=\[\].*extra=.*extra\.weight",
-    ):
-        init_module._validate_pretrain_rgb_projection(
-            normalized,
-            "rae_dinov2",
-        )
+        init_module.get_vlnbert_models(_init_config())
 
 
 @pytest.mark.parametrize(
     ("original_path", "rae_path", "task_name", "hfov"),
     (
-        (
-            "run_r2r/iter_train.yaml",
-            "run_r2r/iter_train_rae_dino.yaml",
-            "r2r",
-            90,
-        ),
-        (
-            "run_rxr/iter_train.yaml",
-            "run_rxr/iter_train_rae_dino.yaml",
-            "rxr",
-            63,
-        ),
+        ("run_r2r/iter_train.yaml", "run_r2r/iter_train_rae_dino.yaml", "r2r", 90),
+        ("run_rxr/iter_train.yaml", "run_rxr/iter_train_rae_dino.yaml", "rxr", 63),
     ),
 )
-def test_rae_yaml_only_changes_allowed_fields(
-    original_path, rae_path, task_name, hfov
+def test_rae_yaml_selects_etpnav_768_pipeline(
+    original_path,
+    rae_path,
+    task_name,
+    hfov,
 ):
     original = yaml.safe_load((ROOT / original_path).read_text(encoding="utf-8"))
     rae = yaml.safe_load((ROOT / rae_path).read_text(encoding="utf-8"))
-    original_flat = _flatten(original)
-    rae_flat = _flatten(rae)
-
+    changed = {
+        key
+        for key in set(_flatten(original)) | set(_flatten(rae))
+        if _flatten(original).get(key) != _flatten(rae).get(key)
+    }
     allowed = {
         ("TENSORBOARD_DIR",),
         ("CHECKPOINT_FOLDER",),
@@ -604,38 +439,23 @@ def test_rae_yaml_only_changes_allowed_fields(
         ("MODEL", "RGB_ENCODER", "type"),
         ("MODEL", "RGB_ENCODER", "precision"),
         ("MODEL", "RGB_ENCODER", "model_dir"),
-        ("MODEL", "RGB_ENCODER", "stat_path"),
-        ("MODEL", "RGB_ENCODER", "raw_output_size"),
-        ("MODEL", "RGB_ENCODER", "projection_hidden_size"),
-    }
-    changed = {
-        key
-        for key in set(original_flat) | set(rae_flat)
-        if original_flat.get(key) != rae_flat.get(key)
+        ("MODEL", "RGB_ENCODER", "output_size"),
+        ("MODEL", "RGB_ENCODER", "cls_residual_mlp_enabled"),
+        ("MODEL", "RGB_ENCODER", "cls_residual_mlp_hidden_dim"),
+        ("MODEL", "RGB_ENCODER", "cls_residual_mlp_zero_init"),
     }
     assert changed == allowed
     assert rae["MODEL"]["RGB_ENCODER"] == {
         "type": "rae_dinov2",
-        "precision": "float32",
+        "precision": "ambient",
         "model_dir": "pretrained/rae_dinov2_with_registers_base",
-        "stat_path": "pretrained/rae_dinov2_with_registers_base/stat.pt",
-        "raw_output_size": 768,
-        "output_size": 512,
-        "projection_hidden_size": 768,
+        "output_size": 768,
+        "cls_residual_mlp_enabled": True,
+        "cls_residual_mlp_hidden_dim": 768,
+        "cls_residual_mlp_zero_init": True,
     }
-    assert rae["MODEL"]["pretrained_path"] == (
-        "pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp/best/"
-        "model_best_step_452500.pt"
-    )
-    assert rae["TENSORBOARD_DIR"] == (
-        f"data/logs/rae_dinov2/{task_name}/tensorboard/"
-    )
-    assert rae["CHECKPOINT_FOLDER"] == (
-        f"data/logs/rae_dinov2/{task_name}/checkpoints/"
-    )
-    assert rae["RESULTS_DIR"] == (
-        f"data/logs/rae_dinov2/{task_name}/results/"
-    )
+    assert "rae_dinov2_etpnav_cls_768" in rae["MODEL"]["pretrained_path"]
+    assert f"rae_dinov2_etpnav_cls_768/{task_name}" in rae["TENSORBOARD_DIR"]
 
     task_config = yaml.safe_load(
         (ROOT / rae["BASE_TASK_CONFIG_PATH"]).read_text(encoding="utf-8")

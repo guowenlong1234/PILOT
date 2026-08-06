@@ -6,10 +6,10 @@ TRAINER_NAME: SS-ETP-R1
 ENV_NAME: R1Env
 GPU_NUMBERS: 1
 NUM_ENVIRONMENTS: 1
-TENSORBOARD_DIR: data/logs/rae_dinov2/rxr/tensorboard/
-CHECKPOINT_FOLDER: data/logs/rae_dinov2/rxr/checkpoints/
+TENSORBOARD_DIR: data/logs/rae_dinov2_etpnav_cls_768/rxr/tensorboard/
+CHECKPOINT_FOLDER: data/logs/rae_dinov2_etpnav_cls_768/rxr/checkpoints/
 EVAL_CKPT_PATH_DIR: data/logs/checkpoints/
-RESULTS_DIR: data/logs/rae_dinov2/rxr/results/
+RESULTS_DIR: data/logs/rae_dinov2_etpnav_cls_768/rxr/results/
 # VIDEO_DIR: data/logs/video/
 # VIDEO_OPTION: ["disk"]
 ONLY_LAST_SAVEALL: True
@@ -102,7 +102,7 @@ MODEL:
 
   policy_name: R1Policy
   NUM_ANGLES: 12
-  pretrained_path: pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp/best/model_best_step_452500.pt
+  pretrained_path: pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768/best/model_best_step_452500.pt
   fix_lang_embedding: False
   fix_pano_embedding: False
   use_depth_embedding: True
@@ -113,12 +113,12 @@ MODEL:
   spatial_output: False
   RGB_ENCODER:
     type: rae_dinov2
-    precision: float32
+    precision: ambient
     model_dir: pretrained/rae_dinov2_with_registers_base
-    stat_path: pretrained/rae_dinov2_with_registers_base/stat.pt
-    raw_output_size: 768
-    output_size: 512
-    projection_hidden_size: 768
+    output_size: 768
+    cls_residual_mlp_enabled: True
+    cls_residual_mlp_hidden_dim: 768
+    cls_residual_mlp_zero_init: True
   DEPTH_ENCODER:
     output_size: 256
   VISUAL_DIM:

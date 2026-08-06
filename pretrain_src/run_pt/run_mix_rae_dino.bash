@@ -8,7 +8,7 @@ NODE_RANK=0
 NUM_GPUS=1
 MASTER_PORT=${1:?Usage: run_mix_rae_dino.bash <master_port> [train arguments...]}
 shift
-outdir=${ETPR1_PRETRAIN_OUTPUT_DIR:-pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp}
+outdir=${ETPR1_PRETRAIN_OUTPUT_DIR:-pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768}
 
 cd "$REPO_ROOT"
 "${REPO_ROOT}/scripts/etpr1_rae_runtime_exec.sh" torchrun \

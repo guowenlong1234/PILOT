@@ -27,9 +27,9 @@ source_id="$(printf '%.17s' "$source_commit" | tr -cs 'A-Za-z0-9._-' '_')"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 run_id="${source_id}_${timestamp}_$$"
 run_root="${ETPR1_RAE_SMOKE_ROOT:-data/logs/rae_dino_smoke/$run_id}"
-pretrain_root="pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp_smoke_$run_id"
+pretrain_root="pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768_smoke_$run_id"
 pretrain_config="$run_root/fixtures/pretrain_smoke_config.json"
-pretrain_initial_projection="$run_root/fixtures/pretrain_initial_projection.pt"
+pretrain_initial_img_linear="$run_root/fixtures/pretrain_initial_img_linear.pt"
 
 if [[ -e "$run_root" || -e "$pretrain_root" ]]; then
   echo "ERROR: smoke output already exists" >&2
@@ -133,7 +133,7 @@ run_stage prepare_pretrain_fixture 120 \
   --output-config "$pretrain_config" \
   --seed 20260710
 run_gpu_stage pretrain_one_step 900 \
-  env ETPR1_RAE_SMOKE_INITIAL_PROJECTION="$pretrain_initial_projection" \
+  env ETPR1_RAE_SMOKE_INITIAL_IMG_LINEAR="$pretrain_initial_img_linear" \
   torchrun --nproc_per_node=1 --master_port=23401 \
   pretrain_src/pretrain_src/train_r2r.py \
   --world_size 1 --vlnbert cmt \
@@ -147,7 +147,7 @@ run_gpu_stage pretrain_one_step 900 \
 pretrain_checkpoint="$pretrain_root/ckpts/model_step_1.pt"
 run_stage audit_pretrain 120 python scripts/audit_rae_smoke.py \
   pretrain "$pretrain_checkpoint" \
-  --initial-projection "$pretrain_initial_projection"
+  --initial-img-linear "$pretrain_initial_img_linear"
 
 r2r_sft_name="${run_id}_r2r_sft"
 r2r_sft_root="$run_root/r2r_sft"

@@ -1,109 +1,58 @@
 from pathlib import Path
-import subprocess
-import sys
 
-import pytest
 import torch
+from transformers import PretrainedConfig
 
-from model_components.rgb_projection import build_rgb_projection
+from pretrain_src.pretrain_src.model.vilmodel import (
+    ImageEmbeddings as PretrainImageEmbeddings,
+)
+from vlnce_baselines.models.etp.ETP_R1_vilmodel_cmt import (
+    ImageEmbeddings as OnlineImageEmbeddings,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_projection_module_imports_from_pretraining_workdir():
-    result = subprocess.run(
-        [sys.executable, "-c", "import model_components"],
-        cwd=ROOT / "pretrain_src" / "pretrain_src",
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        check=False,
+def _config(encoder_type, image_feat_size):
+    return PretrainedConfig(
+        rgb_encoder_type=encoder_type,
+        image_feat_size=image_feat_size,
+        hidden_size=768,
+        depth_feat_size=128,
+        angle_feat_size=4,
+        obj_feat_size=0,
+        hidden_dropout_prob=0.0,
+        num_pano_layers=0,
+        layer_norm_eps=1e-5,
+        use_depth_embedding=True,
     )
 
-    assert result.returncode == 0, result.stdout
+
+def test_legacy_rgb_projection_component_is_removed():
+    assert not (ROOT / "model_components" / "rgb_projection.py").exists()
 
 
-def test_rae_projection_has_expected_layers_and_output_shape():
-    projection = build_rgb_projection("rae_dinov2", 768, 512, 768)
-    modules = list(projection)
+def test_rae_pretrain_and_online_interfaces_are_direct_768_to_768():
+    config = _config("rae_dinov2", 768)
+    pretrain = PretrainImageEmbeddings(config)
+    online = OnlineImageEmbeddings(config)
 
-    linear_layers = [
-        module for module in modules if isinstance(module, torch.nn.Linear)
-    ]
-
-    assert [type(module) for module in modules] == [
-        torch.nn.Linear,
-        torch.nn.GELU,
-        torch.nn.Linear,
-        torch.nn.GELU,
-        torch.nn.Linear,
-    ]
-    assert [
-        (layer.in_features, layer.out_features) for layer in linear_layers
-    ] == [(768, 768), (768, 768), (768, 512)]
-    assert projection(torch.randn(2, 36, 768)).shape == (2, 36, 512)
+    for module in (pretrain, online):
+        assert not hasattr(module, "rgb_projection")
+        assert not hasattr(module, "project_rgb")
+        assert module.img_linear.in_features == 768
+        assert module.img_linear.out_features == 768
+        assert module.img_linear(torch.randn(2, 36, 768)).shape == (
+            2,
+            36,
+            768,
+        )
 
 
-def test_clip_projection_is_identity_and_returns_same_tensor():
-    projection = build_rgb_projection("clip", 512, 512, 768)
-    features = torch.randn(2, 12, 512)
+def test_clip_interface_remains_direct_512_to_768():
+    config = _config("clip", 512)
+    module = OnlineImageEmbeddings(config)
 
-    assert isinstance(projection, torch.nn.Identity)
-    assert projection(features) is features
-
-
-@pytest.mark.parametrize(
-    ("parameter_name", "bad_value"),
-    (
-        ("raw_size", 512),
-        ("output_size", 513),
-        ("hidden_size", 769),
-    ),
-)
-def test_rae_projection_reports_wrong_dimension_values(parameter_name, bad_value):
-    dimensions = {
-        "raw_size": 768,
-        "output_size": 512,
-        "hidden_size": 768,
-    }
-    dimensions[parameter_name] = bad_value
-
-    with pytest.raises(ValueError, match=rf"{parameter_name}={bad_value}"):
-        build_rgb_projection("rae_dinov2", **dimensions)
-
-
-def test_clip_projection_rejects_wrong_dimensions():
-    with pytest.raises(ValueError, match="raw_size=768"):
-        build_rgb_projection("clip", 768, 512, 768)
-
-
-def test_projection_rejects_unknown_encoder_type():
-    with pytest.raises(ValueError, match="Unsupported RGB encoder type"):
-        build_rgb_projection("unknown", 768, 512, 768)
-
-
-@pytest.mark.parametrize(
-    ("parameter_name", "bad_value"),
-    (
-        ("raw_size", 768.9),
-        ("output_size", 512.1),
-        ("hidden_size", True),
-    ),
-)
-def test_projection_rejects_dimensions_that_are_not_exact_integers(
-    parameter_name,
-    bad_value,
-):
-    dimensions = {
-        "raw_size": 768,
-        "output_size": 512,
-        "hidden_size": 768,
-    }
-    dimensions[parameter_name] = bad_value
-
-    with pytest.raises(
-        ValueError,
-        match=rf"{parameter_name}.*{bad_value}",
-    ):
-        build_rgb_projection("rae_dinov2", **dimensions)
+    assert module.img_linear.in_features == 512
+    assert module.img_linear.out_features == 768

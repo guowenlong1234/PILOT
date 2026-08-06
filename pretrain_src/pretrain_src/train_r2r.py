@@ -53,7 +53,7 @@ from data.tasks import (
     SapDataset, sap_collate)
 
 from model.pretrain_cmt import GlocalTextPathCMTPreTraining
-from scripts.prepare_rae_smoke_pretrain import snapshot_initial_projection
+from scripts.prepare_rae_smoke_pretrain import snapshot_initial_img_linear
 import numpy as np
 
 def create_dataloaders(
@@ -140,9 +140,14 @@ def main(opts):
     model_config.raw_image_feat_size = getattr(
         model_config, 'raw_image_feat_size', model_config.image_feat_size
     )
-    model_config.projection_hidden_size = getattr(
-        model_config, 'projection_hidden_size', model_config.hidden_size
-    )
+    if model_config.rgb_encoder_type == 'rae_dinov2' and (
+        int(model_config.raw_image_feat_size) != 768
+        or int(model_config.image_feat_size) != 768
+    ):
+        raise ValueError(
+            'ETPNav-compatible RAE/DINOv2 pretraining requires '
+            'raw_image_feat_size=image_feat_size=768'
+        )
     model_config.pretrain_tasks = []
     for train_dataset_config in opts.train_datasets.values():
         model_config.pretrain_tasks.extend(train_dataset_config['tasks'])
@@ -217,11 +222,11 @@ def main(opts):
     model.train()
     set_dropout(model, opts.dropout) # 0.1
     model = wrap_model(model, device, opts.local_rank)
-    initial_projection_path = os.environ.get(
-        "ETPR1_RAE_SMOKE_INITIAL_PROJECTION"
+    initial_img_linear_path = os.environ.get(
+        "ETPR1_RAE_SMOKE_INITIAL_IMG_LINEAR"
     )
-    if default_gpu and initial_projection_path:
-        snapshot_initial_projection(model, initial_projection_path)
+    if default_gpu and initial_img_linear_path:
+        snapshot_initial_img_linear(model, initial_img_linear_path)
     del checkpoint
     
     # load data training set

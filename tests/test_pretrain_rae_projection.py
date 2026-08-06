@@ -26,16 +26,17 @@ ROOT = Path(__file__).resolve().parents[1]
 RUN_PT = ROOT / "pretrain_src" / "run_pt"
 RAE_FEATURE_FILE = (
     "pretrain_src/img_features/"
-    "RAE-DINOv2-B-14-CLS-views-habitat.hdf5"
+    "RAE-DINOv2-B-14-RAW-CLS-views-habitat.hdf5"
 )
 EXPECTED_RAE_METADATA = {
-    "feature_extractor": "rae_dinov2_with_registers_base_cls",
+    "feature_extractor": "rae_dinov2_with_registers_base_raw_cls",
     "feature_dim": 768,
     "dtype": "float32",
     "num_views": 36,
     "image_size": 224,
     "vfov": 60,
-    "latent_normalized": True,
+    "cls_normalization": "none",
+    "rae_stat_applied_to_cls": False,
 }
 
 
@@ -43,8 +44,7 @@ def _image_config(**overrides):
     values = {
         "rgb_encoder_type": "rae_dinov2",
         "raw_image_feat_size": 768,
-        "image_feat_size": 512,
-        "projection_hidden_size": 768,
+        "image_feat_size": 768,
         "hidden_size": 768,
         "depth_feat_size": 128,
         "angle_feat_size": 4,
@@ -86,44 +86,32 @@ def _make_uninitialized_dataset(dataset_cls, img_path, dep_path=None):
     dataset.img_ft_file = str(img_path)
     dataset.dep_ft_file = None if dep_path is None else str(dep_path)
     dataset.raw_image_feat_size = 768
-    dataset.image_feat_size = 512
+    dataset.image_feat_size = 768
     dataset.in_memory = False
     return dataset
 
 
-def test_pretrain_projection_has_expected_layers_shape_and_gradients():
+def test_pretrain_img_linear_is_direct_768_interface_with_gradients():
     module = ImageEmbeddings(_image_config())
     names = dict(module.named_parameters())
-    linear_layers = [
-        layer
-        for layer in module.rgb_projection
-        if isinstance(layer, torch.nn.Linear)
-    ]
 
-    assert "rgb_projection.0.weight" in names
-    assert [(layer.in_features, layer.out_features) for layer in linear_layers] == [
-        (768, 768),
-        (768, 768),
-        (768, 512),
-    ]
+    assert not hasattr(module, "rgb_projection")
+    assert module.img_linear.in_features == 768
+    assert module.img_linear.out_features == 768
 
-    output = module.project_rgb(torch.randn(2, 36, 768))
-    assert output.shape == (2, 36, 512)
+    output = module.img_linear(torch.randn(2, 36, 768))
+    assert output.shape == (2, 36, 768)
     output.sum().backward()
 
-    for name in ("rgb_projection.0.weight", "rgb_projection.4.weight"):
+    for name in ("img_linear.weight", "img_linear.bias"):
         gradient = names[name].grad
         assert gradient is not None
         assert torch.isfinite(gradient).all()
 
 
-def test_forward_projects_rgb_once_before_img_linear():
+def test_forward_passes_raw_768_cls_once_to_img_linear():
     module = ImageEmbeddings(_image_config())
-    projection_calls = []
     img_linear_inputs = []
-    projection_hook = module.rgb_projection.register_forward_hook(
-        lambda _module, inputs, output: projection_calls.append((inputs, output))
-    )
     linear_hook = module.img_linear.register_forward_pre_hook(
         lambda _module, inputs: img_linear_inputs.append(inputs[0])
     )
@@ -141,41 +129,24 @@ def test_forward_projects_rgb_once_before_img_linear():
             type_embed_layer=torch.nn.Embedding(2, 768),
         )
     finally:
-        projection_hook.remove()
         linear_hook.remove()
 
-    assert len(projection_calls) == 1
     assert len(img_linear_inputs) == 1
-    assert img_linear_inputs[0].shape == (2, 36, 512)
+    assert img_linear_inputs[0].shape == (2, 36, 768)
     assert len(split_embeds) == len(split_lens) == 1
 
 
-@pytest.mark.parametrize(
-    ("features", "message"),
-    (
-        (torch.randn(2, 36, 767), "last dimension.*768.*767"),
-        (
-            torch.full((2, 36, 768), float("nan")),
-            "NaN or infinity",
-        ),
-    ),
-)
-def test_project_rgb_rejects_invalid_features(features, message):
-    with pytest.raises((ValueError, FloatingPointError), match=message):
-        ImageEmbeddings(_image_config()).project_rgb(features)
-
-
-def test_old_clip_config_uses_identity_and_preserves_tensor():
-    config = _image_config()
-    del config.rgb_encoder_type
-    del config.raw_image_feat_size
-    del config.projection_hidden_size
+def test_clip_config_keeps_direct_512_img_linear():
+    config = _image_config(
+        rgb_encoder_type="clip",
+        raw_image_feat_size=512,
+        image_feat_size=512,
+    )
     module = ImageEmbeddings(config)
     features = torch.randn(2, 36, 512)
 
-    assert isinstance(module.rgb_projection, torch.nn.Identity)
-    assert module.project_rgb(features) is features
-    assert module.img_linear(module.project_rgb(features)).shape == (2, 36, 768)
+    assert not hasattr(module, "rgb_projection")
+    assert module.img_linear(features).shape == (2, 36, 768)
 
 
 @pytest.mark.parametrize("dataset_cls", (ReverieTextPathData, R2RTextPathData))
@@ -220,7 +191,7 @@ def test_r2r_outputs_raw_features_and_probabilities_start_after_raw_dimension():
     ]
     dataset.max_txt_len = 100
     dataset.raw_image_feat_size = 768
-    dataset.image_feat_size = 512
+    dataset.image_feat_size = 768
     dataset.depth_feat_size = 128
     view_features = np.zeros((36, 770), dtype=np.float32)
     view_features[:, :768] = 3.0
@@ -291,8 +262,9 @@ def test_raw_image_feature_size_defaults_to_legacy_image_size(tmp_path):
         ("num_views", 35),
         ("image_size", 256),
         ("vfov", 90),
-        ("latent_normalized", np.bool_(False)),
-        ("latent_normalized", 1),
+        ("cls_normalization", "rae_spatial_stats"),
+        ("rae_stat_applied_to_cls", np.bool_(True)),
+        ("rae_stat_applied_to_cls", 0),
         ("feature_dim", 768.0),
         ("num_views", 36.0),
         ("image_size", 224.0),
@@ -321,21 +293,22 @@ def test_rae_metadata_mismatch_fails_before_other_dataset_files_are_opened(
             str(tmp_path / "missing_connectivity"),
             rgb_encoder_type="rae_dinov2",
             raw_image_feat_size=768,
-            image_feat_size=512,
+            image_feat_size=768,
         )
 
 
 def test_rae_metadata_accepts_normalized_structured_scalar_types(tmp_path):
     metadata = dict(EXPECTED_RAE_METADATA)
     metadata["feature_extractor"] = np.bytes_(
-        "rae_dinov2_with_registers_base_cls"
+        "rae_dinov2_with_registers_base_raw_cls"
     )
     metadata["feature_dim"] = np.int64(768)
     metadata["dtype"] = np.bytes_("float32")
     metadata["num_views"] = np.int64(36)
     metadata["image_size"] = np.int64(224)
     metadata["vfov"] = np.int64(60)
-    metadata["latent_normalized"] = np.bool_(True)
+    metadata["cls_normalization"] = np.bytes_("none")
+    metadata["rae_stat_applied_to_cls"] = np.bool_(False)
     img_path, dep_path, cands_path, connectivity_dir, anno_path = (
         _write_minimal_dataset_files(tmp_path, metadata=metadata)
     )
@@ -348,7 +321,7 @@ def test_rae_metadata_accepts_normalized_structured_scalar_types(tmp_path):
         str(connectivity_dir),
         rgb_encoder_type="rae_dinov2",
         raw_image_feat_size=768,
-        image_feat_size=512,
+        image_feat_size=768,
     )
 
     assert dataset.raw_image_feat_size == 768
@@ -386,7 +359,7 @@ def test_train_r2r_passes_encoder_type_and_raw_size_to_all_datasets():
         assert "raw_image_feat_size" in keyword_names
 
 
-def test_pretrain_entrypoint_imports_shared_projection_from_clean_python_path():
+def test_pretrain_entrypoint_imports_direct_visual_interface_from_clean_path():
     environment = os.environ.copy()
     environment.pop("PYTHONPATH", None)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -409,15 +382,15 @@ def test_pretrain_entrypoint_imports_shared_projection_from_clean_python_path():
     assert "--model_config" in result.stdout
 
 
-def test_rae_model_config_has_explicit_projection_contract():
+def test_rae_model_config_has_explicit_direct_768_contract():
     config = json.loads(
         (RUN_PT / "mix_model_config_rae_dino.json").read_text(encoding="utf-8")
     )
 
     assert config["rgb_encoder_type"] == "rae_dinov2"
     assert config["raw_image_feat_size"] == 768
-    assert config["image_feat_size"] == 512
-    assert config["projection_hidden_size"] == 768
+    assert config["image_feat_size"] == 768
+    assert "projection_hidden_size" not in config
     assert config["image_prob_size"] == 0
 
 
@@ -460,7 +433,7 @@ def test_rae_launch_script_is_single_gpu_and_uses_isolated_output():
     assert "--world_size 1" in script
     assert "mix_model_config_rae_dino.json" in script
     assert "mix_pretrain_rae_dino.json" in script
-    assert "pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp" in script
+    assert "pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768" in script
     assert "master_port" in script.lower()
     assert "${1:" in script
 

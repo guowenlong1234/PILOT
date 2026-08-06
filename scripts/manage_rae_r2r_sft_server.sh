@@ -4,8 +4,8 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
 ACTION=${1:-status}
-EXP_NAME=${ETPR1_R2R_SFT_EXP_NAME:-rae_dinov2_r2r_sft}
-OUTPUT_ROOT=${ETPR1_R2R_SFT_OUTPUT_ROOT:-data/logs/rae_dinov2/r2r_sft_formal}
+EXP_NAME=${ETPR1_R2R_SFT_EXP_NAME:-rae_dinov2_etpnav_cls_768_r2r_sft}
+OUTPUT_ROOT=${ETPR1_R2R_SFT_OUTPUT_ROOT:-data/logs/rae_dinov2_etpnav_cls_768/r2r_sft_formal}
 if [[ "$OUTPUT_ROOT" = /* ]]; then
     OUTPUT_PATH=$OUTPUT_ROOT
 else

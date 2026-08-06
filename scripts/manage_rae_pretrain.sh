@@ -5,7 +5,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
 ACTION=${1:-status}
 SESSION=${ETPR1_PRETRAIN_TMUX_SESSION:-etpr1-rae-pretrain}
-OUTPUT_DIR=${ETPR1_PRETRAIN_OUTPUT_DIR:-pretrained/r2r_rxr_ce/rae_dinov2_cls_mlp}
+OUTPUT_DIR=${ETPR1_PRETRAIN_OUTPUT_DIR:-pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768}
 if [[ "$OUTPUT_DIR" = /* ]]; then
     OUTPUT_PATH=$OUTPUT_DIR
 else

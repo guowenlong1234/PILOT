@@ -33,17 +33,17 @@ from precompute_img_features.validate_rae_dinov2_features import (
 
 
 EXPECTED_METADATA = {
-    "feature_extractor": "rae_dinov2_with_registers_base_cls",
+    "feature_extractor": "rae_dinov2_with_registers_base_raw_cls",
     "feature_dim": 768,
     "dtype": "float32",
     "num_views": 36,
     "image_size": 224,
     "vfov": 60,
     "sensor_height": 1.25,
-    "latent_normalized": True,
+    "cls_normalization": "none",
+    "rae_stat_applied_to_cls": False,
     "dino_weights_sha256": "a" * 64,
-    "rae_stat_sha256": "b" * 64,
-    "preprocess_version": "rae_native_224_rgb_v1",
+    "preprocess_version": "etpnav_rae_navigation_cls_v1",
 }
 
 
@@ -639,17 +639,16 @@ def test_main_keeps_all_allowed_keys_when_max_viewpoints_limits_work(monkeypatch
     assert captured["allowed_keys"] == {record.key for record in records}
 
 
-def test_build_metadata_hashes_local_model_and_stat(tmp_path):
+def test_build_metadata_hashes_model_and_declares_raw_cls(tmp_path):
     model_dir = tmp_path / "model"
     model_dir.mkdir()
     (model_dir / "model.safetensors").write_bytes(b"model")
-    stat = model_dir / "stat.pt"
-    stat.write_bytes(b"stat")
-
-    metadata = build_metadata(model_dir, stat)
+    metadata = build_metadata(model_dir)
 
     assert metadata["dino_weights_sha256"] == hashlib.sha256(b"model").hexdigest()
-    assert metadata["rae_stat_sha256"] == hashlib.sha256(b"stat").hexdigest()
+    assert metadata["cls_normalization"] == "none"
+    assert metadata["rae_stat_applied_to_cls"] is False
+    assert "rae_stat_sha256" not in metadata
 
 
 def _write_valid_fixture(path, keys, metadata=EXPECTED_METADATA):
@@ -774,7 +773,7 @@ def test_cli_defaults_and_key_parameters():
     validate = build_validate_parser().parse_args([])
 
     assert extract.model_dir == DEFAULT_MODEL_DIR
-    assert extract.stat_path == f"{DEFAULT_MODEL_DIR}/stat.pt"
+    assert not hasattr(extract, "stat_path")
     assert extract.connectivity_dir == DEFAULT_CONNECTIVITY_DIR
     assert extract.output_file == DEFAULT_OUTPUT_FILE
     assert extract.max_viewpoints == -1

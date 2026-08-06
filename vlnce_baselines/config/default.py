@@ -179,12 +179,12 @@ _C.MODEL.spatial_output = True
 _C.MODEL.RGB_ENCODER = CN()
 _C.MODEL.RGB_ENCODER.cnn_type = "TorchVisionResNet50"
 _C.MODEL.RGB_ENCODER.type = "clip"
-_C.MODEL.RGB_ENCODER.precision = "float32"
+_C.MODEL.RGB_ENCODER.precision = "ambient"
 _C.MODEL.RGB_ENCODER.model_dir = ""
-_C.MODEL.RGB_ENCODER.stat_path = ""
-_C.MODEL.RGB_ENCODER.raw_output_size = 512
 _C.MODEL.RGB_ENCODER.output_size = 512
-_C.MODEL.RGB_ENCODER.projection_hidden_size = 768
+_C.MODEL.RGB_ENCODER.cls_residual_mlp_enabled = False
+_C.MODEL.RGB_ENCODER.cls_residual_mlp_hidden_dim = 768
+_C.MODEL.RGB_ENCODER.cls_residual_mlp_zero_init = True
 
 _C.MODEL.DEPTH_ENCODER = CN()
 _C.MODEL.DEPTH_ENCODER.cnn_type = "VlnResnetDepthEncoder"

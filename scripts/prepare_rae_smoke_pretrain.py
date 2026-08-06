@@ -20,37 +20,30 @@ SMOKE_OVERRIDES = {
     "warmup_steps": 0,
     "fp16": False,
 }
-EXPECTED_PROJECTION_SUFFIXES = {
-    "0.weight",
-    "0.bias",
-    "2.weight",
-    "2.bias",
-    "4.weight",
-    "4.bias",
-}
+EXPECTED_IMG_LINEAR_SUFFIXES = {"weight", "bias"}
 
 
-def snapshot_initial_projection(model, destination):
-    projection = {}
-    marker = "rgb_projection."
+def snapshot_initial_img_linear(model, destination):
+    parameters = {}
+    marker = "img_embeddings.img_linear."
     for key, value in model.state_dict().items():
         if marker not in key:
             continue
         suffix = key.split(marker, 1)[1]
-        if suffix in EXPECTED_PROJECTION_SUFFIXES:
-            projection[key] = value.detach().cpu().clone()
+        if suffix in EXPECTED_IMG_LINEAR_SUFFIXES:
+            parameters[key] = value.detach().cpu().clone()
     actual_suffixes = {
         key.split(marker, 1)[1]
-        for key in projection
+        for key in parameters
     }
-    if actual_suffixes != EXPECTED_PROJECTION_SUFFIXES:
+    if actual_suffixes != EXPECTED_IMG_LINEAR_SUFFIXES:
         raise ValueError(
-            "initial model does not contain the complete RAE projection; "
+            "initial model does not contain the complete 768-dim img_linear; "
             f"found={sorted(actual_suffixes)}"
         )
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(projection, destination)
+    torch.save(parameters, destination)
 
 
 def _copy_first_jsonl_record(source, destination):
