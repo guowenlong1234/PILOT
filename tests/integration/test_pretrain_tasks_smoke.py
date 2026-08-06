@@ -24,11 +24,14 @@ from pretrain_src.pretrain_src.model.pretrain_cmt import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PRETRAIN_DATA = PROJECT_ROOT / "pretrain_src" / "datasets" / "R2R"
-IMAGE_FEATURES = (
-    PROJECT_ROOT
-    / "pretrain_src"
-    / "img_features"
-    / "RAE-DINOv2-B-14-RAW-CLS-views-habitat.hdf5"
+IMAGE_FEATURES = Path(
+    os.environ.get(
+        "ETPR1_RAE_SMOKE_IMAGE_FEATURES",
+        PROJECT_ROOT
+        / "pretrain_src"
+        / "img_features"
+        / "RAE-DINOv2-B-14-RAW-CLS-views-habitat.hdf5",
+    )
 )
 DEPTH_FEATURES = (
     PROJECT_ROOT
