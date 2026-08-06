@@ -4,7 +4,7 @@ import json
 import argparse
 import time
 from collections import defaultdict
-from easydict import EasyDict
+from types import SimpleNamespace
 from tqdm import tqdm
 
 PROJECT_ROOT = os.path.abspath(
@@ -230,7 +230,7 @@ def main(opts):
     del checkpoint
     
     # load data training set
-    data_cfg = EasyDict(opts.train_datasets['R2R'])
+    data_cfg = SimpleNamespace(**opts.train_datasets['R2R'])
     train_nav_db = R2RTextPathData(
         data_cfg.train_traj_files, data_cfg.img_ft_file, data_cfg.dep_ft_file,
         data_cfg.scanvp_cands_file, data_cfg.connectivity_dir,
