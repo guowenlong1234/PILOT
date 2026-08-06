@@ -7,6 +7,9 @@ MODE=${1:?Usage: run_rae_r2r_sft_server_job.sh <start|resume> <log_file>}
 LOG_FILE=${2:?Usage: run_rae_r2r_sft_server_job.sh <start|resume> <log_file>}
 EXP_NAME=${ETPR1_R2R_SFT_EXP_NAME:-rae_dinov2_etpnav_cls_768_r2r_sft}
 OUTPUT_ROOT=${ETPR1_R2R_SFT_OUTPUT_ROOT:-data/logs/rae_dinov2_etpnav_cls_768/r2r_sft_formal}
+SFT_ITERS=${ETPR1_R2R_SFT_ITERS:-30000}
+GRADIENT_ACCUMULATION_STEPS=${ETPR1_R2R_SFT_GRADIENT_ACCUMULATION_STEPS:-2}
+PRETRAINED_PATH=${ETPR1_R2R_SFT_PRETRAINED_PATH:-pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768/best/model_best_step_452500.pt}
 RUNTIME_ROOT=${ETPR1_SERVER_RUNTIME_ROOT:-${REPO_ROOT}/.runtime/server_sft}
 PYTHON_BIN=${ETPR1_SERVER_PYTHON:-/home/gwl/miniconda3/envs/etpnav_unified/bin/python}
 TORCHRUN_BIN=${ETPR1_SERVER_TORCHRUN:-/home/gwl/miniconda3/envs/etpnav_unified/bin/torchrun}
@@ -22,6 +25,13 @@ case "$MODE" in
         ;;
 esac
 
+for integer_setting in "$SFT_ITERS" "$GRADIENT_ACCUMULATION_STEPS"; do
+    if ! [[ "$integer_setting" =~ ^[1-9][0-9]*$ ]]; then
+        echo "SFT iteration and gradient accumulation settings must be positive integers: $integer_setting" >&2
+        exit 2
+    fi
+done
+
 for path in \
     "$PYTHON_BIN" \
     "$TORCHRUN_BIN" \
@@ -36,6 +46,11 @@ done
 
 mkdir -p "$(dirname -- "$LOG_FILE")"
 cd "$REPO_ROOT"
+
+if [ ! -f "$PRETRAINED_PATH" ]; then
+    echo "Missing SFT pretrained checkpoint: $PRETRAINED_PATH" >&2
+    exit 1
+fi
 
 export MPLCONFIGDIR=/tmp/matplotlib-etpr1-server
 export GLOG_minloglevel=${GLOG_minloglevel:-2}
@@ -59,6 +74,9 @@ fi
     echo "source_commit=$(git rev-parse HEAD)"
     echo "exp_name=$EXP_NAME"
     echo "output_root=$OUTPUT_ROOT"
+    echo "sft_iters=$SFT_ITERS"
+    echo "gradient_accumulation_steps=$GRADIENT_ACCUMULATION_STEPS"
+    echo "pretrained_path=$PRETRAINED_PATH"
     echo "python=$PYTHON_BIN"
     "$PYTHON_BIN" -c \
         'import sys, torch, transformers; print(f"versions=python:{sys.version.split()[0]} torch:{torch.__version__} cuda:{torch.version.cuda} transformers:{transformers.__version__}")'
@@ -79,8 +97,8 @@ set +e
     GPU_NUMBERS 2 \
     NUM_ENVIRONMENTS 8 \
     IL.batch_size 8 \
-    IL.gradient_accumulation_steps 2 \
-    IL.iters 30000 \
+    IL.gradient_accumulation_steps "$GRADIENT_ACCUMULATION_STEPS" \
+    IL.iters "$SFT_ITERS" \
     IL.log_every 200 \
     IL.lr 1e-5 \
     IL.ml_weight 1.0 \
@@ -103,8 +121,7 @@ set +e
     CHECKPOINT_FOLDER "$OUTPUT_ROOT/checkpoints/" \
     TENSORBOARD_DIR "$OUTPUT_ROOT/tensorboard/" \
     RESULTS_DIR "$OUTPUT_ROOT/results/" \
-    MODEL.pretrained_path \
-    pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768/best/model_best_step_452500.pt \
+    MODEL.pretrained_path "$PRETRAINED_PATH" \
     MODEL.RGB_ENCODER.precision ambient \
     2>&1 \
     | "$PYTHON_BIN" -u scripts/filter_habitat_startup_noise.py \
