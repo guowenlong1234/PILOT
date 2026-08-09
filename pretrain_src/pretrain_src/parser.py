@@ -1,6 +1,19 @@
 import argparse
+import os
 import sys
 import json
+
+
+def _default_local_rank():
+    value = os.environ.get("LOCAL_RANK", "").strip()
+    if not value:
+        return -1
+    try:
+        return int(value)
+    except ValueError as error:
+        raise ValueError(
+            f"LOCAL_RANK must be an integer, got {value!r}"
+        ) from error
 
 
 def load_parser():
@@ -139,8 +152,10 @@ def load_parser():
     # distributed computing
     parser.add_argument(
         "--local_rank",
+        "--local-rank",
+        dest="local_rank",
         type=int,
-        default=-1,
+        default=_default_local_rank(),
         help="local rank for distributed training on gpus",
     )
     parser.add_argument(

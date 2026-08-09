@@ -56,6 +56,15 @@ from model.pretrain_cmt import GlocalTextPathCMTPreTraining
 from scripts.prepare_rae_smoke_pretrain import snapshot_initial_img_linear
 import numpy as np
 
+
+def _normalize_runtime_options(opts):
+    """Select the safe loader path for one-process-per-GPU training."""
+    disabled_thread_prefetch = False
+    if opts.local_rank != -1 and getattr(opts, "thread_prefetch", False):
+        opts.thread_prefetch = False
+        disabled_thread_prefetch = True
+    return disabled_thread_prefetch
+
 def create_dataloaders(
     data_cfg, nav_db, tok, is_train: bool, device: torch.device, opts
 ):
@@ -94,10 +103,16 @@ def main(opts):
             "--checkpoint initializes model weights only and cannot be combined "
             "with --resume_checkpoint"
         )
-    default_gpu, n_gpu, device = set_cuda(opts) 
+    disabled_thread_prefetch = _normalize_runtime_options(opts)
+    default_gpu, n_gpu, device = set_cuda(opts)
     print(default_gpu, n_gpu, device)
     
     if default_gpu:
+        if disabled_thread_prefetch:
+            LOGGER.info(
+                "Disabled thread_prefetch because distributed training "
+                "prepares batches independently in each rank"
+            )
         LOGGER.info(
             'device: {} n_gpu: {}, distributed training: {}, 16-bits training: {}'.format(
                 device, n_gpu, bool(opts.local_rank != -1), opts.fp16
@@ -253,7 +268,8 @@ def main(opts):
         depth_feat_size=model_config.depth_feat_size, 
         angle_feat_size=model_config.angle_feat_size,
         max_txt_len=opts.max_txt_len, in_memory=True,
-        val_sample_num=opts.val_sample_num
+        val_sample_num=opts.val_sample_num,
+        val_sample_seed=opts.seed,
     )
     val_rxr_nav_db = R2RTextPathData(
         data_cfg.val_unseen_rxr_traj_files, data_cfg.img_ft_file, data_cfg.dep_ft_file,
@@ -265,7 +281,8 @@ def main(opts):
         depth_feat_size=model_config.depth_feat_size, 
         angle_feat_size=model_config.angle_feat_size,
         max_txt_len=opts.max_txt_len, in_memory=True,
-        val_sample_num=opts.val_sample_num
+        val_sample_num=opts.val_sample_num,
+        val_sample_seed=opts.seed,
     )
     
     # Build data loaders
@@ -282,8 +299,6 @@ def main(opts):
     use_thread_prefetch = getattr(opts, "thread_prefetch", False)
     if use_thread_prefetch and opts.n_workers != 0:
         raise ValueError("thread_prefetch requires n_workers=0")
-    if use_thread_prefetch and opts.local_rank != -1:
-        raise ValueError("thread_prefetch does not support distributed training")
 
     meta_loader = MetaLoader(
         train_dataloaders,
@@ -443,19 +458,19 @@ def main(opts):
                 rxr_metrics = validate(
                     model, val_rxr_dataloaders, setname='_unseen'
                 )
-                model_path, _ = model_saver.save(
-                    model,
-                    global_step,
-                    optimizer=optimizer,
-                    grad_scaler=grad_scaler,
-                    meta_loader_step=(
-                        global_step * opts.gradient_accumulation_steps
-                    ),
-                    opts=opts,
-                    keep_last_checkpoints=opts.keep_last_checkpoints,
-                    keep_every_n_steps=opts.keep_every_n_steps,
-                )
                 if default_gpu:
+                    model_path, _ = model_saver.save(
+                        model,
+                        global_step,
+                        optimizer=optimizer,
+                        grad_scaler=grad_scaler,
+                        meta_loader_step=(
+                            global_step * opts.gradient_accumulation_steps
+                        ),
+                        opts=opts,
+                        keep_last_checkpoints=opts.keep_last_checkpoints,
+                        keep_every_n_steps=opts.keep_every_n_steps,
+                    )
                     best_metrics = build_joint_accuracy_metrics(
                         global_step, r2r_metrics, rxr_metrics
                     )
@@ -468,6 +483,8 @@ def main(opts):
                             best_metrics["mlm_acc_mean"],
                             best_metrics["sap_gacc_mean"],
                         )
+                if dist.is_available() and dist.is_initialized():
+                    dist.barrier()
         if global_step >= opts.num_train_steps:
             break
     if global_step % opts.valid_steps != 0:
@@ -479,17 +496,19 @@ def main(opts):
         rxr_metrics = validate(
             model, val_rxr_dataloaders, setname='_unseen'
         )
-        model_path, _ = model_saver.save(
-            model,
-            global_step,
-            optimizer=optimizer,
-            grad_scaler=grad_scaler,
-            meta_loader_step=global_step * opts.gradient_accumulation_steps,
-            opts=opts,
-            keep_last_checkpoints=opts.keep_last_checkpoints,
-            keep_every_n_steps=opts.keep_every_n_steps,
-        )
         if default_gpu:
+            model_path, _ = model_saver.save(
+                model,
+                global_step,
+                optimizer=optimizer,
+                grad_scaler=grad_scaler,
+                meta_loader_step=(
+                    global_step * opts.gradient_accumulation_steps
+                ),
+                opts=opts,
+                keep_last_checkpoints=opts.keep_last_checkpoints,
+                keep_every_n_steps=opts.keep_every_n_steps,
+            )
             best_metrics = build_joint_accuracy_metrics(
                 global_step, r2r_metrics, rxr_metrics
             )
@@ -502,6 +521,8 @@ def main(opts):
                     best_metrics["mlm_acc_mean"],
                     best_metrics["sap_gacc_mean"],
                 )
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
     
 
 def validate(model, val_dataloaders, setname=''):

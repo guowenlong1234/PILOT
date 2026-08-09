@@ -29,6 +29,13 @@ RAE_DINO_HDF5_METADATA = {
 }
 
 
+def _validation_sample_indices(num_items, sample_num, seed=None):
+    if not sample_num:
+        return None
+    rng = np.random if seed is None else np.random.RandomState(int(seed))
+    return rng.permutation(int(num_items))[: int(sample_num)]
+
+
 def _normalize_hdf5_attr(value):
     if isinstance(value, bytes):
         return value.decode('utf-8')
@@ -46,7 +53,8 @@ class ReverieTextPathData(object):
         image_feat_size=2048, image_prob_size=1000, depth_feat_size=128, angle_feat_size=4,
         obj_feat_size=None, obj_prob_size=None, max_objects=20,
         max_txt_len=100, in_memory=True, act_visited_node=False,
-        val_sample_num=None, raw_image_feat_size=None, rgb_encoder_type='clip',
+        val_sample_num=None, val_sample_seed=None,
+        raw_image_feat_size=None, rgb_encoder_type='clip',
     ):
         self.img_ft_file = img_ft_file
         self.dep_ft_file = dep_ft_file
@@ -96,7 +104,9 @@ class ReverieTextPathData(object):
 
         if val_sample_num:
             # cannot evaluate all the samples as it takes too much time
-            sel_idxs = np.random.permutation(len(self.data))[:val_sample_num]
+            sel_idxs = _validation_sample_indices(
+                len(self.data), val_sample_num, seed=val_sample_seed
+            )
             self.data = [self.data[sidx] for sidx in sel_idxs]
 
     def _validate_rae_dino_metadata(self):
@@ -418,7 +428,7 @@ class R2RTextPathData(ReverieTextPathData):
         self, anno_files, img_ft_file, dep_ft_file, scanvp_cands_file, connectivity_dir,
         image_feat_size=2048, image_prob_size=1000, depth_feat_size=128, angle_feat_size=4,
         max_txt_len=100, in_memory=True, act_visited_node=False,
-        val_sample_num=None, start_vp_file=None,
+        val_sample_num=None, val_sample_seed=None, start_vp_file=None,
         raw_image_feat_size=None, rgb_encoder_type='clip',
     ):
         super().__init__(
@@ -427,7 +437,8 @@ class R2RTextPathData(ReverieTextPathData):
             raw_image_feat_size=raw_image_feat_size, rgb_encoder_type=rgb_encoder_type,
             angle_feat_size=angle_feat_size, obj_feat_size=0, obj_prob_size=0, 
             max_objects=0, max_txt_len=max_txt_len, in_memory=in_memory,
-            act_visited_node=act_visited_node, val_sample_num=val_sample_num
+            act_visited_node=act_visited_node, val_sample_num=val_sample_num,
+            val_sample_seed=val_sample_seed,
         )
 
     def get_scanvp_feature(self, scan, viewpoint):

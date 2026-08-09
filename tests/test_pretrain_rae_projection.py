@@ -18,6 +18,7 @@ from pretrain_src.pretrain_src.data.dataset import (
     R2RTextPathData,
     ReverieTextPathData,
     _metadata_value_matches,
+    _validation_sample_indices,
 )
 from pretrain_src.pretrain_src.model.vilmodel import ImageEmbeddings
 
@@ -38,6 +39,26 @@ EXPECTED_RAE_METADATA = {
     "cls_normalization": "none",
     "rae_stat_applied_to_cls": False,
 }
+
+
+def test_validation_sampling_is_rank_independent_with_explicit_seed():
+    np.random.seed(1)
+    first = _validation_sample_indices(100, 12, seed=20260810)
+    np.random.seed(999)
+    second = _validation_sample_indices(100, 12, seed=20260810)
+
+    np.testing.assert_array_equal(first, second)
+    assert len(np.unique(first)) == 12
+
+
+def test_validation_sampling_preserves_global_rng_mode_without_seed():
+    np.random.seed(7)
+    expected = np.random.permutation(20)[:5]
+    np.random.seed(7)
+
+    actual = _validation_sample_indices(20, 5)
+
+    np.testing.assert_array_equal(actual, expected)
 
 
 def _image_config(**overrides):
