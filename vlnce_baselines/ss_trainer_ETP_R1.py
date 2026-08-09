@@ -1068,7 +1068,7 @@ class RLTrainer(BaseVLNCETrainer):
         )
         self._initialize_policy(
             self.config,
-            load_from_ckpt=True,
+            load_from_ckpt=not self.config.EVAL.PRETRAINED_ONLY,
             observation_space=observation_space,
             action_space=self.envs.action_spaces[0],
         )

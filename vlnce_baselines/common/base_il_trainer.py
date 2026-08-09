@@ -865,7 +865,13 @@ class BaseVLNCETrainer(BaseILTrainer):
         with TensorboardWriter(
             self.config.TENSORBOARD_DIR, flush_secs=self.flush_secs
         ) as writer:
-            if os.path.isfile(self.config.EVAL.CKPT_PATH_DIR):
+            if self.config.EVAL.PRETRAINED_ONLY:
+                self._eval_checkpoint(
+                    self.config.MODEL.pretrained_path,
+                    writer,
+                    checkpoint_index=0,
+                )
+            elif os.path.isfile(self.config.EVAL.CKPT_PATH_DIR):
                 # evaluate singe checkpoint
                 # proposed_index = get_checkpoint_id(
                 #     self.config.EVAL.CKPT_PATH_DIR
