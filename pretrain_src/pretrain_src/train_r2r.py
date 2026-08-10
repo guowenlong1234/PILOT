@@ -28,6 +28,7 @@ from utils.save import (
     ModelSaver,
     build_joint_accuracy_metrics,
     load_training_state,
+    resolve_resume_meta_loader_step,
     resolve_resume_checkpoint,
     restore_rng_state,
     save_training_meta,
@@ -35,6 +36,7 @@ from utils.save import (
 )
 from utils.misc import NoOp, set_dropout, set_random_seed, set_cuda, wrap_model
 from utils.distributed import all_gather
+from utils.training import forward_backward_microbatch
 
 from optim import get_lr_sched
 from optim.misc import build_optimizer
@@ -56,14 +58,6 @@ from model.pretrain_cmt import GlocalTextPathCMTPreTraining
 from scripts.prepare_rae_smoke_pretrain import snapshot_initial_img_linear
 import numpy as np
 
-
-def _normalize_runtime_options(opts):
-    """Select the safe loader path for one-process-per-GPU training."""
-    disabled_thread_prefetch = False
-    if opts.local_rank != -1 and getattr(opts, "thread_prefetch", False):
-        opts.thread_prefetch = False
-        disabled_thread_prefetch = True
-    return disabled_thread_prefetch
 
 def create_dataloaders(
     data_cfg, nav_db, tok, is_train: bool, device: torch.device, opts
@@ -103,15 +97,14 @@ def main(opts):
             "--checkpoint initializes model weights only and cannot be combined "
             "with --resume_checkpoint"
         )
-    disabled_thread_prefetch = _normalize_runtime_options(opts)
     default_gpu, n_gpu, device = set_cuda(opts)
     print(default_gpu, n_gpu, device)
     
     if default_gpu:
-        if disabled_thread_prefetch:
+        if opts.local_rank != -1 and getattr(opts, "thread_prefetch", False):
             LOGGER.info(
-                "Disabled thread_prefetch because distributed training "
-                "prepares batches independently in each rank"
+                "Enabled DDP-safe thread prefetch: distributed task "
+                "selection stays on the training thread"
             )
         LOGGER.info(
             'device: {} n_gpu: {}, distributed training: {}, 16-bits training: {}'.format(
@@ -305,7 +298,11 @@ def main(opts):
         data_cfg.mix_ratio,
         accum_steps=opts.gradient_accumulation_steps,
         distributed=opts.local_rank != -1,
-        device=torch.device("cpu") if use_thread_prefetch else device,
+        device=(
+            device
+            if opts.local_rank != -1 or not use_thread_prefetch
+            else torch.device("cpu")
+        ),
     )
 
     if use_thread_prefetch:
@@ -329,7 +326,9 @@ def main(opts):
                 "Resume checkpoint contains fp16 scaler state, but fp16 is disabled"
             )
         global_step = int(resume_state["step"])
-        meta_loader.loader.step = int(resume_state["meta_loader_step"])
+        meta_loader.loader.step = resolve_resume_meta_loader_step(
+            resume_state, opts
+        )
         restore_rng_state(resume_state["rng_state"])
         pbar.update(global_step)
         LOGGER.info(
@@ -337,6 +336,21 @@ def main(opts):
             resume_path,
             global_step,
         )
+        saved_training_config = resume_state["training_config"]
+        if default_gpu and (
+            int(saved_training_config["train_batch_size"])
+            != int(opts.train_batch_size)
+            or int(saved_training_config["gradient_accumulation_steps"])
+            != int(opts.gradient_accumulation_steps)
+        ):
+            LOGGER.info(
+                "Changed microbatch geometry with the same effective batch: "
+                "per-rank batch %d -> %d, accumulation %d -> %d",
+                saved_training_config["train_batch_size"],
+                opts.train_batch_size,
+                saved_training_config["gradient_accumulation_steps"],
+                opts.gradient_accumulation_steps,
+            )
     if global_step >= opts.num_train_steps:
         raise ValueError(
             f"Resume step {global_step} is not below num_train_steps "
@@ -344,8 +358,16 @@ def main(opts):
         )
     TB_LOGGER.set_step(global_step)
     LOGGER.info(f"***** Running training with {opts.world_size} GPUs *****")
-    LOGGER.info("  Batch size = %d", opts.train_batch_size if opts.local_rank == -1 else opts.train_batch_size * opts.world_size)
+    global_microbatch_size = opts.train_batch_size * (
+        opts.world_size if opts.local_rank != -1 else 1
+    )
+    LOGGER.info("  Per-rank batch size = %d", opts.train_batch_size)
+    LOGGER.info("  Global microbatch size = %d", global_microbatch_size)
     LOGGER.info("  Accumulate steps = %d", opts.gradient_accumulation_steps)
+    LOGGER.info(
+        "  Effective batch size = %d",
+        global_microbatch_size * opts.gradient_accumulation_steps,
+    )
     LOGGER.info("  Num steps = %d", opts.num_train_steps)
 
     # to compute training statistics
@@ -367,25 +389,21 @@ def main(opts):
     for step, (name, batch) in enumerate(meta_loader):
         n_examples[name] += batch['txt_ids'].size(0)
         n_in_units[name] += batch['txt_lens'].sum().item()
-        task = name.split('_')[0] 
-        if opts.fp16:
-            with amp.autocast():
-                loss = model(batch, task=task, compute_loss=True)
-        else:
-            loss = model(batch, task=task, compute_loss=True)
-
-        n_loss_units[name] += loss.size(0)
-        loss = loss.mean() 
-
-        # backward pass
-        if opts.gradient_accumulation_steps > 1:
-            loss = loss / opts.gradient_accumulation_steps
-
-        delay_unscale = (step+1) % opts.gradient_accumulation_steps != 0
-        if opts.fp16:
-            grad_scaler.scale(loss).backward()
-        else:
-            loss.backward()
+        task = name.split('_')[0]
+        sync_gradients = (
+            opts.local_rank == -1
+            or (step + 1) % opts.gradient_accumulation_steps == 0
+        )
+        loss, loss_units = forward_backward_microbatch(
+            model,
+            batch,
+            task,
+            opts.fp16,
+            grad_scaler,
+            opts.gradient_accumulation_steps,
+            sync_gradients,
+        )
+        n_loss_units[name] += loss_units
 
         task2loss[name](loss.item())
         if name == "mlm":

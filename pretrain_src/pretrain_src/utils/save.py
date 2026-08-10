@@ -141,16 +141,15 @@ def load_training_state(resume_checkpoint):
 
 
 def validate_resume_config(state, opts):
+    saved = state["training_config"]
     current = {
-        "gradient_accumulation_steps": opts.gradient_accumulation_steps,
-        "train_batch_size": opts.train_batch_size,
         "world_size": opts.world_size,
         "model_config": os.path.abspath(opts.model_config),
     }
     mismatches = {
-        key: (state["training_config"].get(key), value)
+        key: (saved.get(key), value)
         for key, value in current.items()
-        if state["training_config"].get(key) != value
+        if saved.get(key) != value
     }
     if mismatches:
         details = ", ".join(
@@ -158,6 +157,39 @@ def validate_resume_config(state, opts):
             for key, (saved, current_value) in mismatches.items()
         )
         raise ValueError(f"Resume configuration mismatch: {details}")
+
+    saved_effective_batch = (
+        int(saved["train_batch_size"])
+        * int(saved["gradient_accumulation_steps"])
+        * int(saved["world_size"])
+    )
+    current_effective_batch = (
+        int(opts.train_batch_size)
+        * int(opts.gradient_accumulation_steps)
+        * int(opts.world_size)
+    )
+    if saved_effective_batch != current_effective_batch:
+        raise ValueError(
+            "Resume configuration mismatch: effective batch size "
+            f"saved={saved_effective_batch}, current={current_effective_batch} "
+            "(train_batch_size x gradient_accumulation_steps x world_size)"
+        )
+
+
+def resolve_resume_meta_loader_step(state, opts):
+    """Translate saved microbatch progress to the current accumulation shape."""
+    saved_accumulation = int(
+        state["training_config"]["gradient_accumulation_steps"]
+    )
+    global_step = int(state["step"])
+    saved_meta_step = int(state["meta_loader_step"])
+    expected_saved_meta_step = global_step * saved_accumulation
+    if saved_meta_step != expected_saved_meta_step:
+        raise ValueError(
+            "Training-state MetaLoader step mismatch: "
+            f"saved={saved_meta_step}, expected={expected_saved_meta_step}"
+        )
+    return global_step * int(opts.gradient_accumulation_steps)
 
 
 def build_joint_accuracy_metrics(step, r2r_metrics, rxr_metrics):

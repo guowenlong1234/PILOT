@@ -48,36 +48,54 @@ class MetaLoader:
         self.ratio_list = [torch.tensor(ratio_dict[str(k)]).float().to(device) for k in self.sorted_iters]
         self.distributed = distributed
         self.step = 0
+        self._task_id = None
+        self._epoch_id = 0
 
     def get_ratios(self, step):
         index = bisect.bisect_right(self.sorted_iters, step) - 1
         index = max(index, 0) 
         return self.ratio_list[index]
     
-    def __iter__(self) -> Iterator[Tuple]:
-        """this iterator will run indefinitely"""
-        task_id = None
-        epoch_id = 0
-        while True:
-            if self.step % self.accum_steps == 0:
-                update_step = self.step // self.accum_steps
-                sampling_ratios = self.get_ratios(update_step)
-                task_id = torch.multinomial(sampling_ratios, 1)
-                if self.distributed:
-                    dist.broadcast(task_id, 0)
-            self.step += 1
-            task = self.names[task_id.cpu().item()]
-            iter_ = self.name2iter[task]
-            try:
-                batch = next(iter_)
-            except StopIteration:
-                epoch_id += 1
-                self.name2pre_epoch[task](epoch_id) 
-                iter_ = iter(self.name2loader[task]) 
-                batch = next(iter_)
-                self.name2iter[task] = iter_
+    def reserve_next_task(self):
+        """Choose the next task on the training thread.
 
-            yield task, batch
+        Distributed task synchronization must stay on the same thread as DDP
+        forward/backward collectives.  Batch materialization can then happen in
+        a CPU-only producer thread after this method returns the task name.
+        """
+        if self.step % self.accum_steps == 0:
+            update_step = self.step // self.accum_steps
+            sampling_ratios = self.get_ratios(update_step)
+            task_id = torch.multinomial(sampling_ratios, 1)
+            if self.distributed:
+                dist.broadcast(task_id, 0)
+            self._task_id = int(task_id.item())
+        elif self._task_id is None:
+            raise RuntimeError(
+                "MetaLoader task state is missing inside an accumulation step"
+            )
+
+        self.step += 1
+        return self.names[self._task_id]
+
+    def load_batch_for_task(self, task):
+        """Materialize one CPU batch for a task without distributed calls."""
+        iter_ = self.name2iter[task]
+        try:
+            batch = next(iter_)
+        except StopIteration:
+            self._epoch_id += 1
+            self.name2pre_epoch[task](self._epoch_id)
+            iter_ = iter(self.name2loader[task])
+            batch = next(iter_)
+            self.name2iter[task] = iter_
+        return task, batch
+
+    def __iter__(self) -> Iterator[Tuple]:
+        """This iterator will run indefinitely."""
+        while True:
+            task = self.reserve_next_task()
+            yield self.load_batch_for_task(task)
 
 
 def move_to_cuda(batch: Union[List, Tuple, Dict, torch.Tensor], device: torch.device):
@@ -149,18 +167,32 @@ class ThreadPrefetchLoader:
         self.prefetch_size = prefetch_size
 
     def __iter__(self):
+        if all(
+            hasattr(self.loader, method)
+            for method in ("reserve_next_task", "load_batch_for_task")
+        ):
+            yield from self._iter_scheduled_loader()
+            return
+
+        yield from self._iter_plain_loader()
+
+    @staticmethod
+    def _put_unless_stopped(target_queue, item, stop):
+        while not stop.is_set():
+            try:
+                target_queue.put(item, timeout=0.1)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _iter_plain_loader(self):
         source = iter(self.loader)
         batches = queue.Queue(maxsize=self.prefetch_size)
         stop = threading.Event()
 
         def put_unless_stopped(item):
-            while not stop.is_set():
-                try:
-                    batches.put(item, timeout=0.1)
-                    return True
-                except queue.Full:
-                    continue
-            return False
+            return self._put_unless_stopped(batches, item, stop)
 
         def produce():
             try:
@@ -192,6 +224,67 @@ class ThreadPrefetchLoader:
                 yield move_to_cuda(item, self.device)
         finally:
             stop.set()
+            producer.join(timeout=1)
+
+    def _iter_scheduled_loader(self):
+        """Prefetch CPU batches while keeping task/NCCL work on this thread."""
+        requests = queue.Queue(maxsize=self.prefetch_size)
+        batches = queue.Queue(maxsize=self.prefetch_size)
+        stop = threading.Event()
+
+        def produce():
+            try:
+                while not stop.is_set():
+                    try:
+                        task = requests.get(timeout=0.1)
+                    except queue.Empty:
+                        continue
+                    if task is _PREFETCH_END:
+                        return
+                    item = self.loader.load_batch_for_task(task)
+                    if not self._put_unless_stopped(batches, item, stop):
+                        return
+            except StopIteration:
+                self._put_unless_stopped(batches, _PREFETCH_END, stop)
+            except BaseException as exc:
+                self._put_unless_stopped(
+                    batches,
+                    _PrefetchException(exc, traceback.format_exc()),
+                    stop,
+                )
+
+        producer = threading.Thread(
+            target=produce,
+            name="etpr1-cpu-batch-prefetch",
+            daemon=True,
+        )
+        producer.start()
+        try:
+            for _ in range(self.prefetch_size):
+                task = self.loader.reserve_next_task()
+                if not self._put_unless_stopped(requests, task, stop):
+                    return
+
+            while True:
+                item = batches.get()
+                if item is _PREFETCH_END:
+                    return
+                if isinstance(item, _PrefetchException):
+                    raise RuntimeError(
+                        "CPU batch prefetch failed:\n"
+                        f"{item.formatted_traceback}"
+                    ) from item.exception
+
+                task = self.loader.reserve_next_task()
+                if not self._put_unless_stopped(requests, task, stop):
+                    return
+                yield move_to_cuda(item, self.device)
+        finally:
+            stop.set()
+            try:
+                requests.put_nowait(_PREFETCH_END)
+            except queue.Full:
+                pass
             producer.join(timeout=1)
 
     def __len__(self):

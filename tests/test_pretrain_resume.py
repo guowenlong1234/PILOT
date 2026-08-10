@@ -14,6 +14,7 @@ from pretrain_src.pretrain_src.utils.save import (
     build_joint_accuracy_metrics,
     capture_rng_state,
     load_training_state,
+    resolve_resume_meta_loader_step,
     resolve_resume_checkpoint,
     restore_rng_state,
     validate_resume_config,
@@ -73,10 +74,52 @@ def test_resume_configuration_rejects_effective_batch_change(tmp_path):
     _, state_path = saver.save(model, 2, optimizer=optimizer, opts=_opts(tmp_path))
     state, _ = load_training_state(state_path)
 
-    with pytest.raises(ValueError, match="gradient_accumulation_steps"):
+    with pytest.raises(ValueError, match="effective batch size"):
         validate_resume_config(
             state, _opts(tmp_path, gradient_accumulation_steps=4)
         )
+
+
+def test_resume_allows_equivalent_effective_batch_geometry(tmp_path):
+    model, optimizer = _updated_model_and_optimizer()
+    saved_opts = _opts(
+        tmp_path,
+        train_batch_size=32,
+        gradient_accumulation_steps=2,
+        world_size=2,
+    )
+    saver = ModelSaver(str(tmp_path / "ckpts"))
+    _, state_path = saver.save(
+        model,
+        10,
+        optimizer=optimizer,
+        meta_loader_step=20,
+        opts=saved_opts,
+    )
+    state, _ = load_training_state(state_path)
+    resumed_opts = _opts(
+        tmp_path,
+        train_batch_size=64,
+        gradient_accumulation_steps=1,
+        world_size=2,
+    )
+
+    assert validate_resume_config(state, resumed_opts) is None
+    assert resolve_resume_meta_loader_step(state, resumed_opts) == 10
+
+
+def test_resume_rejects_inconsistent_saved_meta_loader_step(tmp_path):
+    opts = _opts(tmp_path)
+    state = {
+        "step": 10,
+        "meta_loader_step": 79,
+        "training_config": {
+            "gradient_accumulation_steps": 8,
+        },
+    }
+
+    with pytest.raises(ValueError, match="MetaLoader step mismatch"):
+        resolve_resume_meta_loader_step(state, opts)
 
 
 def test_latest_resume_ignores_model_without_training_state(tmp_path):
