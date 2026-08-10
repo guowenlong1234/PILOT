@@ -168,11 +168,15 @@ def validate_resume_config(state, opts):
         * int(opts.gradient_accumulation_steps)
         * int(opts.world_size)
     )
-    if saved_effective_batch != current_effective_batch:
+    if (
+        saved_effective_batch != current_effective_batch
+        and not getattr(opts, "allow_effective_batch_size_change", False)
+    ):
         raise ValueError(
             "Resume configuration mismatch: effective batch size "
             f"saved={saved_effective_batch}, current={current_effective_batch} "
-            "(train_batch_size x gradient_accumulation_steps x world_size)"
+            "(train_batch_size x gradient_accumulation_steps x world_size). "
+            "Pass --allow_effective_batch_size_change to authorize this change."
         )
 
 

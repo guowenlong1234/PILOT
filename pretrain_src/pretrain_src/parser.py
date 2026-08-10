@@ -37,6 +37,14 @@ def load_parser():
             "restores model, optimizer, scaler, RNG, and global step"
         ),
     )
+    parser.add_argument(
+        "--allow_effective_batch_size_change",
+        action="store_true",
+        help=(
+            "Explicitly allow resuming with a different effective batch size. "
+            "The default is to reject this optimizer-semantics change."
+        ),
+    )
 
     parser.add_argument(
         "--output_dir",

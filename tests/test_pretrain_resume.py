@@ -80,6 +80,35 @@ def test_resume_configuration_rejects_effective_batch_change(tmp_path):
         )
 
 
+def test_resume_explicitly_allows_effective_batch_change(tmp_path):
+    model, optimizer = _updated_model_and_optimizer()
+    saved_opts = _opts(
+        tmp_path,
+        train_batch_size=32,
+        gradient_accumulation_steps=2,
+        world_size=2,
+    )
+    saver = ModelSaver(str(tmp_path / "ckpts"))
+    _, state_path = saver.save(
+        model,
+        10_000,
+        optimizer=optimizer,
+        meta_loader_step=20_000,
+        opts=saved_opts,
+    )
+    state, _ = load_training_state(state_path)
+    resumed_opts = _opts(
+        tmp_path,
+        train_batch_size=32,
+        gradient_accumulation_steps=1,
+        world_size=2,
+        allow_effective_batch_size_change=True,
+    )
+
+    assert validate_resume_config(state, resumed_opts) is None
+    assert resolve_resume_meta_loader_step(state, resumed_opts) == 10_000
+
+
 def test_resume_allows_equivalent_effective_batch_geometry(tmp_path):
     model, optimizer = _updated_model_and_optimizer()
     saved_opts = _opts(

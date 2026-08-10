@@ -343,13 +343,25 @@ def main(opts):
             or int(saved_training_config["gradient_accumulation_steps"])
             != int(opts.gradient_accumulation_steps)
         ):
+            saved_effective_batch = (
+                int(saved_training_config["train_batch_size"])
+                * int(saved_training_config["gradient_accumulation_steps"])
+                * int(saved_training_config["world_size"])
+            )
+            current_effective_batch = (
+                int(opts.train_batch_size)
+                * int(opts.gradient_accumulation_steps)
+                * int(opts.world_size)
+            )
             LOGGER.info(
-                "Changed microbatch geometry with the same effective batch: "
-                "per-rank batch %d -> %d, accumulation %d -> %d",
+                "Changed resumed batch geometry: per-rank batch %d -> %d, "
+                "accumulation %d -> %d, effective batch %d -> %d",
                 saved_training_config["train_batch_size"],
                 opts.train_batch_size,
                 saved_training_config["gradient_accumulation_steps"],
                 opts.gradient_accumulation_steps,
+                saved_effective_batch,
+                current_effective_batch,
             )
     if global_step >= opts.num_train_steps:
         raise ValueError(
