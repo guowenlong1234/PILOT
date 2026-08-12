@@ -7,8 +7,8 @@ MODE=${1:?Usage: run_rae_r2r_sft_server_job.sh <start|resume> <log_file>}
 LOG_FILE=${2:?Usage: run_rae_r2r_sft_server_job.sh <start|resume> <log_file>}
 EXP_NAME=${ETPR1_R2R_SFT_EXP_NAME:-rae_dinov2_etpnav_cls_768_r2r_sft}
 OUTPUT_ROOT=${ETPR1_R2R_SFT_OUTPUT_ROOT:-data/logs/rae_dinov2_etpnav_cls_768/r2r_sft_formal}
-SFT_ITERS=${ETPR1_R2R_SFT_ITERS:-30000}
-GRADIENT_ACCUMULATION_STEPS=${ETPR1_R2R_SFT_GRADIENT_ACCUMULATION_STEPS:-2}
+SFT_ITERS=${ETPR1_R2R_SFT_ITERS:-15000}
+GRADIENT_ACCUMULATION_STEPS=${ETPR1_R2R_SFT_GRADIENT_ACCUMULATION_STEPS:-1}
 PRETRAINED_PATH=${ETPR1_R2R_SFT_PRETRAINED_PATH:-/mnt/data2tb/ETP-R1_data/pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768_raw_cls_20260810/best/model_best_step_220000.pt}
 RUNTIME_ROOT=${ETPR1_SERVER_RUNTIME_ROOT:-${REPO_ROOT}/.runtime/server_sft}
 PYTHON_BIN=${ETPR1_SERVER_PYTHON:-/home/gwl/miniconda3/envs/etpnav_unified/bin/python}
@@ -103,7 +103,7 @@ set +e
     IL.lr 1e-5 \
     IL.ml_weight 1.0 \
     IL.sample_ratio 0.75 \
-    IL.decay_interval 2000 \
+    IL.decay_interval 3000 \
     IL.warmup_iters 500 \
     IL.min_lr_ratio 1.0 \
     IL.waypoint_aug True \

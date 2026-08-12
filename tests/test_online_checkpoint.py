@@ -103,3 +103,24 @@ def test_formal_r2r_sft_job_preserves_original_global_batch_and_schedule():
     )
     for token in required_tokens:
         assert token in source
+
+
+def test_server_r2r_sft_job_uses_requested_batch_and_schedule_defaults():
+    source = Path(
+        "scripts/run_rae_r2r_sft_server_job.sh"
+    ).read_text(encoding="utf-8")
+
+    required_tokens = (
+        "SFT_ITERS=${ETPR1_R2R_SFT_ITERS:-15000}",
+        "GRADIENT_ACCUMULATION_STEPS=${ETPR1_R2R_SFT_GRADIENT_ACCUMULATION_STEPS:-1}",
+        "--nproc_per_node=2",
+        "GPU_NUMBERS 2",
+        "NUM_ENVIRONMENTS 8",
+        "IL.batch_size 8",
+        'IL.gradient_accumulation_steps "$GRADIENT_ACCUMULATION_STEPS"',
+        'IL.iters "$SFT_ITERS"',
+        "IL.sample_ratio 0.75",
+        "IL.decay_interval 3000",
+    )
+    for token in required_tokens:
+        assert token in source
