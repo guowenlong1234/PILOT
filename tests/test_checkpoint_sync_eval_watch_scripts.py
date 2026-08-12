@@ -26,6 +26,7 @@ def test_eval_watch_uses_isolated_container_and_skips_valid_results():
         "scripts/etpr1_rae_runtime_exec.sh python run.py",
         "EVAL.EPISODE_COUNT -1",
         "EVAL.SAVE_RESULTS True",
+        "rae_dinov2_etpnav_cls_768_raw_cls_20260810/best/model_best_step_220000.pt",
         "NUM_ENVIRONMENTS=${ETPR1_R2R_EVAL_NUM_ENVIRONMENTS:-8}",
         'valid_result "$result" && return 0',
         "protected_etpnav_task",
