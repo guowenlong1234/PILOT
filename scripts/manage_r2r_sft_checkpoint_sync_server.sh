@@ -36,7 +36,7 @@ validate_settings() {
         exit 1
     }
     command -v rsync >/dev/null
-    ssh -o BatchMode=yes -o ConnectTimeout=10 "$DEST_HOST" \
+    ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$DEST_HOST" \
         "mkdir -p '$DEST_DIR/.incoming'"
 }
 
@@ -50,7 +50,7 @@ sync_checkpoint() {
     [ -s "$training_state" ] || return 0
 
     remote_checkpoint=${DEST_DIR}/${base}
-    if remote_size=$(ssh -o BatchMode=yes "$DEST_HOST" \
+    if remote_size=$(ssh -n -o BatchMode=yes "$DEST_HOST" \
         "test -s '$remote_checkpoint' && stat -c %s '$remote_checkpoint'" \
         2>/dev/null); then
         source_size=$(stat -c %s "$checkpoint")
@@ -64,26 +64,32 @@ sync_checkpoint() {
     incoming=${DEST_DIR}/.incoming/${base}.part.$$
     echo "sync_started_at=$(date --iso-8601=seconds) iter=$iteration source=$checkpoint"
     rsync -a --partial --protect-args "$checkpoint" \
-        "${DEST_HOST}:${incoming}"
+        "${DEST_HOST}:${incoming}" </dev/null
     source_size=$(stat -c %s "$checkpoint")
-    remote_size=$(ssh -o BatchMode=yes "$DEST_HOST" "stat -c %s '$incoming'")
+    remote_size=$(ssh -n -o BatchMode=yes "$DEST_HOST" "stat -c %s '$incoming'")
     if [ "$remote_size" != "$source_size" ]; then
         echo "sync_failed_at=$(date --iso-8601=seconds) iter=$iteration reason=size_mismatch local=$source_size remote=$remote_size"
         return 1
     fi
-    ssh -o BatchMode=yes "$DEST_HOST" \
+    ssh -n -o BatchMode=yes "$DEST_HOST" \
         "chmod 0644 '$incoming' && mv '$incoming' '$remote_checkpoint'"
     echo "sync_finished_at=$(date --iso-8601=seconds) iter=$iteration bytes=$source_size destination=$remote_checkpoint"
 }
 
 run_worker() {
+    local checkpoint
+    local -a checkpoints
     validate_settings
     mkdir -p "$STATE_DIR"
     echo "worker_started_at=$(date --iso-8601=seconds) source=$SOURCE_DIR destination=${DEST_HOST}:${DEST_DIR} poll_seconds=$POLL_SECONDS"
     while true; do
-        while IFS= read -r checkpoint; do
+        mapfile -t checkpoints < <(
+            find "$SOURCE_DIR" -maxdepth 1 -type f \
+                -name 'ckpt.iter*.pth' | sort -V
+        )
+        for checkpoint in "${checkpoints[@]}"; do
             sync_checkpoint "$checkpoint" || true
-        done < <(find "$SOURCE_DIR" -maxdepth 1 -type f -name 'ckpt.iter*.pth' | sort -V)
+        done
         sleep "$POLL_SECONDS"
     done
 }
