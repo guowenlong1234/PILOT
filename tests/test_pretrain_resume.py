@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 
+from pretrain_src.pretrain_src.parser import load_parser, parse_with_config
 from pretrain_src.pretrain_src.utils.save import (
     BestModelSaver,
     ModelSaver,
@@ -19,6 +20,18 @@ from pretrain_src.pretrain_src.utils.save import (
     restore_rng_state,
     validate_resume_config,
 )
+
+
+def test_no_thread_prefetch_overrides_json_config(tmp_path, monkeypatch):
+    config = tmp_path / "train.json"
+    config.write_text('{"thread_prefetch": true}', encoding="utf-8")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["train", "--config", str(config), "--no_thread_prefetch"],
+    )
+
+    opts = parse_with_config(load_parser())
+    assert opts.thread_prefetch is False
 
 
 def _opts(tmp_path, **overrides):

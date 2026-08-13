@@ -65,6 +65,12 @@ if [ -n "${ETPR1_PRETRAIN_GRADIENT_ACCUMULATION_STEPS:-}" ]; then
         "$ETPR1_PRETRAIN_GRADIENT_ACCUMULATION_STEPS"
     )
 fi
+if [ -n "${ETPR1_PRETRAIN_N_WORKERS:-}" ]; then
+    pretrain_args+=(--n_workers "$ETPR1_PRETRAIN_N_WORKERS")
+fi
+if [ "${ETPR1_PRETRAIN_DISABLE_THREAD_PREFETCH:-0}" = 1 ]; then
+    pretrain_args+=(--no_thread_prefetch --pin_mem)
+fi
 if [ "${ETPR1_PRETRAIN_ALLOW_WORLD_SIZE_CHANGE:-0}" = 1 ]; then
     pretrain_args+=(--allow_world_size_change)
 fi
@@ -75,6 +81,8 @@ fi
 {
     echo "train_batch_size_override=${ETPR1_PRETRAIN_TRAIN_BATCH_SIZE:-default}"
     echo "gradient_accumulation_override=${ETPR1_PRETRAIN_GRADIENT_ACCUMULATION_STEPS:-default}"
+    echo "n_workers_override=${ETPR1_PRETRAIN_N_WORKERS:-default}"
+    echo "disable_thread_prefetch=${ETPR1_PRETRAIN_DISABLE_THREAD_PREFETCH:-0}"
     echo "allow_world_size_change=${ETPR1_PRETRAIN_ALLOW_WORLD_SIZE_CHANGE:-0}"
     echo "allow_model_config_path_change=${ETPR1_PRETRAIN_ALLOW_MODEL_CONFIG_PATH_CHANGE:-0}"
 } >>"$LOG_FILE"

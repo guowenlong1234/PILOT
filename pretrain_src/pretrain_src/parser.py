@@ -173,6 +173,12 @@ def load_parser():
             "n_workers=0 to avoid multiprocessing fork"
         ),
     )
+    parser.add_argument(
+        "--no_thread_prefetch",
+        action="store_false",
+        dest="thread_prefetch",
+        help="disable thread prefetch so DataLoader workers can be used",
+    )
 
     # distributed computing
     parser.add_argument(
@@ -210,6 +216,8 @@ def parse_with_config(parser):
         override_keys = {
             arg[2:].split("=")[0] for arg in sys.argv[1:] if arg.startswith("--")
         }
+        if "no_thread_prefetch" in override_keys:
+            override_keys.add("thread_prefetch")
         print("override_keys", override_keys)
         for k, v in config_args.items():
             if k not in override_keys:
