@@ -3,11 +3,14 @@ set -uo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
+source "${SCRIPT_DIR}/checkpoint_order.sh"
 
+CONFIG_FILE=${ETPR1_R2R_EVAL_CONFIG_FILE:-${REPO_ROOT}/run_r2r/iter_train_rae_dino.yaml}
 EXP_NAME=${ETPR1_R2R_EVAL_EXP_NAME:-rae_dinov2_etpnav_cls_768_r2r_sft_all_ckpts_val_unseen}
 TRAIN_ROOT=${ETPR1_R2R_EVAL_TRAIN_ROOT:-data/logs/rae_dinov2_etpnav_cls_768/r2r_sft_formal}
 EVAL_ROOT=${ETPR1_R2R_EVAL_OUTPUT_ROOT:-${TRAIN_ROOT}/eval_all_checkpoints_val_unseen}
-CKPT_DIR=${ETPR1_R2R_EVAL_CKPT_DIR:-${TRAIN_ROOT}/checkpoints/rae_dinov2_etpnav_cls_768_r2r_sft}
+CONFIG_CKPT_DIR=$(checkpoint_watch_dir_from_config "$CONFIG_FILE")
+CKPT_DIR=${ETPR1_R2R_EVAL_CKPT_DIR:-${CONFIG_CKPT_DIR:-${TRAIN_ROOT}/checkpoints/rae_dinov2_etpnav_cls_768_r2r_sft}}
 RESULT_DIR=${EVAL_ROOT}/results/${EXP_NAME}/eval_results
 PID_DIR=${EVAL_ROOT}/pids
 PYTHON_BIN=${ETPR1_SERVER_PYTHON:-/home/gwl/miniconda3/envs/etpnav_unified/bin/python}
@@ -15,6 +18,7 @@ RUNTIME_ROOT=${ETPR1_SERVER_RUNTIME_ROOT:-${REPO_ROOT}/.runtime/server_sft}
 PRETRAIN_PATH=${ETPR1_R2R_EVAL_PRETRAIN_PATH:-pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768/best/model_best_step_452500.pt}
 NUM_WORKERS=${ETPR1_R2R_EVAL_WORKERS:-2}
 NUM_ENVIRONMENTS=${ETPR1_R2R_EVAL_NUM_ENVIRONMENTS:-8}
+CHECKPOINT_ORDER=${ETPR1_R2R_EVAL_CHECKPOINT_ORDER:-$(checkpoint_order_from_config "$CONFIG_FILE")}
 
 usage() {
     echo "Usage: $0 <start|status|worker> [worker_index]" >&2
@@ -64,6 +68,7 @@ run_worker() {
         exit 2
     fi
     prepare_runtime
+    validate_checkpoint_order "$CHECKPOINT_ORDER"
     cd "$REPO_ROOT"
 
     log_file=${EVAL_ROOT}/eval_gpu${worker_index}.log
@@ -79,7 +84,7 @@ run_worker() {
     export CUDA_VISIBLE_DEVICES=$worker_index
     export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,garbage_collection_threshold:0.8}
 
-    echo "worker_started_at=$(date --iso-8601=seconds) physical_gpu=$worker_index"
+    echo "worker_started_at=$(date --iso-8601=seconds) physical_gpu=$worker_index checkpoint_order=$CHECKPOINT_ORDER"
     echo "source_commit=$(git rev-parse HEAD)"
     "$PYTHON_BIN" -c \
         'import sys, torch, transformers, habitat, habitat_sim; print(f"versions=python:{sys.version.split()[0]} torch:{torch.__version__} transformers:{transformers.__version__} cuda:{torch.version.cuda} habitat:{habitat.__version__} habitat_sim:{habitat_sim.__version__}")'
@@ -138,7 +143,7 @@ run_worker() {
 
         completed=$((completed + 1))
         echo "checkpoint_finished_at=$(date --iso-8601=seconds) iter=$iteration result=$result completed=$completed"
-    done < <(find "$CKPT_DIR" -maxdepth 1 -type f -name 'ckpt.iter*.pth' | sort -Vr)
+    done < <(list_ordered_checkpoints "$CKPT_DIR" "$CHECKPOINT_ORDER")
 
     echo "worker_finished_at=$(date --iso-8601=seconds) completed=$completed skipped=$skipped failed=$failed"
 }
@@ -180,6 +185,7 @@ show_status() {
         echo "worker=$worker_index state=$state pid=$pid log=${EVAL_ROOT}/eval_gpu${worker_index}.log"
     done
     echo "results=$(find "$RESULT_DIR" -maxdepth 1 -type f -name 'stats_ckpt_*_val_unseen.json' 2>/dev/null | wc -l)/$(find "$CKPT_DIR" -maxdepth 1 -type f -name 'ckpt.iter*.pth' 2>/dev/null | wc -l)"
+    echo "checkpoint_order=$CHECKPOINT_ORDER config=$CONFIG_FILE"
 }
 
 case "${1:-}" in

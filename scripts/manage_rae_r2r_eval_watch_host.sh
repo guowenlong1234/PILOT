@@ -3,10 +3,13 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
+source "${SCRIPT_DIR}/checkpoint_order.sh"
 ACTION=${1:-status}
+CONFIG_FILE=${ETPR1_R2R_EVAL_CONFIG_FILE:-${REPO_ROOT}/run_r2r/iter_train_rae_dino.yaml}
 CONTAINER=${ETPR1_R2R_EVAL_CONTAINER:-gwl-etpr1-rae}
 PROTECTED_CONTAINER=${ETPR1_R2R_EVAL_PROTECTED_CONTAINER:-gwl-etpnav}
-CKPT_DIR=${ETPR1_R2R_EVAL_CKPT_DIR:-${REPO_ROOT}/data/logs/rae_dinov2_etpnav_cls_768/r2r_sft_formal/checkpoints/rae_dinov2_etpnav_cls_768_r2r_sft}
+CONFIG_CKPT_DIR=$(checkpoint_watch_dir_from_config "$CONFIG_FILE")
+CKPT_DIR=${ETPR1_R2R_EVAL_CKPT_DIR:-${CONFIG_CKPT_DIR:-${REPO_ROOT}/data/logs/rae_dinov2_etpnav_cls_768/r2r_sft_formal/checkpoints/rae_dinov2_etpnav_cls_768_r2r_sft}}
 EVAL_ROOT=${ETPR1_R2R_EVAL_OUTPUT_ROOT:-${REPO_ROOT}/data/logs/rae_dinov2_etpnav_cls_768/r2r_sft_formal/eval_watch_val_unseen}
 EXP_NAME=${ETPR1_R2R_EVAL_EXP_NAME:-rae_dinov2_etpnav_cls_768_r2r_sft_eval_watch}
 RESULT_DIR=${EVAL_ROOT}/results/${EXP_NAME}/eval_results
@@ -15,6 +18,7 @@ NUM_ENVIRONMENTS=${ETPR1_R2R_EVAL_NUM_ENVIRONMENTS:-8}
 POLL_SECONDS=${ETPR1_R2R_EVAL_POLL_SECONDS:-30}
 RETRY_SECONDS=${ETPR1_R2R_EVAL_RETRY_SECONDS:-60}
 GPU_IDLE_LIMIT_MIB=${ETPR1_R2R_EVAL_GPU_IDLE_LIMIT_MIB:-1024}
+CHECKPOINT_ORDER=${ETPR1_R2R_EVAL_CHECKPOINT_ORDER:-$(checkpoint_order_from_config "$CONFIG_FILE")}
 PID_FILE=${EVAL_ROOT}/watch.pid
 LOG_FILE=${EVAL_ROOT}/watch.log
 
@@ -131,7 +135,8 @@ evaluate_checkpoint() {
 run_worker() {
     ensure_container
     mkdir -p "$CKPT_DIR" "$RESULT_DIR"
-    echo "worker_started_at=$(date --iso-8601=seconds) checkpoints=$CKPT_DIR results=$RESULT_DIR"
+    validate_checkpoint_order "$CHECKPOINT_ORDER"
+    echo "worker_started_at=$(date --iso-8601=seconds) checkpoints=$CKPT_DIR results=$RESULT_DIR checkpoint_order=$CHECKPOINT_ORDER"
     while true; do
         found=false
         while IFS= read -r checkpoint; do
@@ -144,7 +149,7 @@ run_worker() {
                     sleep "$RETRY_SECONDS"
                 fi
             }
-        done < <(find "$CKPT_DIR" -maxdepth 1 -type f -name 'ckpt.iter*.pth' | sort -V)
+        done < <(list_ordered_checkpoints "$CKPT_DIR" "$CHECKPOINT_ORDER")
         if [ "$found" = false ]; then
             echo "queue_waiting_at=$(date --iso-8601=seconds) reason=no_checkpoints"
         fi
@@ -179,6 +184,7 @@ show_status() {
     fi
     echo "checkpoints=$(find "$CKPT_DIR" -maxdepth 1 -type f -name 'ckpt.iter*.pth' 2>/dev/null | wc -l)"
     echo "results=$(find "$RESULT_DIR" -maxdepth 1 -type f -name 'stats_ckpt_*_val_unseen.json' 2>/dev/null | wc -l)"
+    echo "checkpoint_order=$CHECKPOINT_ORDER config=$CONFIG_FILE"
     nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu \
         --format=csv,noheader
     [ -f "$LOG_FILE" ] && tail -n 25 "$LOG_FILE"

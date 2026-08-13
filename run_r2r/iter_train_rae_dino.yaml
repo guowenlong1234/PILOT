@@ -25,6 +25,9 @@ INFERENCE:
   EPISODE_COUNT: -1
 
 EVAL:
+  # ascending continuously evaluates newly arriving checkpoints oldest first;
+  # descending prioritizes the newest checkpoint.
+  checkpoint_order: ascending
   USE_CKPT_CONFIG: False
   # SPLIT: train_split_1goal
   SPLIT: val_unseen
@@ -46,6 +49,13 @@ EVAL:
 
 
 IL:
+  # The destination may be a local directory or user@host:/absolute/directory.
+  # The transfer is detached and publishes each checkpoint by atomic rename.
+  checkpoint_sync_enabled: False
+  # Training server -> evaluation host over the dedicated 2.5 GbE link.
+  # For the reverse direction use gwl@10.10.10.1:/absolute/directory after
+  # configuring the evaluation host's SSH key for the training server.
+  checkpoint_sync_destination: 'a6000@10.10.10.2:/home/a6000/gwl/ETP-R1/data/logs/rae_dinov2_etpnav_cls_768/r2r_sft_panorama_order/checkpoints/rae_dinov2_etpnav_cls_768_r2r_sft_panorama_order'
   amp_init_scale: 65536.0
   iters: 15000
   log_every: 200

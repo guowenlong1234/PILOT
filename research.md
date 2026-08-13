@@ -121,6 +121,7 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 ## Current Caveats And Open Questions
 
 - 2026-08-13 已修复离线 RAE/DINOv2 全景生成的俯仰相机漂移；生成器现在使用 ETPNav 的零传感器偏移方案。训练机当前使用的 10,567 视点 `RAE-DINOv2-B-14-RAW-CLS-views-habitat.hdf5` 仍是修复前旧逻辑采集的，本次按用户要求不重新生成。
+- 2026-08-13 SFT 检查点保存支持通过 `IL.checkpoint_sync_enabled` 和 `IL.checkpoint_sync_destination` 异步原子同步；两机间使用 `10.10.10.1/10.10.10.2` 的 2.5 GbE 直连。持续监控和批量评测通过 `EVAL.checkpoint_order` 选择正序或倒序，并从同一配置的同步目标推导本地监控目录。
 - `pip check` 会报告 `tensorflow 1.13.1` 声明要求 `tensorboard<1.14`，但 PyTorch 1.9 的 tensorboard 接口要求 `tensorboard>=1.15`。当前选择 `tensorboard==1.15.0`，因为这是项目入口能导入的最低可用折中。
 - RAE/DINOv2 已完成一步预训练、单环境 SFT/GRPO 和 R2R/RxR 单 episode 冒烟。正式长训练先后发生三次本地内存层崩溃：第 11,195 步的 DataLoader 子进程出现 `free(): invalid size`/`SIGABRT`；第 80,204 步的 DataLoader 子进程出现段错误；从 80,000 步恢复后又在第 117,624 步由训练 rank 0 主进程直接收到 `SIGSEGV`。第三次宿主机内核同时记录 Python 崩在 `libc.so.6`，没有 OOM、NVIDIA Xid、容器重启或主机重启。三次共同指向 Python 之外的本地内存破坏，故障域优先集中在原 `n_workers=1`、`pin_mem=true` 的多进程数据加载、HDF5/NumPy 读取、跨进程张量传输与锁页内存路径；但由于系统没有保存 core dump，现有证据仍不能精确到某一个本地库函数。2026-07-23 已把正式配置调整为 `n_workers=0`、`pin_mem=false`，从第 117,500 步恢复继续观察。
 - 原多进程路径的启动顺序现已进一步确认：`main()` 先初始化 CUDA、构造并搬运模型，再创建训练 DataLoader；`MetaLoader.__init__()` 随即对 MLM、SAP 两个 DataLoader 分别调用 `iter()`，在 Linux 默认 `fork` 模式下产生两个 worker。worker 因而从一个已经初始化 CUDA、载入 HDF5 且约有 80 个线程的大进程中派生。当前单进程训练的 rank 0 常驻内存约 20 GiB，五份 JSONL 原始文件合计约 2.6 GiB，RGB/深度 HDF5 合计约 1.3 GiB。这个顺序是当前最有证据的结构性风险：它同时解释 worker 本地内存崩溃、主进程锁页/跨进程搬运路径崩溃以及问题的间歇性；但在完成分组长压测前仍标记为高概率判断，不当作已精确证明的单一根因。

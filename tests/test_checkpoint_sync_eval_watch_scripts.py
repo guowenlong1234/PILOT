@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 
 def test_server_sync_publishes_only_complete_checkpoints_atomically():
@@ -46,3 +47,62 @@ def test_eval_watch_uses_isolated_container_and_skips_valid_results():
     )
     for token in required_tokens:
         assert token in source
+
+
+def test_checkpoint_order_and_watch_directory_come_from_one_config(tmp_path):
+    checkpoint_dir = tmp_path / "received"
+    checkpoint_dir.mkdir()
+    for iteration in (1000, 200, 600):
+        (checkpoint_dir / f"ckpt.iter{iteration}.pth").write_bytes(b"x")
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "EVAL:\n"
+        "  checkpoint_order: ascending\n"
+        "IL:\n"
+        "  checkpoint_sync_enabled: true\n"
+        f"  checkpoint_sync_destination: 'a6000@10.10.10.2:{checkpoint_dir}'\n",
+        encoding="utf-8",
+    )
+    command = f"""
+        source scripts/checkpoint_order.sh
+        order=$(checkpoint_order_from_config {config})
+        directory=$(checkpoint_watch_dir_from_config {config})
+        echo "$order|$directory"
+        list_ordered_checkpoints "$directory" "$order"
+    """
+
+    result = subprocess.run(
+        ["bash", "-c", command],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+
+    assert result[0] == f"ascending|{checkpoint_dir}"
+    assert [Path(path).name for path in result[1:]] == [
+        "ckpt.iter200.pth",
+        "ckpt.iter600.pth",
+        "ckpt.iter1000.pth",
+    ]
+
+
+def test_checkpoint_order_can_prioritize_newest(tmp_path):
+    for iteration in (1000, 200, 600):
+        (tmp_path / f"ckpt.iter{iteration}.pth").write_bytes(b"x")
+    command = (
+        "source scripts/checkpoint_order.sh; "
+        f"list_ordered_checkpoints {tmp_path} descending"
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", command],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+
+    assert [Path(path).name for path in result] == [
+        "ckpt.iter1000.pth",
+        "ckpt.iter600.pth",
+        "ckpt.iter200.pth",
+    ]

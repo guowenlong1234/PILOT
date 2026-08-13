@@ -692,6 +692,58 @@ def test_resumable_sft_saves_model_and_training_state_separately(
     )
 
 
+def test_resumable_sft_launches_configured_checkpoint_sync_after_both_saves(
+    tmp_path, monkeypatch
+):
+    config, _ = _config(tmp_path)
+    config.CHECKPOINT_FOLDER = str(tmp_path)
+    config.ONLY_LAST_SAVEALL = True
+    destination = "a6000@10.10.10.2:/remote/checkpoints"
+    config.IL = SimpleNamespace(
+        iters=2,
+        resumable_checkpoints=True,
+        keep_last_train_states=3,
+        keep_train_state_every_n_iters=5000,
+        checkpoint_sync_enabled=True,
+        checkpoint_sync_destination=destination,
+    )
+    trainer = object.__new__(SftTrainer)
+    trainer.config = config
+    trainer.policy = _FakePolicy()
+    trainer.optimizer = _StateHolder()
+    trainer.scheduler = _StateHolder()
+    trainer.scaler = _StateHolder()
+    events = []
+    monkeypatch.setattr(
+        sft_trainer_module,
+        "atomic_torch_save",
+        lambda obj, path: events.append(("save", path)),
+    )
+    monkeypatch.setattr(
+        sft_trainer_module,
+        "prune_training_states",
+        lambda *args: [],
+    )
+    monkeypatch.setattr(
+        sft_trainer_module,
+        "launch_checkpoint_sync",
+        lambda path, target: events.append(("sync", path, target)) or 42,
+    )
+
+    trainer.save_checkpoint(
+        1,
+        episode_iterator_state={
+            "format_version": 1,
+            "world_size": 1,
+            "ranks": [],
+        },
+    )
+
+    assert [event[0] for event in events] == ["save", "save", "sync"]
+    assert events[-1][1].endswith("ckpt.iter1.pth")
+    assert events[-1][2] == destination
+
+
 def test_sft_captures_and_restores_all_local_episode_iterators():
     environment_states = [{"worker": 0}, {"worker": 1}]
     trainer = object.__new__(SftTrainer)

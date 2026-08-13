@@ -32,6 +32,7 @@ _C.EVAL.EPISODE_COUNT = -1
 _C.EVAL.LANGUAGES = ["en-US", "en-IN"]
 _C.EVAL.SAMPLE = False
 _C.EVAL.SAVE_RESULTS = True
+_C.EVAL.checkpoint_order = "descending"
 _C.EVAL.PRETRAINED_ONLY = False
 _C.EVAL.EVAL_NONLEARNING = False
 _C.EVAL.NONLEARNING = CN()
@@ -89,6 +90,8 @@ _C.IL.log_cuda_memory = False
 _C.IL.resumable_checkpoints = False
 _C.IL.keep_last_train_states = 3
 _C.IL.keep_train_state_every_n_iters = 0
+_C.IL.checkpoint_sync_enabled = False
+_C.IL.checkpoint_sync_destination = ""
 # it True, start training from the saved epoch
 # -----------------------------------------------------------------------------
 # IL: RXR TRAINER CONFIG

@@ -66,6 +66,7 @@ from vlnce_baselines.common.online_checkpoint import (
     latest_checkpoint_path,
     prune_training_states,
 )
+from vlnce_baselines.common.checkpoint_sync import launch_checkpoint_sync
 from torch.nn.utils.rnn import pad_sequence
 import cv2
 from collections import OrderedDict
@@ -134,6 +135,36 @@ class RLTrainer(BaseVLNCETrainer):
             if self.config.EVAL.SAVE_RESULTS:
                 self._make_results_dir()
 
+    def _launch_checkpoint_sync(self, checkpoint_path):
+        enabled = bool(
+            getattr(self.config.IL, "checkpoint_sync_enabled", False)
+        )
+        if not enabled:
+            return
+        destination = str(
+            getattr(self.config.IL, "checkpoint_sync_destination", "")
+        ).strip()
+        if not destination:
+            raise ValueError(
+                "IL.checkpoint_sync_destination must be set when "
+                "IL.checkpoint_sync_enabled=True"
+            )
+        try:
+            pid = launch_checkpoint_sync(checkpoint_path, destination)
+        except Exception:
+            logger.exception(
+                "Failed to launch asynchronous checkpoint sync for %s",
+                checkpoint_path,
+            )
+            return
+        logger.info(
+            "Launched asynchronous checkpoint sync: pid=%d source=%s "
+            "destination=%s",
+            pid,
+            checkpoint_path,
+            destination,
+        )
+
     def save_checkpoint(
         self,
         iteration: int,
@@ -185,6 +216,7 @@ class RLTrainer(BaseVLNCETrainer):
                     "Pruned old SFT training states: %s",
                     ", ".join(path.name for path in removed),
                 )
+            self._launch_checkpoint_sync(checkpoint_path)
             return
 
         save_training_state = (
@@ -205,6 +237,7 @@ class RLTrainer(BaseVLNCETrainer):
             obj=checkpoint,
             f=checkpoint_path,
         )
+        self._launch_checkpoint_sync(checkpoint_path)
 
     def _capture_episode_iterator_state(self):
         # Training rollouts pause workers as their episodes finish. Restore
