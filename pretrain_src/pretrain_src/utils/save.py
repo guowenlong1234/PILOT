@@ -53,14 +53,31 @@ def capture_rng_state():
     return state
 
 
-def restore_rng_state(state):
+def restore_rng_state(state, allow_cuda_device_count_change=False):
     if not state:
         return
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
     torch.set_rng_state(state["torch"])
     if "cuda" in state and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(state["cuda"])
+        saved_cuda_states = state["cuda"]
+        current_device_count = torch.cuda.device_count()
+        if len(saved_cuda_states) != current_device_count:
+            if not allow_cuda_device_count_change:
+                raise ValueError(
+                    "Resume CUDA RNG device-count mismatch: "
+                    f"saved={len(saved_cuda_states)}, "
+                    f"current={current_device_count}"
+                )
+            if current_device_count > len(saved_cuda_states):
+                raise ValueError(
+                    "Cannot restore CUDA RNG state onto more devices than "
+                    "the checkpoint contains: "
+                    f"saved={len(saved_cuda_states)}, "
+                    f"current={current_device_count}"
+                )
+            saved_cuda_states = saved_cuda_states[:current_device_count]
+        torch.cuda.set_rng_state_all(saved_cuda_states)
 
 
 def _checkpoint_step(path, pattern):
@@ -142,10 +159,9 @@ def load_training_state(resume_checkpoint):
 
 def validate_resume_config(state, opts):
     saved = state["training_config"]
-    current = {
-        "world_size": opts.world_size,
-        "model_config": os.path.abspath(opts.model_config),
-    }
+    current = {"model_config": os.path.abspath(opts.model_config)}
+    if not getattr(opts, "allow_world_size_change", False):
+        current["world_size"] = opts.world_size
     mismatches = {
         key: (saved.get(key), value)
         for key, value in current.items()

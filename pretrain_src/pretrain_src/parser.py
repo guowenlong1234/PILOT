@@ -45,6 +45,15 @@ def load_parser():
             "The default is to reject this optimizer-semantics change."
         ),
     )
+    parser.add_argument(
+        "--allow_world_size_change",
+        action="store_true",
+        help=(
+            "Explicitly allow resuming with fewer distributed workers. "
+            "The effective batch-size check remains enabled unless its "
+            "separate override is also supplied."
+        ),
+    )
 
     parser.add_argument(
         "--output_dir",

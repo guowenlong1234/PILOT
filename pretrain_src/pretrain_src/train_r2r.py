@@ -329,7 +329,12 @@ def main(opts):
         meta_loader.loader.step = resolve_resume_meta_loader_step(
             resume_state, opts
         )
-        restore_rng_state(resume_state["rng_state"])
+        restore_rng_state(
+            resume_state["rng_state"],
+            allow_cuda_device_count_change=getattr(
+                opts, "allow_world_size_change", False
+            ),
+        )
         pbar.update(global_step)
         LOGGER.info(
             "Resumed complete training state from %s at global step %d",

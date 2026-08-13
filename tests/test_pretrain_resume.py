@@ -137,6 +137,71 @@ def test_resume_allows_equivalent_effective_batch_geometry(tmp_path):
     assert resolve_resume_meta_loader_step(state, resumed_opts) == 10
 
 
+def test_resume_world_size_change_requires_explicit_opt_in(tmp_path):
+    model, optimizer = _updated_model_and_optimizer()
+    saved_opts = _opts(
+        tmp_path,
+        train_batch_size=32,
+        gradient_accumulation_steps=1,
+        world_size=2,
+    )
+    saver = ModelSaver(str(tmp_path / "ckpts"))
+    _, state_path = saver.save(
+        model,
+        10,
+        optimizer=optimizer,
+        meta_loader_step=10,
+        opts=saved_opts,
+    )
+    state, _ = load_training_state(state_path)
+
+    with pytest.raises(ValueError, match="world_size"):
+        validate_resume_config(
+            state,
+            _opts(
+                tmp_path,
+                train_batch_size=32,
+                gradient_accumulation_steps=2,
+                world_size=1,
+            ),
+        )
+
+    resumed_opts = _opts(
+        tmp_path,
+        train_batch_size=32,
+        gradient_accumulation_steps=2,
+        world_size=1,
+        allow_world_size_change=True,
+    )
+    assert validate_resume_config(state, resumed_opts) is None
+    assert resolve_resume_meta_loader_step(state, resumed_opts) == 20
+
+
+def test_resume_world_size_change_still_checks_effective_batch(tmp_path):
+    model, optimizer = _updated_model_and_optimizer()
+    saved_opts = _opts(
+        tmp_path,
+        train_batch_size=32,
+        gradient_accumulation_steps=1,
+        world_size=2,
+    )
+    saver = ModelSaver(str(tmp_path / "ckpts"))
+    _, state_path = saver.save(model, 10, optimizer=optimizer, opts=saved_opts)
+    state, _ = load_training_state(state_path)
+
+    with pytest.raises(ValueError, match="effective batch size"):
+        validate_resume_config(
+            state,
+            _opts(
+                tmp_path,
+                train_batch_size=16,
+                gradient_accumulation_steps=2,
+                world_size=1,
+                allow_world_size_change=True,
+            ),
+        )
+
+
 def test_resume_rejects_inconsistent_saved_meta_loader_step(tmp_path):
     opts = _opts(tmp_path)
     state = {
@@ -287,6 +352,27 @@ def test_rng_state_round_trip_restores_python_numpy_and_torch():
     assert random.random() == expected_python
     assert np.array_equal(np.random.rand(3), expected_numpy)
     assert torch.equal(torch.rand(3), expected_torch)
+
+
+def test_rng_restore_explicitly_truncates_saved_cuda_devices(monkeypatch):
+    state = capture_rng_state()
+    state["cuda"] = [
+        torch.tensor([1], dtype=torch.uint8),
+        torch.tensor([2], dtype=torch.uint8),
+    ]
+    restored = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(
+        torch.cuda, "set_rng_state_all", lambda values: restored.extend(values)
+    )
+
+    with pytest.raises(ValueError, match="device-count mismatch"):
+        restore_rng_state(state)
+
+    restore_rng_state(state, allow_cuda_device_count_change=True)
+    assert len(restored) == 1
+    assert torch.equal(restored[0], state["cuda"][0])
 
 
 def test_management_scripts_have_valid_bash_syntax():
