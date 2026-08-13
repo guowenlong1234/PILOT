@@ -54,6 +54,14 @@ def load_parser():
             "separate override is also supplied."
         ),
     )
+    parser.add_argument(
+        "--allow_model_config_path_change",
+        action="store_true",
+        help=(
+            "Explicitly allow a resumed checkpoint's model-config path to "
+            "change after moving the same experiment to another machine."
+        ),
+    )
 
     parser.add_argument(
         "--output_dir",

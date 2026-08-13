@@ -202,6 +202,34 @@ def test_resume_world_size_change_still_checks_effective_batch(tmp_path):
         )
 
 
+def test_resume_model_config_relocation_requires_explicit_opt_in(tmp_path):
+    model, optimizer = _updated_model_and_optimizer()
+    saved_opts = _opts(tmp_path)
+    saver = ModelSaver(str(tmp_path / "ckpts"))
+    _, state_path = saver.save(model, 10, optimizer=optimizer, opts=saved_opts)
+    state, _ = load_training_state(state_path)
+    relocated = tmp_path / "relocated" / "model.json"
+    relocated.parent.mkdir()
+    relocated.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="model_config"):
+        validate_resume_config(
+            state, _opts(tmp_path, model_config=str(relocated))
+        )
+
+    assert (
+        validate_resume_config(
+            state,
+            _opts(
+                tmp_path,
+                model_config=str(relocated),
+                allow_model_config_path_change=True,
+            ),
+        )
+        is None
+    )
+
+
 def test_resume_rejects_inconsistent_saved_meta_loader_step(tmp_path):
     opts = _opts(tmp_path)
     state = {

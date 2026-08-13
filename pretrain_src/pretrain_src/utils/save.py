@@ -159,7 +159,9 @@ def load_training_state(resume_checkpoint):
 
 def validate_resume_config(state, opts):
     saved = state["training_config"]
-    current = {"model_config": os.path.abspath(opts.model_config)}
+    current = {}
+    if not getattr(opts, "allow_model_config_path_change", False):
+        current["model_config"] = os.path.abspath(opts.model_config)
     if not getattr(opts, "allow_world_size_change", False):
         current["world_size"] = opts.world_size
     mismatches = {
