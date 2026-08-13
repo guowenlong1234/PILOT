@@ -408,6 +408,7 @@ def test_management_scripts_have_valid_bash_syntax():
     for relative_path in (
         "scripts/manage_rae_pretrain.sh",
         "scripts/manage_rae_pretrain_host.sh",
+        "scripts/manage_rae_pretrain_resume_250k_eval.sh",
         "scripts/run_rae_pretrain_job.sh",
         "pretrain_src/run_pt/run_mix_rae_dino.bash",
     ):

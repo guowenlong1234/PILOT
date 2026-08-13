@@ -55,10 +55,35 @@ if [ "$MODE" = resume ]; then
     resume_args=(--resume_checkpoint latest)
 fi
 
+pretrain_args=()
+if [ -n "${ETPR1_PRETRAIN_TRAIN_BATCH_SIZE:-}" ]; then
+    pretrain_args+=(--train_batch_size "$ETPR1_PRETRAIN_TRAIN_BATCH_SIZE")
+fi
+if [ -n "${ETPR1_PRETRAIN_GRADIENT_ACCUMULATION_STEPS:-}" ]; then
+    pretrain_args+=(
+        --gradient_accumulation_steps
+        "$ETPR1_PRETRAIN_GRADIENT_ACCUMULATION_STEPS"
+    )
+fi
+if [ "${ETPR1_PRETRAIN_ALLOW_WORLD_SIZE_CHANGE:-0}" = 1 ]; then
+    pretrain_args+=(--allow_world_size_change)
+fi
+if [ "${ETPR1_PRETRAIN_ALLOW_MODEL_CONFIG_PATH_CHANGE:-0}" = 1 ]; then
+    pretrain_args+=(--allow_model_config_path_change)
+fi
+
+{
+    echo "train_batch_size_override=${ETPR1_PRETRAIN_TRAIN_BATCH_SIZE:-default}"
+    echo "gradient_accumulation_override=${ETPR1_PRETRAIN_GRADIENT_ACCUMULATION_STEPS:-default}"
+    echo "allow_world_size_change=${ETPR1_PRETRAIN_ALLOW_WORLD_SIZE_CHANGE:-0}"
+    echo "allow_model_config_path_change=${ETPR1_PRETRAIN_ALLOW_MODEL_CONFIG_PATH_CHANGE:-0}"
+} >>"$LOG_FILE"
+
 set +e
 ETPR1_PRETRAIN_OUTPUT_DIR="$OUTPUT_DIR" \
     bash pretrain_src/run_pt/run_mix_rae_dino.bash \
-    "$MASTER_PORT" "${resume_args[@]}" 2>&1 | tee -a "$LOG_FILE"
+    "$MASTER_PORT" "${resume_args[@]}" "${pretrain_args[@]}" \
+    2>&1 | tee -a "$LOG_FILE"
 exit_code=${PIPESTATUS[0]}
 set -e
 

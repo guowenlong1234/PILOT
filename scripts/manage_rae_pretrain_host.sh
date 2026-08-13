@@ -37,9 +37,25 @@ if [ "$ACTION" = start ] || [ "$ACTION" = resume ]; then
     fi
 fi
 
+docker_env_args=()
+for variable in \
+    ETPR1_PRETRAIN_TMUX_SESSION \
+    ETPR1_PRETRAIN_OUTPUT_DIR \
+    ETPR1_PRETRAIN_MASTER_PORT \
+    ETPR1_PRETRAIN_TRAIN_BATCH_SIZE \
+    ETPR1_PRETRAIN_GRADIENT_ACCUMULATION_STEPS \
+    ETPR1_PRETRAIN_ALLOW_WORLD_SIZE_CHANGE \
+    ETPR1_PRETRAIN_ALLOW_MODEL_CONFIG_PATH_CHANGE; do
+    if [ -n "${!variable:-}" ]; then
+        docker_env_args+=(-e "${variable}=${!variable}")
+    fi
+done
+
 container_command="source ${CONDA_SH} && conda activate etpr1_rae && cd ${REPO_ROOT} && scripts/manage_rae_pretrain.sh ${ACTION}"
 if [ "$ACTION" = attach ]; then
-    exec docker exec -it "$CONTAINER" bash -lc "$container_command"
+    exec docker exec "${docker_env_args[@]}" -it \
+        "$CONTAINER" bash -lc "$container_command"
 else
-    exec docker exec "$CONTAINER" bash -lc "$container_command"
+    exec docker exec "${docker_env_args[@]}" \
+        "$CONTAINER" bash -lc "$container_command"
 fi
