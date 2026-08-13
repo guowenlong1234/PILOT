@@ -134,8 +134,7 @@ def launch_checkpoint_sync(source, destination, log_path=None):
         process = subprocess.Popen(
             [
                 sys.executable,
-                "-m",
-                "vlnce_baselines.common.checkpoint_sync",
+                str(Path(__file__).resolve()),
                 "--source",
                 str(source),
                 "--destination",
