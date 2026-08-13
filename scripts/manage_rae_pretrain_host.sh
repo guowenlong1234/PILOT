@@ -22,8 +22,11 @@ ip -br addr | grep -Eq '^eno1[[:space:]]+UP[[:space:]]+10\.10\.10\.2/24' || {
 docker inspect "$CONTAINER" >/dev/null
 
 if [ "$ACTION" = start ] || [ "$ACTION" = resume ]; then
-    etpnav_processes=$(docker exec "$ETPNAV_CONTAINER" bash -lc \
-        "ps -eo pid,ppid,stat,etime,cmd | grep -E 'torchrun|run.py|train.py' | grep -v grep || true")
+    etpnav_processes=""
+    if [ "$(docker inspect -f '{{.State.Running}}' "$ETPNAV_CONTAINER" 2>/dev/null || true)" = true ]; then
+        etpnav_processes=$(docker exec "$ETPNAV_CONTAINER" bash -lc \
+            "ps -eo pid,ppid,stat,etime,cmd | grep -E 'torchrun|run.py|train.py' | grep -v grep || true")
+    fi
     if [ -n "$etpnav_processes" ]; then
         echo "ETPNav still has a training/evaluation process; launch refused:" >&2
         echo "$etpnav_processes" >&2
