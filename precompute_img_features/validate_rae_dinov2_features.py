@@ -220,10 +220,11 @@ def _metadata_without_asset_hashes():
         "num_views": 36,
         "image_size": 224,
         "vfov": 60,
-        "sensor_height": 1.25,
+        "sensor_height": 0.0,
+        "camera_geometry": "mp3d_viewpoint_center_zero_sensor_offset",
         "cls_normalization": "none",
         "rae_stat_applied_to_cls": False,
-        "preprocess_version": "etpnav_rae_navigation_cls_v1",
+        "preprocess_version": "etpnav_rae_navigation_cls_v2_fixed_camera_center",
     }
 
 

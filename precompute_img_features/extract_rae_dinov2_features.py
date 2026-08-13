@@ -57,23 +57,24 @@ def build_metadata(model_dir):
         "num_views": 36,
         "image_size": 224,
         "vfov": 60,
-        "sensor_height": 1.25,
+        "sensor_height": 0.0,
+        "camera_geometry": "mp3d_viewpoint_center_zero_sensor_offset",
         "cls_normalization": "none",
         "rae_stat_applied_to_cls": False,
         "dino_weights_sha256": sha256_file(model_path),
-        "preprocess_version": "etpnav_rae_navigation_cls_v1",
+        "preprocess_version": "etpnav_rae_navigation_cls_v2_fixed_camera_center",
     }
 
 
-def _mp3d_to_habitat_agent_position(mp3d_position, sensor_height):
+def _mp3d_to_habitat_agent_position(mp3d_position):
     position = np.asarray(mp3d_position, dtype=np.float32)
     if position.shape != (3,) or not np.isfinite(position).all():
         raise ValueError(f"MP3D position must contain three finite values, got {position}")
     x, y, z = position
-    return np.asarray([x, z - sensor_height, -y], dtype=np.float32)
+    return np.asarray([x, z, -y], dtype=np.float32)
 
 
-def load_connectivity_viewpoints(connectivity_dir, sensor_height=1.25):
+def load_connectivity_viewpoints(connectivity_dir):
     connectivity_dir = Path(connectivity_dir)
     scans_file = connectivity_dir / "scans.txt"
     with scans_file.open("r", encoding="utf-8") as handle:
@@ -95,9 +96,7 @@ def load_connectivity_viewpoints(connectivity_dir, sensor_height=1.25):
             record = ViewpointRecord(
                 scan_id=scan_id,
                 viewpoint_id=viewpoint_id,
-                position=_mp3d_to_habitat_agent_position(
-                    mp3d_position, float(sensor_height)
-                ),
+                position=_mp3d_to_habitat_agent_position(mp3d_position),
             )
             old_record = records.get(record.key)
             if old_record is not None and not np.array_equal(
@@ -132,7 +131,6 @@ def build_simulator(
     scene_path,
     image_size=224,
     hfov=60.0,
-    sensor_height=1.25,
     sim_gpu_id=0,
 ):
     import habitat_sim
@@ -147,7 +145,10 @@ def build_simulator(
     sensor_spec.sensor_type = habitat_sim.SensorType.COLOR
     sensor_spec.resolution = [int(image_size), int(image_size)]
     sensor_spec.hfov = float(hfov)
-    sensor_spec.position = [0.0, float(sensor_height), 0.0]
+    # The MP3D connectivity pose is already the camera center. Keeping the
+    # sensor at the agent origin prevents pitch rotations from orbiting the
+    # camera around a vertical sensor offset.
+    sensor_spec.position = [0.0, 0.0, 0.0]
 
     agent_config = habitat_sim.agent.AgentConfiguration()
     agent_config.sensor_specifications = [sensor_spec]
@@ -403,7 +404,6 @@ def build_parser():
     parser.add_argument("--image_size", type=int, default=224)
     parser.add_argument("--hfov", type=float, default=60.0)
     parser.add_argument("--vfov", type=float, default=60.0)
-    parser.add_argument("--sensor_height", type=float, default=1.25)
     parser.add_argument(
         "--max_viewpoints",
         type=int,
@@ -418,8 +418,6 @@ def _validate_fixed_geometry(args):
         raise ValueError("RAE native preprocessing requires --image_size=224")
     if args.hfov != 60.0 or args.vfov != 60.0:
         raise ValueError("feature semantics require --hfov=60 and --vfov=60")
-    if args.sensor_height != 1.25:
-        raise ValueError("feature semantics require --sensor_height=1.25")
     if args.max_viewpoints == 0 or args.max_viewpoints < -1:
         raise ValueError("--max_viewpoints must be -1 or a positive integer")
 
@@ -436,9 +434,7 @@ def main(argv=None):
         RaeDinov2ClsEncoder,
     )
 
-    all_viewpoints = load_connectivity_viewpoints(
-        args.connectivity_dir, sensor_height=args.sensor_height
-    )
+    all_viewpoints = load_connectivity_viewpoints(args.connectivity_dir)
     allowed_keys = {record.key for record in all_viewpoints}
     viewpoints = all_viewpoints
     if args.max_viewpoints > 0:
@@ -456,7 +452,6 @@ def main(argv=None):
             scene_path,
             image_size=args.image_size,
             hfov=args.hfov,
-            sensor_height=args.sensor_height,
             sim_gpu_id=args.sim_gpu_id,
         )
 

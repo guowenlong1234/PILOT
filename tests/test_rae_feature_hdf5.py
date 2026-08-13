@@ -19,6 +19,7 @@ from precompute_img_features.extract_rae_dinov2_features import (
     ViewpointRecord,
     build_metadata,
     build_parser as build_extract_parser,
+    build_simulator,
     encode_views,
     load_connectivity_viewpoints,
     render_36_views,
@@ -39,11 +40,12 @@ EXPECTED_METADATA = {
     "num_views": 36,
     "image_size": 224,
     "vfov": 60,
-    "sensor_height": 1.25,
+    "sensor_height": 0.0,
+    "camera_geometry": "mp3d_viewpoint_center_zero_sensor_offset",
     "cls_normalization": "none",
     "rae_stat_applied_to_cls": False,
     "dino_weights_sha256": "a" * 64,
-    "preprocess_version": "etpnav_rae_navigation_cls_v1",
+    "preprocess_version": "etpnav_rae_navigation_cls_v2_fixed_camera_center",
 }
 
 
@@ -134,6 +136,55 @@ def test_render_36_views_sets_absolute_states_and_keeps_rgb_channel_order():
     assert len({tuple(np.round(state[1], 8)) for state in simulator.agent.set_states}) == 36
 
 
+def test_simulator_places_sensor_at_agent_camera_center(monkeypatch):
+    captured = {}
+
+    class FakeSimulatorConfiguration:
+        def __init__(self):
+            self.scene_id = None
+            self.gpu_device_id = None
+
+    class FakeCameraSensorSpec:
+        def __init__(self):
+            self.uuid = None
+            self.sensor_type = None
+            self.resolution = None
+            self.hfov = None
+            self.position = None
+
+    class FakeAgentConfiguration:
+        def __init__(self):
+            self.sensor_specifications = None
+
+    def fake_configuration(simulator_config, agent_configs):
+        captured["simulator_config"] = simulator_config
+        captured["agent_configs"] = agent_configs
+        return "configuration"
+
+    fake_habitat_sim = SimpleNamespace(
+        SimulatorConfiguration=FakeSimulatorConfiguration,
+        CameraSensorSpec=FakeCameraSensorSpec,
+        SensorType=SimpleNamespace(COLOR="color"),
+        agent=SimpleNamespace(AgentConfiguration=FakeAgentConfiguration),
+        Configuration=fake_configuration,
+        Simulator=lambda configuration: configuration,
+    )
+    monkeypatch.setitem(sys.modules, "habitat_sim", fake_habitat_sim)
+
+    simulator = build_simulator(
+        "scene.glb",
+        image_size=224,
+        hfov=60,
+        sim_gpu_id=3,
+    )
+
+    assert simulator == "configuration"
+    assert captured["simulator_config"].scene_id == "scene.glb"
+    assert captured["simulator_config"].gpu_device_id == 3
+    sensor_spec = captured["agent_configs"][0].sensor_specifications[0]
+    assert sensor_spec.position == [0.0, 0.0, 0.0]
+
+
 def test_connectivity_parser_filters_transforms_deduplicates_and_sorts(tmp_path):
     connectivity = tmp_path / "connectivity"
     connectivity.mkdir()
@@ -169,11 +220,11 @@ def test_connectivity_parser_filters_transforms_deduplicates_and_sorts(tmp_path)
         encoding="utf-8",
     )
 
-    records = load_connectivity_viewpoints(connectivity, sensor_height=1.25)
+    records = load_connectivity_viewpoints(connectivity)
 
     assert [record.key for record in records] == ["scan_a_vp_1", "scan_b_vp_2"]
-    np.testing.assert_allclose(records[0].position, [1.0, 1.75, -2.0])
-    np.testing.assert_allclose(records[1].position, [4.0, 4.75, -5.0])
+    np.testing.assert_allclose(records[0].position, [1.0, 3.0, -2.0])
+    np.testing.assert_allclose(records[1].position, [4.0, 6.0, -5.0])
 
 
 class FakeEncoder(torch.nn.Module):
@@ -351,6 +402,34 @@ def test_writer_rejects_existing_metadata_mismatch_before_rendering(tmp_path):
             FakeEncoder(),
             _simulator_factory(created),
             metadata=replace_metadata,
+            device=torch.device("cpu"),
+            image_size=2,
+        )
+
+    assert created == []
+
+
+def test_writer_rejects_legacy_offset_camera_hdf5_before_rendering(tmp_path):
+    output = tmp_path / "legacy_features.hdf5"
+    legacy_metadata = dict(EXPECTED_METADATA)
+    legacy_metadata.pop("camera_geometry")
+    legacy_metadata["sensor_height"] = 1.25
+    legacy_metadata["preprocess_version"] = "etpnav_rae_navigation_cls_v1"
+    with h5py.File(output, "w") as handle:
+        _write_metadata(handle, legacy_metadata)
+        handle.create_dataset(
+            "scan_a_vp_0",
+            data=np.ones((36, 768), dtype=np.float32),
+        )
+    created = []
+
+    with pytest.raises(ValueError, match=r"metadata mismatch.*sensor_height"):
+        write_feature_file(
+            output,
+            _records(1),
+            FakeEncoder(),
+            _simulator_factory(created),
+            metadata=EXPECTED_METADATA,
             device=torch.device("cpu"),
             image_size=2,
         )
@@ -779,7 +858,7 @@ def test_cli_defaults_and_key_parameters():
     assert extract.max_viewpoints == -1
     assert extract.image_size == 224
     assert extract.vfov == 60
-    assert extract.sensor_height == 1.25
+    assert not hasattr(extract, "sensor_height")
     assert validate.features == DEFAULT_OUTPUT_FILE
     assert validate.connectivity == DEFAULT_CONNECTIVITY_DIR
     assert validate.clip_features == DEFAULT_CLIP_FEATURES
