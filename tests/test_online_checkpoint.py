@@ -111,7 +111,7 @@ def test_server_r2r_sft_job_uses_requested_batch_and_schedule_defaults():
     ).read_text(encoding="utf-8")
 
     required_tokens = (
-        "SFT_ITERS=${ETPR1_R2R_SFT_ITERS:-15000}",
+        "SFT_ITERS=${ETPR1_R2R_SFT_ITERS:-2000}",
         "GRADIENT_ACCUMULATION_STEPS=${ETPR1_R2R_SFT_GRADIENT_ACCUMULATION_STEPS:-1}",
         "--nproc_per_node=2",
         "GPU_NUMBERS 2",

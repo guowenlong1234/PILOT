@@ -8,14 +8,15 @@ source "${SCRIPT_DIR}/checkpoint_order.sh"
 CONFIG_FILE=${ETPR1_R2R_EVAL_CONFIG_FILE:-${REPO_ROOT}/run_r2r/iter_train_rae_dino.yaml}
 EXP_NAME=${ETPR1_R2R_EVAL_EXP_NAME:-rae_dinov2_etpnav_cls_768_r2r_sft_all_ckpts_val_unseen}
 TRAIN_ROOT=${ETPR1_R2R_EVAL_TRAIN_ROOT:-data/logs/rae_dinov2_etpnav_cls_768/r2r_sft_formal}
-EVAL_ROOT=${ETPR1_R2R_EVAL_OUTPUT_ROOT:-${TRAIN_ROOT}/eval_all_checkpoints_val_unseen}
 CONFIG_CKPT_DIR=$(checkpoint_watch_dir_from_config "$CONFIG_FILE")
 CKPT_DIR=${ETPR1_R2R_EVAL_CKPT_DIR:-${CONFIG_CKPT_DIR:-${TRAIN_ROOT}/checkpoints/rae_dinov2_etpnav_cls_768_r2r_sft}}
+TRAIN_OUTPUT_ROOT=$(dirname -- "$(dirname -- "$CKPT_DIR")")
+EVAL_ROOT=${ETPR1_R2R_EVAL_OUTPUT_ROOT:-${TRAIN_OUTPUT_ROOT}/eval_all_checkpoints_val_unseen}
 RESULT_DIR=${EVAL_ROOT}/results/${EXP_NAME}/eval_results
 PID_DIR=${EVAL_ROOT}/pids
 PYTHON_BIN=${ETPR1_SERVER_PYTHON:-/home/gwl/miniconda3/envs/etpnav_unified/bin/python}
 RUNTIME_ROOT=${ETPR1_SERVER_RUNTIME_ROOT:-${REPO_ROOT}/.runtime/server_sft}
-PRETRAIN_PATH=${ETPR1_R2R_EVAL_PRETRAIN_PATH:-pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768/best/model_best_step_452500.pt}
+PRETRAIN_PATH=${ETPR1_R2R_EVAL_PRETRAIN_PATH:-pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768_raw_cls_20260810/best/model_best_step_220000.pt}
 NUM_WORKERS=${ETPR1_R2R_EVAL_WORKERS:-2}
 NUM_ENVIRONMENTS=${ETPR1_R2R_EVAL_NUM_ENVIRONMENTS:-8}
 CHECKPOINT_ORDER=${ETPR1_R2R_EVAL_CHECKPOINT_ORDER:-$(checkpoint_order_from_config "$CONFIG_FILE")}

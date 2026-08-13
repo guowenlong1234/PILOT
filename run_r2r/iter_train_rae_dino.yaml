@@ -51,7 +51,7 @@ EVAL:
 IL:
   # The destination may be a local directory or user@host:/absolute/directory.
   # The transfer is detached and publishes each checkpoint by atomic rename.
-  checkpoint_sync_enabled: False
+  checkpoint_sync_enabled: True
   # Training server -> evaluation host over the dedicated 2.5 GbE link.
   # For the reverse direction use gwl@10.10.10.1:/absolute/directory after
   # configuring the evaluation host's SSH key for the training server.
