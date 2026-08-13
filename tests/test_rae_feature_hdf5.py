@@ -423,7 +423,11 @@ def test_writer_rejects_legacy_offset_camera_hdf5_before_rendering(tmp_path):
         )
     created = []
 
-    with pytest.raises(ValueError, match=r"metadata mismatch.*sensor_height"):
+    legacy_geometry_keys = r"(?:sensor_height|camera_geometry|preprocess_version)"
+    with pytest.raises(
+        ValueError,
+        match=rf"metadata mismatch.*{legacy_geometry_keys}",
+    ):
         write_feature_file(
             output,
             _records(1),
