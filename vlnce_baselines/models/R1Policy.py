@@ -35,21 +35,44 @@ from vlnce_baselines.models.utils import (
 import math
 
 
+def _ordered_panoramic_sensor_keys(
+    observations,
+    sensor_prefix,
+    num_views=12,
+):
+    """Return panoramic sensor keys in numeric heading order."""
+    ordered = []
+    if sensor_prefix in observations:
+        ordered.append((0, sensor_prefix))
+
+    rotated_prefix = f"{sensor_prefix}_"
+    for key in observations:
+        if not key.startswith(rotated_prefix):
+            continue
+        suffix = key[len(rotated_prefix):]
+        if suffix.isdigit():
+            ordered.append((int(suffix), key))
+
+    ordered.sort(key=lambda item: item[0])
+    keys = [key for _, key in ordered]
+    if len(keys) != num_views:
+        raise ValueError(
+            f"Expected {num_views} panoramic {sensor_prefix} sensors, "
+            f"got {len(keys)}: {keys}"
+        )
+    return keys
+
+
 def pack_panoramic_observations(observations, num_views=12):
     """Pack per-sensor tensors into the legacy clockwise B*V layout."""
-    depth_keys = [
-        key
-        for key in observations
-        if key == "depth" or key.startswith("depth_")
-    ]
-    if len(depth_keys) != num_views:
-        raise ValueError(
-            f"Expected {num_views} panoramic depth sensors, "
-            f"got {len(depth_keys)}: {depth_keys}"
-        )
+    depth_keys = _ordered_panoramic_sensor_keys(
+        observations,
+        "depth",
+        num_views=num_views,
+    )
 
-    # The legacy loop placed the base view first, then reversed all rotated
-    # views. Building the stack in that order removes B*V indexed GPU copies.
+    # Numeric heading order is counter-clockwise in Habitat. The waypoint
+    # predictor expects the base view first followed by clockwise views.
     ordered_depth_keys = [depth_keys[0], *reversed(depth_keys[1:])]
     ordered_rgb_keys = [
         key.replace("depth", "rgb", 1) for key in ordered_depth_keys

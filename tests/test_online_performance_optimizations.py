@@ -50,6 +50,40 @@ def test_pack_panoramic_observations_matches_legacy_view_order():
     )
 
 
+def test_pack_panoramic_observations_sorts_shuffled_sensor_keys_numerically():
+    observations = {}
+    shuffled_headings = [
+        120, 0, 330, 60, 300, 90, 270, 150, 240, 180, 210, 30,
+    ]
+    for heading in shuffled_headings:
+        depth_key = "depth" if heading == 0 else f"depth_{heading}"
+        rgb_key = "rgb" if heading == 0 else f"rgb_{heading}"
+        observations[depth_key] = _sensor(heading, batch_size=1)
+        observations[rgb_key] = _sensor(heading + 1000, batch_size=1)
+
+    depth, rgb = pack_panoramic_observations(observations)
+
+    expected_headings = torch.tensor(
+        [0, 330, 300, 270, 240, 210, 180, 150, 120, 90, 60, 30],
+        dtype=torch.float32,
+    )
+    torch.testing.assert_close(depth[:, 0, 0, 0], expected_headings)
+    torch.testing.assert_close(rgb[:, 0, 0, 0], expected_headings + 1000)
+
+
+def test_pack_panoramic_observations_rejects_incomplete_panorama():
+    observations = {
+        "rgb": _sensor(100),
+        "depth": _sensor(0),
+    }
+    for heading in range(30, 330, 30):
+        observations[f"rgb_{heading}"] = _sensor(100 + heading)
+        observations[f"depth_{heading}"] = _sensor(heading)
+
+    with pytest.raises(ValueError, match="Expected 12 panoramic depth sensors"):
+        pack_panoramic_observations(observations)
+
+
 def test_graph_map_keeps_goal_distances_aligned_with_real_positions():
     graph = GraphMap(
         has_real_pos=True,
