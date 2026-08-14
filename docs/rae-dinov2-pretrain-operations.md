@@ -95,10 +95,25 @@ pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768/supervisor/
 
 训练本体仍是原来的 `torchrun` 命令，只由容器内的 `tmux` 保持运行。SSH 断开不会结束训练。`status` 同时显示 tmux 会话、GPU、磁盘、最近 checkpoint 和日志末尾。
 
+### 第 250,000 步来源实验的双 worker 恢复
+
+`scripts/manage_rae_pretrain_resume_250k_eval.sh` 保持训练参数
+`n_workers=2`。这里的数值是“每个任务两个”：MLM、SAP 会常驻共四个训练
+worker。为避免再次出现 CPU 内存溢出，这条恢复路径固定同时使用：
+
+- 验证 `val_n_workers=0`，验证时不再额外创建两个进程；
+- 标注采用 JSONL 行偏移索引和按需解析，不把 321 万条记录展开成 Python 字典；
+- worker 使用 `spawn`，不继承已经初始化 CUDA 的训练主进程；
+- 每个 worker 的 RGB+深度特征缓存上限为 256 MiB，按最近最少使用顺序淘汰；
+- 每个 worker 只预取 1 个 batch，`pin_mem=false`；
+- 不跨 epoch 保留 worker；单个 epoch 内 worker 仍持续工作，epoch 边界正常重启。
+
+这些设置是一个整体。只限制特征缓存仍会保留巨大的 Python 标注对象复制，不能单独解决本次内存问题。
+
 ## 恢复边界
 
 - 恢复时强制核对单卡 batch、梯度累积、GPU 数量和模型结构配置；不一致会直接拒绝，避免接错实验。
-- 不要把 `n_workers` 改回 1，也不要重新开启 `pin_mem`。旧配置会在 CUDA、HDF5 和大模型初始化后，以 Linux 默认 `fork` 为 MLM、SAP 各创建一个 worker；它曾先后触发 worker 堆内存错误、worker 段错误和 rank 0 段错误。
+- 不要恢复旧的 eager JSONL + Linux `fork` + 无上限特征缓存多进程路径，也不要重新开启 `pin_mem`。这条旧路径曾先后触发 worker 堆内存错误、worker 段错误、rank 0 段错误和宿主机 OOM。需要两个 worker 时必须同时保留上一节列出的惰性标注、`spawn`、缓存上限和独立验证 worker 设置。
 - 当前 `thread_prefetch=true` 使用同一进程内的一个后台线程重叠 CPU batch 准备和 GPU 计算，不经过多进程队列、共享内存或锁页内存线程。
 - `num_train_steps` 可以在恢复时增加，因此允许延长训练。
 - 当前每 2,500 步生成一个恢复点。突然断电最多会丢失最近一个保存间隔内的进度。
@@ -125,3 +140,11 @@ pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768/supervisor/
 - 同步单进程路径约 1.48 秒/步，后台线程预取约 1.27 秒/步，短测提速约 14%。
 - 修复后完整测试为 `290 passed, 3 warnings`。
 - 压力测试日志位于测评机 `data/logs/dataloader_stress/`，真实模型测速日志位于 `data/logs/thread_prefetch_benchmark/`。
+
+2026-08-14 完成双 worker 有界内存路径验证：
+
+- 真实 3,210,737 条标注只保留 25,685,896 字节行偏移索引；检查 R2R 训练集首、中、尾三条样本时，惰性读取与旧 eager 读取的原始记录和完整 `get_input()` 输出逐项完全一致。
+- MLM、SAP 各两个 `spawn` worker，在主进程先初始化 CUDA 后完成 2,000 个真实 micro-batch；退出码为 0，没有 worker 异常或 GPU 计算。
+- 压测第 500--2,000 个 batch 期间容器内存稳定在约 22.82--22.88 GB。该数值包含此前多轮测试留下的可回收文件页缓存；主进程私有内存约 1.36 GiB，四个 worker 各约 1.38--1.43 GiB。
+- 更长的 5,000 batch 测试同样在约 12.45 GB 形成平台；它发现并排除了 PyTorch 跨 epoch 常驻 worker 的异常退出路径，最终配置关闭了该选项并完成干净退出复测。
+- 内存修复、恢复参数、线程预取和分布式反向的针对性测试为 `44 passed`；未启动或恢复正式预训练。

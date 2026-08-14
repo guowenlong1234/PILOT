@@ -3,6 +3,7 @@ import sys
 import json
 import argparse
 import time
+import atexit
 from collections import defaultdict
 from types import SimpleNamespace
 from tqdm import tqdm
@@ -250,6 +251,8 @@ def main(opts):
         angle_feat_size=model_config.angle_feat_size,
         max_txt_len=opts.max_txt_len, in_memory=True,
         val_sample_num=None,
+        feature_cache_size_mb=opts.feature_cache_size_mb,
+        lazy_load_annotations=opts.lazy_annotations,
     )
     val_r2r_nav_db = R2RTextPathData(
         data_cfg.val_unseen_r2r_traj_files, data_cfg.img_ft_file, data_cfg.dep_ft_file,
@@ -263,6 +266,8 @@ def main(opts):
         max_txt_len=opts.max_txt_len, in_memory=True,
         val_sample_num=opts.val_sample_num,
         val_sample_seed=opts.seed,
+        feature_cache_size_mb=opts.val_feature_cache_size_mb,
+        lazy_load_annotations=opts.lazy_annotations,
     )
     val_rxr_nav_db = R2RTextPathData(
         data_cfg.val_unseen_rxr_traj_files, data_cfg.img_ft_file, data_cfg.dep_ft_file,
@@ -276,6 +281,8 @@ def main(opts):
         max_txt_len=opts.max_txt_len, in_memory=True,
         val_sample_num=opts.val_sample_num,
         val_sample_seed=opts.seed,
+        feature_cache_size_mb=opts.val_feature_cache_size_mb,
+        lazy_load_annotations=opts.lazy_annotations,
     )
     
     # Build data loaders
@@ -292,6 +299,15 @@ def main(opts):
     use_thread_prefetch = getattr(opts, "thread_prefetch", False)
     if use_thread_prefetch and opts.n_workers != 0:
         raise ValueError("thread_prefetch requires n_workers=0")
+    if opts.n_workers < 0 or opts.val_n_workers < 0:
+        raise ValueError("DataLoader worker counts cannot be negative")
+    if opts.prefetch_factor < 1:
+        raise ValueError("prefetch_factor must be at least 1")
+    if (
+        opts.feature_cache_size_mb < 0
+        or opts.val_feature_cache_size_mb < 0
+    ):
+        raise ValueError("feature cache limits cannot be negative")
 
     meta_loader = MetaLoader(
         train_dataloaders,
@@ -309,6 +325,8 @@ def main(opts):
         meta_loader = ThreadPrefetchLoader(meta_loader, device)
     else:
         meta_loader = PrefetchLoader(meta_loader, device)
+    close_meta_loader = meta_loader.close
+    atexit.register(close_meta_loader)
 
     # Prepare optimizer
     optimizer = build_optimizer(model, opts)
@@ -386,6 +404,18 @@ def main(opts):
         global_microbatch_size * opts.gradient_accumulation_steps,
     )
     LOGGER.info("  Num steps = %d", opts.num_train_steps)
+    LOGGER.info(
+        "  Data workers = %d per training task, %d for validation",
+        opts.n_workers,
+        opts.val_n_workers,
+    )
+    if opts.n_workers > 0:
+        LOGGER.info(
+            "  Worker start = %s, prefetch factor = %d, feature cache = %.1f MiB/worker",
+            opts.dataloader_start_method,
+            opts.prefetch_factor,
+            opts.feature_cache_size_mb,
+        )
 
     # to compute training statistics
     task2loss = {task: RunningMeter(f'loss/{task}')
@@ -558,6 +588,8 @@ def main(opts):
                 )
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
+    close_meta_loader()
+    atexit.unregister(close_meta_loader)
     
 
 def validate(model, val_dataloaders, setname=''):

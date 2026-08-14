@@ -68,8 +68,41 @@ fi
 if [ -n "${ETPR1_PRETRAIN_N_WORKERS:-}" ]; then
     pretrain_args+=(--n_workers "$ETPR1_PRETRAIN_N_WORKERS")
 fi
+if [ -n "${ETPR1_PRETRAIN_VAL_N_WORKERS:-}" ]; then
+    pretrain_args+=(--val_n_workers "$ETPR1_PRETRAIN_VAL_N_WORKERS")
+fi
+if [ -n "${ETPR1_PRETRAIN_DATALOADER_START_METHOD:-}" ]; then
+    pretrain_args+=(
+        --dataloader_start_method
+        "$ETPR1_PRETRAIN_DATALOADER_START_METHOD"
+    )
+fi
+if [ -n "${ETPR1_PRETRAIN_PREFETCH_FACTOR:-}" ]; then
+    pretrain_args+=(--prefetch_factor "$ETPR1_PRETRAIN_PREFETCH_FACTOR")
+fi
+if [ -n "${ETPR1_PRETRAIN_FEATURE_CACHE_SIZE_MB:-}" ]; then
+    pretrain_args+=(
+        --feature_cache_size_mb
+        "$ETPR1_PRETRAIN_FEATURE_CACHE_SIZE_MB"
+    )
+fi
+if [ -n "${ETPR1_PRETRAIN_VAL_FEATURE_CACHE_SIZE_MB:-}" ]; then
+    pretrain_args+=(
+        --val_feature_cache_size_mb
+        "$ETPR1_PRETRAIN_VAL_FEATURE_CACHE_SIZE_MB"
+    )
+fi
 if [ "${ETPR1_PRETRAIN_DISABLE_THREAD_PREFETCH:-0}" = 1 ]; then
-    pretrain_args+=(--no_thread_prefetch --pin_mem)
+    pretrain_args+=(--no_thread_prefetch)
+fi
+if [ "${ETPR1_PRETRAIN_PIN_MEM:-0}" = 1 ] && \
+    [ "${ETPR1_PRETRAIN_DISABLE_PIN_MEM:-0}" = 1 ]; then
+    echo "Cannot enable and disable pretrain pin memory together" >&2
+    exit 2
+elif [ "${ETPR1_PRETRAIN_PIN_MEM:-0}" = 1 ]; then
+    pretrain_args+=(--pin_mem)
+elif [ "${ETPR1_PRETRAIN_DISABLE_PIN_MEM:-0}" = 1 ]; then
+    pretrain_args+=(--no_pin_mem)
 fi
 if [ "${ETPR1_PRETRAIN_ALLOW_WORLD_SIZE_CHANGE:-0}" = 1 ]; then
     pretrain_args+=(--allow_world_size_change)
@@ -82,7 +115,14 @@ fi
     echo "train_batch_size_override=${ETPR1_PRETRAIN_TRAIN_BATCH_SIZE:-default}"
     echo "gradient_accumulation_override=${ETPR1_PRETRAIN_GRADIENT_ACCUMULATION_STEPS:-default}"
     echo "n_workers_override=${ETPR1_PRETRAIN_N_WORKERS:-default}"
+    echo "val_n_workers_override=${ETPR1_PRETRAIN_VAL_N_WORKERS:-default}"
+    echo "dataloader_start_method=${ETPR1_PRETRAIN_DATALOADER_START_METHOD:-default}"
+    echo "prefetch_factor=${ETPR1_PRETRAIN_PREFETCH_FACTOR:-default}"
+    echo "feature_cache_size_mb=${ETPR1_PRETRAIN_FEATURE_CACHE_SIZE_MB:-default}"
+    echo "val_feature_cache_size_mb=${ETPR1_PRETRAIN_VAL_FEATURE_CACHE_SIZE_MB:-default}"
     echo "disable_thread_prefetch=${ETPR1_PRETRAIN_DISABLE_THREAD_PREFETCH:-0}"
+    echo "pin_mem=${ETPR1_PRETRAIN_PIN_MEM:-0}"
+    echo "disable_pin_mem=${ETPR1_PRETRAIN_DISABLE_PIN_MEM:-0}"
     echo "allow_world_size_change=${ETPR1_PRETRAIN_ALLOW_WORLD_SIZE_CHANGE:-0}"
     echo "allow_model_config_path_change=${ETPR1_PRETRAIN_ALLOW_MODEL_CONFIG_PATH_CHANGE:-0}"
 } >>"$LOG_FILE"

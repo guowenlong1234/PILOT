@@ -43,9 +43,39 @@ def read_process_status(pid):
     except FileNotFoundError:
         return values
     for line in lines:
-        if line.startswith(("VmRSS:", "VmSize:", "Threads:")):
+        if line.startswith(("VmRSS:", "VmHWM:", "VmSize:", "Threads:")):
             key, value = line.split(":", 1)
             values[key] = value.strip()
+    smaps_path = Path(f"/proc/{pid}/smaps_rollup")
+    try:
+        smaps_lines = smaps_path.read_text(encoding="utf-8").splitlines()
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        smaps_lines = ()
+    for line in smaps_lines:
+        if line.startswith(("Pss:", "Private_Dirty:", "Shared_Clean:")):
+            key, value = line.split(":", 1)
+            values[key] = value.strip()
+    return values
+
+
+def read_cgroup_memory():
+    values = {}
+    for key, candidates in {
+        "current": (
+            "/sys/fs/cgroup/memory.current",
+            "/sys/fs/cgroup/memory/memory.usage_in_bytes",
+        ),
+        "peak": (
+            "/sys/fs/cgroup/memory.peak",
+            "/sys/fs/cgroup/memory/memory.max_usage_in_bytes",
+        ),
+    }.items():
+        for candidate in candidates:
+            try:
+                values[key] = int(Path(candidate).read_text().strip())
+            except (FileNotFoundError, PermissionError, ValueError):
+                continue
+            break
     return values
 
 
@@ -58,7 +88,13 @@ def dataloader_worker_pids(meta_loader):
     return sorted(set(pids))
 
 
-def build_nav_db(config, model_config):
+def build_nav_db(
+    config,
+    model_config,
+    *,
+    feature_cache_size_mb=256.0,
+    lazy_annotations=True,
+):
     data_config = config["train_datasets"]["R2R"]
     return R2RTextPathData(
         data_config["train_traj_files"],
@@ -75,6 +111,8 @@ def build_nav_db(config, model_config):
         max_txt_len=config["max_txt_len"],
         in_memory=True,
         val_sample_num=None,
+        feature_cache_size_mb=feature_cache_size_mb,
+        lazy_load_annotations=lazy_annotations,
     )
 
 
@@ -86,6 +124,7 @@ def build_meta_loader(
     workers,
     pin_memory,
     start_method,
+    prefetch_factor,
     accum_steps,
     ratio_dict,
 ):
@@ -106,6 +145,8 @@ def build_meta_loader(
         }
         if workers:
             loader_kwargs["multiprocessing_context"] = start_method
+            loader_kwargs["prefetch_factor"] = prefetch_factor
+            loader_kwargs["persistent_workers"] = False
         loader = DataLoader(**loader_kwargs)
         loaders[task] = (loader, None, lambda _epoch: None)
     return MetaLoader(
@@ -148,7 +189,7 @@ def build_parser():
         default=100000,
         help="Number of DataLoader batches; eight batches equal one formal update.",
     )
-    parser.add_argument("--workers", type=int, choices=(0, 1), default=1)
+    parser.add_argument("--workers", type=int, choices=(0, 1, 2), default=1)
     parser.add_argument(
         "--pin-memory",
         action=argparse.BooleanOptionalAction,
@@ -158,6 +199,13 @@ def build_parser():
         "--start-method",
         choices=("fork", "spawn", "forkserver"),
         default="fork",
+    )
+    parser.add_argument("--prefetch-factor", type=int, default=1)
+    parser.add_argument("--feature-cache-size-mb", type=float, default=256.0)
+    parser.add_argument(
+        "--lazy-annotations",
+        action=argparse.BooleanOptionalAction,
+        default=True,
     )
     parser.add_argument("--accum-steps", type=int, default=8)
     parser.add_argument("--report-every", type=int, default=1000)
@@ -186,6 +234,10 @@ def validate_args(args):
         raise ValueError("--micro-batches must be positive")
     if args.report_every <= 0:
         raise ValueError("--report-every must be positive")
+    if args.prefetch_factor <= 0:
+        raise ValueError("--prefetch-factor must be positive")
+    if args.feature_cache_size_mb < 0:
+        raise ValueError("--feature-cache-size-mb cannot be negative")
 
 
 def main(argv=None):
@@ -201,7 +253,12 @@ def main(argv=None):
     config, model_config = load_configs(args.config, args.model_config)
     data_config = config["train_datasets"]["R2R"]
     tokenizer = AutoTokenizer.from_pretrained("./bert_config/xlm-roberta-base")
-    nav_db = build_nav_db(config, model_config)
+    nav_db = build_nav_db(
+        config,
+        model_config,
+        feature_cache_size_mb=args.feature_cache_size_mb,
+        lazy_annotations=args.lazy_annotations,
+    )
 
     device = torch.device("cpu")
     if args.cuda_before_workers:
@@ -216,6 +273,7 @@ def main(argv=None):
         workers=args.workers,
         pin_memory=args.pin_memory,
         start_method=args.start_method,
+        prefetch_factor=args.prefetch_factor,
         accum_steps=args.accum_steps,
         ratio_dict=data_config["mix_ratio"],
     )
@@ -232,8 +290,16 @@ def main(argv=None):
                 "workers": args.workers,
                 "pin_memory": args.pin_memory,
                 "start_method": args.start_method,
+                "prefetch_factor": args.prefetch_factor,
+                "feature_cache_size_mb": args.feature_cache_size_mb,
+                "lazy_annotations": args.lazy_annotations,
+                "annotation_items": len(nav_db),
+                "annotation_index_bytes": getattr(
+                    nav_db.data, "index_bytes", None
+                ),
                 "cuda_before_workers": args.cuda_before_workers,
                 "cuda_transfer": args.cuda_transfer,
+                "cgroup_memory": read_cgroup_memory(),
                 "main_status": read_process_status(os.getpid()),
                 "worker_status": {
                     str(pid): read_process_status(pid) for pid in worker_pids
@@ -245,34 +311,38 @@ def main(argv=None):
     )
 
     checksum = 0
-    for index, (task, batch) in enumerate(meta_loader, start=1):
-        if args.cuda_transfer:
-            batch = move_to_cuda(batch, device)
-            torch.cuda.synchronize(device)
-        checksum += batch_checksum(task, batch)
-        if index % args.report_every == 0 or index == args.micro_batches:
-            elapsed = time.monotonic() - started_at
-            print(
-                json.dumps(
-                    {
-                        "event": "progress",
-                        "micro_batches": index,
-                        "formal_steps": index / args.accum_steps,
-                        "elapsed_seconds": round(elapsed, 3),
-                        "batches_per_second": round(index / elapsed, 3),
-                        "checksum": checksum,
-                        "main_status": read_process_status(os.getpid()),
-                        "worker_status": {
-                            str(pid): read_process_status(pid)
-                            for pid in worker_pids
+    try:
+        for index, (task, batch) in enumerate(meta_loader, start=1):
+            if args.cuda_transfer:
+                batch = move_to_cuda(batch, device)
+                torch.cuda.synchronize(device)
+            checksum += batch_checksum(task, batch)
+            if index % args.report_every == 0 or index == args.micro_batches:
+                elapsed = time.monotonic() - started_at
+                print(
+                    json.dumps(
+                        {
+                            "event": "progress",
+                            "micro_batches": index,
+                            "formal_steps": index / args.accum_steps,
+                            "elapsed_seconds": round(elapsed, 3),
+                            "batches_per_second": round(index / elapsed, 3),
+                            "checksum": checksum,
+                            "cgroup_memory": read_cgroup_memory(),
+                            "main_status": read_process_status(os.getpid()),
+                            "worker_status": {
+                                str(pid): read_process_status(pid)
+                                for pid in worker_pids
+                            },
                         },
-                    },
-                    sort_keys=True,
-                ),
-                flush=True,
-            )
-        if index >= args.micro_batches:
-            break
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+            if index >= args.micro_batches:
+                break
+    finally:
+        meta_loader.close()
 
     print(
         json.dumps(

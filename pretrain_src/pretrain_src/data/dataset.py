@@ -7,6 +7,11 @@ import jsonlines
 import numpy as np
 import h5py
 import math
+import mmap
+
+from array import array
+from bisect import bisect_right
+from collections import OrderedDict
 
 from .common import load_nav_graphs
 from .common import get_angle_fts, get_view_rel_angles
@@ -16,6 +21,195 @@ from .common import softmax
 MAX_DIST = 30   # normalize
 MAX_STEP = 10   # normalize
 TRAIN_MAX_STEP = 20
+
+
+class IndexedJsonlSequence:
+    """Random-access JSONL sequence without expanding every row in memory.
+
+    Only compact byte offsets are kept in Python memory.  Each process opens
+    read-only mmap handles lazily, so DataLoader ``spawn`` workers neither copy
+    millions of decoded dictionaries nor inherit live file handles.
+    """
+
+    def __init__(self, paths, selected_indices=None):
+        self.paths = tuple(os.path.abspath(os.fspath(path)) for path in paths)
+        self._offsets = []
+        self._file_sizes = []
+        self._cumulative_sizes = [0]
+
+        for path in self.paths:
+            offsets = array('Q')
+            next_offset = 0
+            with open(path, 'rb') as handle:
+                for line in handle:
+                    offsets.append(next_offset)
+                    next_offset += len(line)
+            self._offsets.append(offsets)
+            self._file_sizes.append(next_offset)
+            self._cumulative_sizes.append(
+                self._cumulative_sizes[-1] + len(offsets)
+            )
+
+        self._selected_indices = None
+        if selected_indices is not None:
+            self.select(selected_indices)
+
+        self._handles = {}
+        self._mmaps = {}
+
+    def __len__(self):
+        if self._selected_indices is not None:
+            return len(self._selected_indices)
+        return self._cumulative_sizes[-1]
+
+    def _normalize_index(self, index):
+        index = int(index)
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError('JSONL index out of range')
+        if self._selected_indices is not None:
+            index = self._selected_indices[index]
+        return index
+
+    def _get_mmap(self, file_index):
+        mapped = self._mmaps.get(file_index)
+        if mapped is None:
+            handle = open(self.paths[file_index], 'rb')
+            try:
+                mapped = mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ)
+            except BaseException:
+                handle.close()
+                raise
+            self._handles[file_index] = handle
+            self._mmaps[file_index] = mapped
+        return mapped
+
+    def select(self, selected_indices):
+        selected_values = [int(index) for index in selected_indices]
+        total = self._cumulative_sizes[-1]
+        if any(index < 0 or index >= total for index in selected_values):
+            raise IndexError('selected JSONL index is out of range')
+        self._selected_indices = array('Q', selected_values)
+        return self
+
+    def __getitem__(self, index):
+        index = self._normalize_index(index)
+        file_index = bisect_right(self._cumulative_sizes, index) - 1
+        local_index = index - self._cumulative_sizes[file_index]
+        offsets = self._offsets[file_index]
+        start = offsets[local_index]
+        if local_index + 1 < len(offsets):
+            end = offsets[local_index + 1]
+        else:
+            end = self._file_sizes[file_index]
+        return json.loads(self._get_mmap(file_index)[start:end])
+
+    @property
+    def index_bytes(self):
+        selected_bytes = (
+            0
+            if self._selected_indices is None
+            else self._selected_indices.itemsize * len(self._selected_indices)
+        )
+        return selected_bytes + sum(
+            offsets.itemsize * len(offsets) for offsets in self._offsets
+        )
+
+    def close(self):
+        for mapped in self._mmaps.values():
+            mapped.close()
+        for handle in self._handles.values():
+            handle.close()
+        self._mmaps = {}
+        self._handles = {}
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state['_handles'] = {}
+        state['_mmaps'] = {}
+        return state
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+def _feature_payload_nbytes(value):
+    """Count array payload bytes stored by the feature cache."""
+    if isinstance(value, np.ndarray):
+        return int(value.nbytes)
+    if isinstance(value, dict):
+        return sum(_feature_payload_nbytes(item) for item in value.values())
+    if isinstance(value, (tuple, list)):
+        return sum(_feature_payload_nbytes(item) for item in value)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return len(value)
+    return 0
+
+
+class ByteLRUCache:
+    """Least-recently-used cache bounded by NumPy payload bytes."""
+
+    def __init__(self, max_bytes=None):
+        if max_bytes is not None and int(max_bytes) < 0:
+            raise ValueError('feature cache max_bytes cannot be negative')
+        self.max_bytes = None if max_bytes is None else int(max_bytes)
+        self.current_bytes = 0
+        self.hits = 0
+        self.misses = 0
+        self.evictions = 0
+        self.skipped = 0
+        self._items = OrderedDict()
+
+    def get(self, key):
+        try:
+            value, size = self._items.pop(key)
+        except KeyError:
+            self.misses += 1
+            return None
+        self._items[key] = (value, size)
+        self.hits += 1
+        return value
+
+    def put(self, key, value):
+        size = _feature_payload_nbytes(value)
+        previous = self._items.pop(key, None)
+        if previous is not None:
+            self.current_bytes -= previous[1]
+
+        if self.max_bytes is not None and size > self.max_bytes:
+            self.skipped += 1
+            return False
+
+        while (
+            self.max_bytes is not None
+            and self.current_bytes + size > self.max_bytes
+            and self._items
+        ):
+            _, (_, evicted_size) = self._items.popitem(last=False)
+            self.current_bytes -= evicted_size
+            self.evictions += 1
+
+        self._items[key] = (value, size)
+        self.current_bytes += size
+        return True
+
+    def __len__(self):
+        return len(self._items)
+
+    def info(self):
+        return {
+            'entries': len(self),
+            'current_bytes': self.current_bytes,
+            'max_bytes': self.max_bytes,
+            'hits': self.hits,
+            'misses': self.misses,
+            'evictions': self.evictions,
+            'skipped': self.skipped,
+        }
 
 RAE_DINO_HDF5_METADATA = {
     'feature_extractor': 'rae_dinov2_with_registers_base_raw_cls',
@@ -55,6 +249,7 @@ class ReverieTextPathData(object):
         max_txt_len=100, in_memory=True, act_visited_node=False,
         val_sample_num=None, val_sample_seed=None,
         raw_image_feat_size=None, rgb_encoder_type='clip',
+        feature_cache_size_mb=None, lazy_load_annotations=True,
     ):
         self.img_ft_file = img_ft_file
         self.dep_ft_file = dep_ft_file
@@ -85,8 +280,12 @@ class ReverieTextPathData(object):
 
         self.in_memory = in_memory
         if self.in_memory:
-            self._feature_store = {}
-            self._feature_store_depth = {}
+            cache_max_bytes = (
+                None
+                if feature_cache_size_mb is None
+                else int(float(feature_cache_size_mb) * 1024 * 1024)
+            )
+            self._feature_store = ByteLRUCache(cache_max_bytes)
 
         self.scanvp_cands = json.load(open(scanvp_cands_file))
 
@@ -95,19 +294,27 @@ class ReverieTextPathData(object):
         self.all_point_rel_angles = [get_view_rel_angles(baseViewId=i) for i in range(36)] 
         self.all_point_angle_fts = [get_angle_fts(x[:, 0], x[:, 1], self.angle_feat_size) for x in self.all_point_rel_angles] 
 
-        self.data = []
-        
-        for anno_file in anno_files:
-            with jsonlines.open(anno_file, 'r') as f:
-                for item in f:
-                    self.data.append(item)
+        if lazy_load_annotations:
+            indexed_data = IndexedJsonlSequence(anno_files)
+            if val_sample_num:
+                # cannot evaluate all the samples as it takes too much time
+                sel_idxs = _validation_sample_indices(
+                    len(indexed_data), val_sample_num, seed=val_sample_seed
+                )
+                indexed_data.select(sel_idxs)
+            self.data = indexed_data
+        else:
+            self.data = []
+            for anno_file in anno_files:
+                with jsonlines.open(anno_file, 'r') as f:
+                    for item in f:
+                        self.data.append(item)
 
-        if val_sample_num:
-            # cannot evaluate all the samples as it takes too much time
-            sel_idxs = _validation_sample_indices(
-                len(self.data), val_sample_num, seed=val_sample_seed
-            )
-            self.data = [self.data[sidx] for sidx in sel_idxs]
+            if val_sample_num:
+                sel_idxs = _validation_sample_indices(
+                    len(self.data), val_sample_num, seed=val_sample_seed
+                )
+                self.data = [self.data[sidx] for sidx in sel_idxs]
 
     def _validate_rae_dino_metadata(self):
         with h5py.File(self.img_ft_file, 'r') as handle:
@@ -142,27 +349,47 @@ class ReverieTextPathData(object):
     def __len__(self):
         return len(self.data)
 
+    def feature_cache_info(self):
+        if not self.in_memory:
+            return {
+                'entries': 0, 'current_bytes': 0, 'max_bytes': 0,
+                'hits': 0, 'misses': 0, 'evictions': 0, 'skipped': 0,
+            }
+        return self._feature_store.info()
+
+    def close(self):
+        data = getattr(self, 'data', None)
+        if hasattr(data, 'close'):
+            data.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def get_scanvp_feature(self, scan, viewpoint):
         key = '%s_%s' % (scan, viewpoint)
-        if self.in_memory and key in self._feature_store:
-            view_fts, obj_fts, obj_attrs = self._feature_store[key]
+        cached = self._feature_store.get(key) if self.in_memory else None
+        if cached is not None:
+            view_fts, obj_fts, obj_attrs = cached
         else:
-            with h5py.File(self.img_ft_file, 'r') as f:
-                view_fts = f[key][...].astype(np.float32)
+            with h5py.File(self.img_ft_file, 'r') as img_file:
+                view_fts = img_file[key][...].astype(np.float32)
             self._validate_view_features(key, view_fts)
 
             obj_attrs = {}
             obj_fts = np.zeros((0, self.obj_feat_size+self.obj_prob_size), dtype=np.float32)
             if self.obj_ft_file is not None:
-                with h5py.File(self.obj_ft_file, 'r') as f:
-                    if key in f:
-                        obj_fts = f[key][...].astype(np.float32)
+                with h5py.File(self.obj_ft_file, 'r') as obj_file:
+                    if key in obj_file:
+                        obj_fts = obj_file[key][...].astype(np.float32)
                         obj_fts = obj_fts[:self.max_objects]
-                        for attr_key, attr_value in f[key].attrs.items():
+                        for attr_key, attr_value in obj_file[key].attrs.items():
                             if attr_key in ['directions', 'sizes', 'bboxes', 'obj_ids']:
                                 obj_attrs[attr_key] = attr_value[:self.max_objects]
             if self.in_memory:
-                self._feature_store[key] = (view_fts, obj_fts, obj_attrs)
+                self._feature_store.put(key, (view_fts, obj_fts, obj_attrs))
 
         return view_fts, obj_fts, obj_attrs
 
@@ -430,6 +657,7 @@ class R2RTextPathData(ReverieTextPathData):
         max_txt_len=100, in_memory=True, act_visited_node=False,
         val_sample_num=None, val_sample_seed=None, start_vp_file=None,
         raw_image_feat_size=None, rgb_encoder_type='clip',
+        feature_cache_size_mb=None, lazy_load_annotations=True,
     ):
         super().__init__(
             anno_files, img_ft_file, dep_ft_file, None, scanvp_cands_file, connectivity_dir,
@@ -439,22 +667,23 @@ class R2RTextPathData(ReverieTextPathData):
             max_objects=0, max_txt_len=max_txt_len, in_memory=in_memory,
             act_visited_node=act_visited_node, val_sample_num=val_sample_num,
             val_sample_seed=val_sample_seed,
+            feature_cache_size_mb=feature_cache_size_mb,
+            lazy_load_annotations=lazy_load_annotations,
         )
 
     def get_scanvp_feature(self, scan, viewpoint):
         key = '%s_%s' % (scan, viewpoint)
-        if self.in_memory and key in self._feature_store:
-            view_fts = self._feature_store[key]
-            dep_fts = self._feature_store_depth[key]
+        cached = self._feature_store.get(key) if self.in_memory else None
+        if cached is not None:
+            view_fts, dep_fts = cached
         else:
-            with h5py.File(self.img_ft_file, 'r') as f:
-                view_fts = f[key][...].astype(np.float32)
+            with h5py.File(self.img_ft_file, 'r') as img_file:
+                view_fts = img_file[key][...].astype(np.float32)
             self._validate_view_features(key, view_fts)
-            with h5py.File(self.dep_ft_file, 'r') as f:
-                dep_fts = f[key][...].astype(np.float32)
+            with h5py.File(self.dep_ft_file, 'r') as dep_file:
+                dep_fts = dep_file[key][...].astype(np.float32)
             if self.in_memory:
-                self._feature_store[key] = view_fts
-                self._feature_store_depth[key] = dep_fts
+                self._feature_store.put(key, (view_fts, dep_fts))
         return view_fts, dep_fts
 
     def get_act_labels(self, end_vp, end_idx, item, gmap_vpids, traj_cand_vpids):

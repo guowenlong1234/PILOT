@@ -97,6 +97,25 @@ class MetaLoader:
             task = self.reserve_next_task()
             yield self.load_batch_for_task(task)
 
+    def close(self):
+        """Shut down DataLoader workers before Python interpreter teardown."""
+        first_error = None
+        for name, iterator in list(self.name2iter.items()):
+            shutdown_workers = getattr(iterator, '_shutdown_workers', None)
+            try:
+                if shutdown_workers is not None:
+                    shutdown_workers()
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+            finally:
+                loader = self.name2loader.get(name)
+                if getattr(loader, '_iterator', None) is iterator:
+                    loader._iterator = None
+        self.name2iter.clear()
+        if first_error is not None:
+            raise first_error
+
 
 def move_to_cuda(batch: Union[List, Tuple, Dict, torch.Tensor], device: torch.device):
     if isinstance(batch, torch.Tensor):
@@ -296,6 +315,9 @@ class ThreadPrefetchLoader:
 
 def build_dataloader(task, dataset, collate_fn, is_train: bool, opts):
     batch_size = opts.train_batch_size if is_train else opts.val_batch_size
+    num_workers = (
+        opts.n_workers if is_train else getattr(opts, 'val_n_workers', 0)
+    )
 
     if opts.local_rank == -1:
         if is_train:
@@ -319,14 +341,26 @@ def build_dataloader(task, dataset, collate_fn, is_train: bool, opts):
         )
         pre_epoch = sampler.set_epoch 
 
-    loader = DataLoader(
-        dataset,
-        sampler=sampler,
-        batch_size=batch_size,
-        num_workers=opts.n_workers,
-        pin_memory=opts.pin_mem,
-        collate_fn=collate_fn,
-        drop_last=False,
-    )
+    loader_kwargs = {
+        'dataset': dataset,
+        'sampler': sampler,
+        'batch_size': batch_size,
+        'num_workers': num_workers,
+        'pin_memory': opts.pin_mem,
+        'collate_fn': collate_fn,
+        'drop_last': False,
+    }
+    if num_workers > 0:
+        loader_kwargs.update(
+            multiprocessing_context=getattr(
+                opts, 'dataloader_start_method', 'spawn'
+            ),
+            prefetch_factor=getattr(opts, 'prefetch_factor', 1),
+            persistent_workers=(
+                is_train and getattr(opts, 'persistent_workers', False)
+            ),
+        )
+
+    loader = DataLoader(**loader_kwargs)
 
     return loader, pre_epoch

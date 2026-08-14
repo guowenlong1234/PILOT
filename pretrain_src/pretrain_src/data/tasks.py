@@ -165,7 +165,7 @@ class SapDataset(Dataset):
         self.end_vp_pos_ratio = end_vp_pos_ratio
 
     def __len__(self):
-        return len(self.nav_db.data)
+        return len(self.nav_db)
 
     def __getitem__(self, idx):
         r = np.random.rand()
@@ -254,4 +254,3 @@ def sap_collate(inputs):
     batch['global_act_labels'] = torch.LongTensor(batch['global_act_labels'])
 
     return batch
-

@@ -164,7 +164,61 @@ def load_parser():
     parser.add_argument(
         "--n_workers", type=int, default=4, help="number of data workers"
     )
+    parser.add_argument(
+        "--val_n_workers",
+        type=int,
+        default=0,
+        help=(
+            "number of validation data workers; defaults to zero so validation "
+            "does not create an extra multiprocessing memory peak"
+        ),
+    )
     parser.add_argument("--pin_mem", action="store_true", help="pin memory")
+    parser.add_argument(
+        "--no_pin_mem",
+        action="store_false",
+        dest="pin_mem",
+        help="disable pinned-memory staging",
+    )
+    parser.add_argument(
+        "--dataloader_start_method",
+        choices=("spawn", "forkserver", "fork"),
+        default="spawn",
+        help=(
+            "worker process start method; spawn avoids inheriting CUDA, HDF5, "
+            "and the training process heap"
+        ),
+    )
+    parser.add_argument(
+        "--prefetch_factor",
+        type=int,
+        default=1,
+        help="batches queued in advance by each DataLoader worker",
+    )
+    parser.add_argument(
+        "--feature_cache_size_mb",
+        type=float,
+        default=256.0,
+        help="per-worker training RGB+depth LRU cache payload limit in MiB",
+    )
+    parser.add_argument(
+        "--val_feature_cache_size_mb",
+        type=float,
+        default=0.0,
+        help="validation RGB+depth LRU cache payload limit in MiB",
+    )
+    parser.add_argument(
+        "--lazy_annotations",
+        action="store_true",
+        default=True,
+        help="index JSONL files and decode only the requested annotation",
+    )
+    parser.add_argument(
+        "--eager_annotations",
+        action="store_false",
+        dest="lazy_annotations",
+        help="decode all JSONL annotations at startup (high memory use)",
+    )
     parser.add_argument(
         "--thread_prefetch",
         action="store_true",
@@ -218,6 +272,10 @@ def parse_with_config(parser):
         }
         if "no_thread_prefetch" in override_keys:
             override_keys.add("thread_prefetch")
+        if "no_pin_mem" in override_keys:
+            override_keys.add("pin_mem")
+        if "eager_annotations" in override_keys:
+            override_keys.add("lazy_annotations")
         print("override_keys", override_keys)
         for k, v in config_args.items():
             if k not in override_keys:

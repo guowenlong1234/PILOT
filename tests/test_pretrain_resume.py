@@ -34,6 +34,30 @@ def test_no_thread_prefetch_overrides_json_config(tmp_path, monkeypatch):
     assert opts.thread_prefetch is False
 
 
+def test_no_pin_memory_overrides_json_config(tmp_path, monkeypatch):
+    config = tmp_path / "train.json"
+    config.write_text('{"pin_mem": true}', encoding="utf-8")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["train", "--config", str(config), "--no_pin_mem"],
+    )
+
+    opts = parse_with_config(load_parser())
+    assert opts.pin_mem is False
+
+
+def test_lazy_annotations_override_eager_json_config(tmp_path, monkeypatch):
+    config = tmp_path / "train.json"
+    config.write_text('{"lazy_annotations": false}', encoding="utf-8")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["train", "--config", str(config), "--lazy_annotations"],
+    )
+
+    opts = parse_with_config(load_parser())
+    assert opts.lazy_annotations is True
+
+
 def _opts(tmp_path, **overrides):
     model_config = tmp_path / "model.json"
     model_config.write_text("{}", encoding="utf-8")
@@ -430,6 +454,21 @@ def test_management_scripts_have_valid_bash_syntax():
             ["bash", "-n", str(path)], capture_output=True, text=True
         )
         assert result.returncode == 0, result.stderr
+
+
+def test_250k_resume_keeps_two_workers_with_bounded_memory_settings():
+    root = Path(__file__).resolve().parents[1]
+    source = (
+        root / "scripts" / "manage_rae_pretrain_resume_250k_eval.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "ETPR1_PRETRAIN_N_WORKERS=2" in source
+    assert "ETPR1_PRETRAIN_VAL_N_WORKERS=0" in source
+    assert "ETPR1_PRETRAIN_DATALOADER_START_METHOD=spawn" in source
+    assert "ETPR1_PRETRAIN_PREFETCH_FACTOR=1" in source
+    assert "ETPR1_PRETRAIN_FEATURE_CACHE_SIZE_MB=256" in source
+    assert "ETPR1_PRETRAIN_VAL_FEATURE_CACHE_SIZE_MB=0" in source
+    assert "ETPR1_PRETRAIN_DISABLE_PIN_MEM=1" in source
 
 
 def test_supervised_job_records_manifest_identity_without_requiring_git():

@@ -33,6 +33,30 @@ def test_stress_parser_accepts_safe_single_process_path():
     assert args.micro_batches == 10
 
 
+def test_stress_parser_accepts_bounded_two_worker_spawn_path():
+    args = build_parser().parse_args(
+        [
+            "--workers",
+            "2",
+            "--start-method",
+            "spawn",
+            "--no-pin-memory",
+            "--prefetch-factor",
+            "1",
+            "--feature-cache-size-mb",
+            "256",
+        ]
+    )
+
+    validate_args(args)
+    assert args.workers == 2
+    assert args.start_method == "spawn"
+    assert args.pin_memory is False
+    assert args.prefetch_factor == 1
+    assert args.feature_cache_size_mb == 256
+    assert args.lazy_annotations is True
+
+
 def test_validate_args_rejects_unused_start_method():
     args = build_parser().parse_args(
         ["--workers", "0", "--start-method", "spawn"]
