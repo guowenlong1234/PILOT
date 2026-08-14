@@ -14,6 +14,12 @@ from vlnce_baselines.nwm.types import NwmPrediction
 DEFAULT_EVAL_CONFIG = NWM_CONFIG_DIR / "eval_config.yaml"
 
 
+def _freeze_for_inference(model):
+    """Put a migrated prediction module in eval mode and freeze its parameters."""
+    model.requires_grad_(False)
+    return model.eval()
+
+
 def _deep_update(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     result = dict(base)
     for key, value in override.items():
@@ -333,7 +339,7 @@ class RaeNwmPredictor:
             f"missing={len(incompatible.missing_keys)} "
             f"unexpected={len(incompatible.unexpected_keys)}"
         )
-        model.eval().to(device)
+        model = _freeze_for_inference(model).to(device)
         if self.torch_compile:
             model = torch.compile(model)
 

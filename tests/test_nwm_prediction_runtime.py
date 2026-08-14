@@ -11,7 +11,7 @@ from vlnce_baselines.nwm.etp_adapter import (
     RaeEtpAdapterConfig,
     RaeGhostInputRequest,
 )
-from vlnce_baselines.nwm.predictor import _extract_ema_state
+from vlnce_baselines.nwm.predictor import _extract_ema_state, _freeze_for_inference
 from vlnce_baselines.nwm.raenwm_core.infer_compat import _sample_time_latent
 from vlnce_baselines.nwm.runtime import RaeNwmLatentNormalizer
 
@@ -136,6 +136,19 @@ def test_checkpoint_requires_nonempty_ema_and_strips_compile_prefix():
     tensor = torch.ones(1)
     state = _extract_ema_state({"ema": {"_orig_mod.weight": tensor}})
     assert state == {"weight": tensor}
+
+
+def test_world_model_is_explicitly_frozen_for_inference():
+    model = torch.nn.Sequential(
+        torch.nn.Linear(3, 4),
+        torch.nn.Dropout(p=0.5),
+    ).train()
+
+    returned = _freeze_for_inference(model)
+
+    assert returned is model
+    assert not model.training
+    assert all(not parameter.requires_grad for parameter in model.parameters())
 
 
 class _FakeSampler:
