@@ -5,13 +5,26 @@ import re
 import sys
 
 
-NOISY_PLUGIN_LINE = re.compile(
-    rb"^PluginManager::Manager: duplicate static plugin .* ignoring$"
+NOISY_PLUGIN_FRAGMENT = re.compile(
+    rb"PluginManager::Manager: duplicate static plugin [^,\r\n]+, ignoring"
 )
+TQDM_PROGRESS_PREFIX = re.compile(rb"^\s*\d+%\|")
 
 
-def should_drop(line: bytes) -> bool:
-    return NOISY_PLUGIN_LINE.fullmatch(line) is not None
+def filter_segment(segment: bytes, separator: bytes = b"") -> bytes:
+    """Remove harmless plugin messages from one CR/LF-delimited segment."""
+    cleaned, removed = NOISY_PLUGIN_FRAGMENT.subn(b"", segment)
+    if removed == 0:
+        return segment + separator
+    if not cleaned:
+        return b""
+
+    # Magnum can write its newline immediately after tqdm's current progress
+    # text. Keep that text replaceable instead of turning it into a permanent
+    # log line.
+    if separator == b"\n" and TQDM_PROGRESS_PREFIX.match(cleaned):
+        return cleaned + b"\r"
+    return cleaned + separator
 
 
 def main() -> None:
@@ -40,13 +53,12 @@ def main() -> None:
             line = pending[:position]
             separator = pending[position : position + 1]
             pending = pending[position + 1 :]
-            if not should_drop(line):
-                destination.write(line + separator)
+            destination.write(filter_segment(line, separator))
 
         destination.flush()
 
-    if pending and not should_drop(pending):
-        destination.write(pending)
+    if pending:
+        destination.write(filter_segment(pending))
     destination.flush()
 
 

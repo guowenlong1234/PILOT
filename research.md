@@ -47,6 +47,8 @@ README 原始说明要求创建 `etpr1` conda 环境，核心环境为 Python 3.
 - `CUDA_VISIBLE_DEVICES=0,1,2,3 bash run_rxr/main_server.bash eval 2333`: RxR 评测。
 - `scripts/manage_rae_pretrain_host.sh start|resume|status|tail|stop`：在 4090 宿主机检查 ETPNav/GPU 后，通过专用容器内的 tmux 托管 RAE/DINOv2 完整联合预训练。完整命令见 `docs/rae-dinov2-pretrain-operations.md`。
 - `scripts/stress_pretrain_dataloader.py`：不构造模型，直接使用正式 MLM/SAP 数据集和整理 batch 的代码，对 `n_workers`、`pin_memory`、`fork/spawn/forkserver`、CUDA 初始化顺序和 CUDA 搬运做分组压力测试；正式长训练运行时不得并行执行其大规模或 CUDA 模式。
+- `scripts/manage_r2r_sft_checkpoint_sync_server.sh start|status|tail|stop`：训练机持续扫描完整的 R2R SFT 模型/训练状态对，经 2.5 GbE 直连把模型 checkpoint 原子同步到测评机。
+- `scripts/manage_rae_r2r_eval_watch_host.sh start|status|tail|stop`：测评机宿主机持续监控同步完成的 checkpoint，在确认 ETPNav 未占用 GPU 后，通过 `gwl-etpr1-rae` 和 `etpr1_rae` 串行完成 R2R `val_unseen` 全量评测。
 
 ## Important Modules And Functions
 
@@ -120,8 +122,13 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 
 ## Current Caveats And Open Questions
 
+- 2026-08-14 已确认测评机单卡续训 `pretrain_resume_source_250000` 的停止原因是宿主机 CPU 内存耗尽，不是显存溢出。任务使用提交 `94f4372`，配置为 `n_workers=2`、`pin_mem=true`、`thread_prefetch=false`；它从第 250,000 步运行到第 305,000 步，在 RxR MLM 验证开始后由内核 OOM killer 以 `SIGKILL` 结束。内核现场有 7 个约 18 GiB RSS 的 Python 进程，正好对应 1 个训练主进程、MLM/SAP 共 4 个长期训练 worker 和当前验证的 2 个 worker；容器累计内存峰值为 65,468,919,808 字节，2 GiB swap 已耗尽。`R2RTextPathData(in_memory=True)` 会让每个 worker 独立、单调填充 RGB/深度视点缓存，完整缓存约 1.36 GB（十进制），同时 worker 通过 Linux `fork` 继承装有 321 万条 Python 记录的约 18 GiB 主进程，长期访问会增加写时复制的私有页。它是有上界的缓存和进程复制，不是计算图无界泄漏，但实际表现为缓慢增内存并最终 OOM；验证额外 worker 构成最后峰值。最近完整恢复点是第 302,500 步。此前已稳定长跑的 `n_workers=0`、`pin_mem=false`、`thread_prefetch=true` 路径没有这些子进程；本次只读诊断未恢复任务、未修改训练代码或远端产物。
+- 2026-08-14 已实现保持 `n_workers=2` 的有界内存路径：321 万条 JSONL 改为约 24.5 MiB 的 mmap 行索引并按需解析；worker 使用 `spawn`；RGB+深度特征采用 256 MiB/worker 的按字节 LRU；预取降为 1；`pin_mem=false`；验证使用 `val_n_workers=0` 和零特征缓存。真实数据在 CUDA 先初始化的顺序下完成 2,000 micro-batch，500--2,000 batch 的 cgroup 内存稳定在约 22.82--22.88 GB，进程私有内存为主进程约 1.36 GiB、四个训练 worker 各约 1.38--1.43 GiB，退出正常。惰性/eager 的真实 R2R 首中尾样本和完整输入逐项一致，针对性测试 `44 passed`。测试中还发现 PyTorch `persistent_workers=true` 会在提前关闭时触发本地库 `SIGABRT`，最终配置已关闭；正式预训练尚未恢复。
 - 2026-08-13 已修复离线 RAE/DINOv2 全景生成的俯仰相机漂移；生成器现在使用 ETPNav 的零传感器偏移方案。训练机当前使用的 10,567 视点 `RAE-DINOv2-B-14-RAW-CLS-views-habitat.hdf5` 仍是修复前旧逻辑采集的，本次按用户要求不重新生成。
 - 2026-08-13 SFT 检查点保存支持通过 `IL.checkpoint_sync_enabled` 和 `IL.checkpoint_sync_destination` 异步原子同步；两机间使用 `10.10.10.1/10.10.10.2` 的 2.5 GbE 直连。持续监控和批量评测通过 `EVAL.checkpoint_order` 选择正序或倒序，并从同一配置的同步目标推导本地监控目录。
+- 2026-08-13 运行状态：训练机的双卡 R2R SFT 已按用户要求正常停止，checkpoint 同步守护进程也已停止；最后一对完整模型/训练状态为第 14,200 次迭代。测评机的 R2R `val_unseen` 监控和正在执行的第 14,200 次迭代 checkpoint 评测也已停止，已完成的 70 份评测结果保持不变。停止后两台机器均无训练/测评计算进程：训练机两张 A6000 的计算显存占用为空，测评机 4090 仅保留约 130 MiB 桌面基础占用。训练机 TensorBoard 和测评机日志查看器不是计算任务，仍保持运行。
+- 2026-08-12 训练机实时状态：新的双卡 A6000 联合预训练实验 `rae_dinov2_etpnav_cls_768_raw_cls_20260810` 正在 `/home/gwl/project/etpr1/ETP-R1` 运行，产物位于 `/mnt/data2tb/ETP-R1_data/pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768_raw_cls_20260810`。任务从第 10,000 步恢复，目标 500,000 步；只读核验时 TensorBoard 已到第 224,346 步，最近完整恢复点为第 222,500 步，当前最佳模型为第 220,000 步。配置为双卡、每卡 batch 32、梯度累积 1、`n_workers=0`、`pin_mem=false`、`thread_prefetch=true`。两个训练进程持续存活约 48 小时，日志未发现报错，输出盘尚余约 1.4 TB。两卡温度为 85--86°C，但核验时没有处于软/硬件热降频状态。
+- 上一次 `rae_dinov2_cls_mlp` 联合预训练已于 2026-07-29 完成 500,000 步；按“R2R/RxR 的 MLM 准确率均值 + SAP 准确率均值”选择出的最佳点为第 452,500 步，总分 `1.6833923785864027`（MLM 均值 `0.8731406970197786`，SAP 均值 `0.8102516815666241`）。原始 `best_metrics.json` 保存在测评机对应实验目录，训练机保留了最佳模型本体。
 - `pip check` 会报告 `tensorflow 1.13.1` 声明要求 `tensorboard<1.14`，但 PyTorch 1.9 的 tensorboard 接口要求 `tensorboard>=1.15`。当前选择 `tensorboard==1.15.0`，因为这是项目入口能导入的最低可用折中。
 - RAE/DINOv2 已完成一步预训练、单环境 SFT/GRPO 和 R2R/RxR 单 episode 冒烟。正式长训练先后发生三次本地内存层崩溃：第 11,195 步的 DataLoader 子进程出现 `free(): invalid size`/`SIGABRT`；第 80,204 步的 DataLoader 子进程出现段错误；从 80,000 步恢复后又在第 117,624 步由训练 rank 0 主进程直接收到 `SIGSEGV`。第三次宿主机内核同时记录 Python 崩在 `libc.so.6`，没有 OOM、NVIDIA Xid、容器重启或主机重启。三次共同指向 Python 之外的本地内存破坏，故障域优先集中在原 `n_workers=1`、`pin_mem=true` 的多进程数据加载、HDF5/NumPy 读取、跨进程张量传输与锁页内存路径；但由于系统没有保存 core dump，现有证据仍不能精确到某一个本地库函数。2026-07-23 已把正式配置调整为 `n_workers=0`、`pin_mem=false`，从第 117,500 步恢复继续观察。
 - 原多进程路径的启动顺序现已进一步确认：`main()` 先初始化 CUDA、构造并搬运模型，再创建训练 DataLoader；`MetaLoader.__init__()` 随即对 MLM、SAP 两个 DataLoader 分别调用 `iter()`，在 Linux 默认 `fork` 模式下产生两个 worker。worker 因而从一个已经初始化 CUDA、载入 HDF5 且约有 80 个线程的大进程中派生。当前单进程训练的 rank 0 常驻内存约 20 GiB，五份 JSONL 原始文件合计约 2.6 GiB，RGB/深度 HDF5 合计约 1.3 GiB。这个顺序是当前最有证据的结构性风险：它同时解释 worker 本地内存崩溃、主进程锁页/跨进程搬运路径崩溃以及问题的间歇性；但在完成分组长压测前仍标记为高概率判断，不当作已精确证明的单一根因。
@@ -137,6 +144,14 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 - 测评机只有一张 RTX 4090。现有 ETPNav 任务占用 GPU 时，不得并行启动全量特征生成、预训练、SFT、GRPO 或完整评测，也不得擅自中断 ETPNav。
 
 ## Last Reviewed
+
+2026-08-14，任务上下文：在保持每个 MLM/SAP DataLoader 两个 worker 的前提下修复预训练 CPU OOM。实现 JSONL 惰性 mmap 索引、有界特征 LRU、干净 `spawn`、训练/验证 worker 分离、预取和锁页内存约束，并补齐恢复脚本的显式参数。测评机专用容器完成真实样本数值一致性、2,000/5,000 micro-batch 内存平台、CUDA 先初始化顺序和退出清理验证；没有启动或恢复正式训练。
+
+2026-08-14，任务上下文：只读排查最近一次联合预训练的缓慢内存增长与崩溃。核对了本地预训练入口、数据集缓存、训练/验证 DataLoader 生命周期、线程预取、训练循环、验证、日志与 checkpoint 保存；并检查训练机和测评机身份、Git 状态、进程、GPU、容器、supervisor 日志、内核 OOM 现场和容器 cgroup 峰值。确认训练机第 250,000 步状态完整，测评机从该点单卡恢复后在第 305,000 步验证阶段触发整机 OOM，最近完整状态为第 302,500 步。测评机专用环境的线程预取与 DDP 反向针对性测试为 `7 passed in 0.74s`。未启动、恢复或停止任务，未修改远端代码、环境或产物。
+
+2026-08-13，任务上下文：按用户要求停止训练机和测评机的训练、评测任务。先确认训练机 `gwl-sever/gwl` 与测评机 `a6000/a6000` 的身份、工程分支和进程父链，再通过项目管理脚本停止训练机 R2R SFT、checkpoint 同步和测评机评测监控；对未随 `docker exec` 退出的当前评测进程组单独发送正常终止信号。最终跨宿主机和测评机全部运行中容器复核均未发现训练或测评进程，GPU 计算进程为空。代码、checkpoint、训练状态和已有评测结果均未删除。
+
+2026-08-12，任务上下文：只读核验训练机本工程的实时训练进度。确认主机为 `gwl-sever`、用户为 `gwl`、工程分支 `main` 与 `origin/main` 一致且工作树干净；双卡 A6000 联合预训练已到 TensorBoard 第 224,346 步，最近完整断点第 222,500 步，最佳 checkpoint 第 220,000 步，训练进程、GPU、验证、日志和磁盘状态正常。未修改训练机代码、进程、环境或产物。
 
 2026-07-29，任务上下文：为三机 Git 协作补充项目级规则。核对了训练机主仓库、现有工作树、未提交源码与文档、大文件边界、笔记本和测评机工作目录；项目的中央裸仓库固定为 `/home/gwl/git/ETP-R1.git`，连接与安全同步方式见根目录 `AGENTS.md`。
 
