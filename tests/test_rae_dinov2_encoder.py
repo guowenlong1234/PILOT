@@ -39,7 +39,7 @@ class FakeBackbone(torch.nn.Module):
         self.last_hidden_dtype = cls.dtype
         other_tokens = torch.zeros(
             pixel_values.shape[0],
-            5,
+            260,
             768,
             dtype=pixel_values.dtype,
             device=pixel_values.device,
@@ -122,6 +122,24 @@ def test_encoder_returns_raw_cls_without_rae_statistics(encoder_factory):
     torch.testing.assert_close(actual, torch.full((2, 768), 2.0))
     assert encoder.backbone.output_hidden_states is True
     assert actual.dtype == torch.float32
+
+
+def test_encoder_returns_register_free_patch_map_without_changing_cls(
+    encoder_factory,
+):
+    encoder = encoder_factory()
+    observations = {
+        "rgb": torch.zeros(2, 224, 224, 3, dtype=torch.uint8),
+    }
+
+    cls, patch_latents = encoder.forward_with_patch_latents(observations)
+
+    torch.testing.assert_close(cls, torch.full((2, 768), 2.0))
+    assert patch_latents.shape == (2, 768, 16, 16)
+    assert patch_latents.dtype == torch.float32
+    assert torch.count_nonzero(patch_latents) == 0
+    assert not hasattr(encoder, "latent_mean")
+    assert not hasattr(encoder, "latent_var")
 
 
 def test_prepare_rgb_matches_etpnav_layout_range_and_resize_rules():

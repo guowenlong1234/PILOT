@@ -195,6 +195,35 @@ _C.MODEL.RGB_ENCODER.cls_residual_mlp_enabled = False
 _C.MODEL.RGB_ENCODER.cls_residual_mlp_hidden_dim = 768
 _C.MODEL.RGB_ENCODER.cls_residual_mlp_zero_init = True
 
+# Prediction-only Stage-0 RAE-NWM bridge. It is disabled unless an experiment
+# supplies all external assets and their checksums.
+_C.MODEL.RAENWM = CN()
+_C.MODEL.RAENWM.enabled = False
+_C.MODEL.RAENWM.emit_patch_latents = False
+_C.MODEL.RAENWM.config_path = "configs/nwm/raenwm_mp3d.yaml"
+_C.MODEL.RAENWM.checkpoint_path = ""
+_C.MODEL.RAENWM.checkpoint_sha256 = (
+    "392fe02045f7c11f006e1efb822914eee5826b8c6fdb2553c87e7de7c1c4df36"
+)
+_C.MODEL.RAENWM.head_checkpoint_path = ""
+_C.MODEL.RAENWM.head_checkpoint_sha256 = (
+    "a4d396021b8bf670c44565c383db1c9288c3bd8988624fa0a59064b6a81dc6e2"
+)
+_C.MODEL.RAENWM.stat_path = ""
+_C.MODEL.RAENWM.stat_sha256 = (
+    "84ede66def5e6e3f25679334dc89cf63b12aacb99cbf0f5ae7ed4ad3187f7e59"
+)
+_C.MODEL.RAENWM.context_size = 4
+_C.MODEL.RAENWM.max_buffer_size = 64
+_C.MODEL.RAENWM.metric_waypoint_spacing = 0.24975892673356762
+_C.MODEL.RAENWM.pos_eps = 1.0e-3
+_C.MODEL.RAENWM.yaw_eps = 1.0e-3
+_C.MODEL.RAENWM.static_run_k = 3
+_C.MODEL.RAENWM.max_horizon = 64.0
+_C.MODEL.RAENWM.num_steps = 10
+_C.MODEL.RAENWM.final_only_euler = False
+_C.MODEL.RAENWM.noise_seed = 0
+
 _C.MODEL.DEPTH_ENCODER = CN()
 _C.MODEL.DEPTH_ENCODER.cnn_type = "VlnResnetDepthEncoder"
 _C.MODEL.DEPTH_ENCODER.output_size = 128

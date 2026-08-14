@@ -14,6 +14,7 @@ from vlnce_baselines.ss_trainer_ETP_R1 import (
     _load_adamw_optimizer_state,
 )
 from vlnce_baselines import ss_trainer_ETP_R1 as sft_trainer_module
+from vlnce_baselines.nwm.types import NwmPrediction
 
 
 def _sensor(value, batch_size=2):
@@ -82,6 +83,74 @@ def test_pack_panoramic_observations_rejects_incomplete_panorama():
 
     with pytest.raises(ValueError, match="Expected 12 panoramic depth sensors"):
         pack_panoramic_observations(observations)
+
+
+class _RecordingNwmRuntime:
+    def __init__(self):
+        self.context_args = None
+        self.queries = None
+
+    def update_contexts(self, front_latents, positions, yaws):
+        self.context_args = (front_latents, positions, yaws)
+
+    def predict(self, queries):
+        self.queries = list(queries)
+        return NwmPrediction(
+            pred_latent=None,
+            meta={"empty": True, "records": [], "skipped": {}},
+        )
+
+
+def test_sft_nwm_shadow_bridge_builds_raw_candidate_queries_without_mutation(
+    monkeypatch,
+):
+    trainer = object.__new__(RLTrainer)
+    trainer.raenwm_runtime = _RecordingNwmRuntime()
+    trainer.last_raenwm_prediction = None
+    trainer._raenwm_context_source_logged = False
+    monkeypatch.setattr(
+        sft_trainer_module,
+        "heading_from_quaternion",
+        lambda orientation: float(orientation),
+    )
+    front_latents = torch.zeros(2, 768, 16, 16)
+    cur_pos = [
+        np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+        np.asarray([1.0, 0.0, 1.0], dtype=np.float32),
+    ]
+    cur_ori = [0.25, 0.5]
+    cand_vp = [["0_0", "0_1"], ["1_0"]]
+    cand_pos = [
+        [
+            np.asarray([0.0, 0.0, -1.0], dtype=np.float32),
+            np.asarray([-1.0, 0.0, 0.0], dtype=np.float32),
+        ],
+        [np.asarray([1.0, 0.0, 0.0], dtype=np.float32)],
+    ]
+    cand_vp_before = [list(values) for values in cand_vp]
+    cand_pos_before = [[value.copy() for value in values] for values in cand_pos]
+
+    prediction = trainer._run_raenwm_prediction(
+        front_latents,
+        cur_pos,
+        cur_ori,
+        cand_vp,
+        cand_pos,
+    )
+
+    assert prediction is trainer.last_raenwm_prediction
+    assert trainer.raenwm_runtime.context_args[0] is front_latents
+    assert trainer.raenwm_runtime.context_args[2] == [0.25, 0.5]
+    assert [query.query_id for query in trainer.raenwm_runtime.queries] == [
+        "0_0",
+        "0_1",
+        "1_0",
+    ]
+    assert [query.env_index for query in trainer.raenwm_runtime.queries] == [0, 0, 1]
+    assert cand_vp == cand_vp_before
+    for actual_env, expected_env in zip(cand_pos, cand_pos_before):
+        for actual, expected in zip(actual_env, expected_env):
+            np.testing.assert_array_equal(actual, expected)
 
 
 def test_graph_map_keeps_goal_distances_aligned_with_real_positions():

@@ -297,6 +297,53 @@ class RaeDinov2RgbEncoder(nn.Module):
             )
         return features
 
+    def _encode_rgb_with_patch_latents(self, rgb_observations):
+        pixels = prepare_rae_rgb_tensor(
+            rgb_observations,
+            device=self.image_mean.device,
+            size=self.encoder_input_size,
+        )
+        device_type = self.image_mean.device.type
+        pixels = (pixels - self.image_mean) / self.image_std
+
+        if self.compute_dtype is None:
+            autocast_context = nullcontext()
+            backbone_pixels = pixels
+        elif self.compute_dtype == torch.float32:
+            autocast_context = torch.autocast(
+                device_type=device_type,
+                enabled=False,
+            )
+            backbone_pixels = pixels.to(dtype=self.compute_dtype)
+        else:
+            autocast_context = torch.autocast(
+                device_type=device_type,
+                dtype=self.compute_dtype,
+            )
+            backbone_pixels = pixels.to(dtype=self.compute_dtype)
+
+        with torch.no_grad(), autocast_context:
+            hidden_state = self.backbone(
+                backbone_pixels,
+                output_hidden_states=True,
+            ).last_hidden_state
+        expected_tokens = 1 + 4 + 16 * 16
+        expected_shape = (pixels.shape[0], expected_tokens, self.output_size)
+        if tuple(hidden_state.shape) != expected_shape:
+            raise ValueError(
+                "RAE/DINOv2-with-registers returned token shape "
+                f"{tuple(hidden_state.shape)}, expected {expected_shape}"
+            )
+        features = hidden_state[:, 0].float()
+        patch_latents = (
+            hidden_state[:, 5:]
+            .float()
+            .transpose(1, 2)
+            .reshape(pixels.shape[0], self.output_size, 16, 16)
+            .contiguous()
+        )
+        return features, patch_latents
+
     def _apply_cls_residual_mlp(
         self,
         features: torch.Tensor,
@@ -335,6 +382,41 @@ class RaeDinov2RgbEncoder(nn.Module):
         if not torch.isfinite(output).all():
             raise FloatingPointError("RAE/DINOv2 CLS contains NaN or infinity")
         return output
+
+    def forward_with_patch_latents(
+        self,
+        observations: Mapping[str, torch.Tensor],
+    ):
+        if not isinstance(observations, Mapping):
+            raise TypeError("RAE/DINOv2 observations must be a mapping")
+        if "rgb_features" in observations:
+            features = observations["rgb_features"]
+            patch_latents = observations.get("rgb_patch_latents")
+            if patch_latents is None:
+                raise ValueError(
+                    "rgb_patch_latents is required with precomputed rgb_features "
+                    "when RAE-NWM is enabled"
+                )
+        elif "rgb" in observations:
+            features, patch_latents = self._encode_rgb_with_patch_latents(
+                observations["rgb"]
+            )
+        else:
+            raise ValueError(
+                "RAE/DINOv2 observations must contain 'rgb' or 'rgb_features'"
+            )
+
+        if tuple(patch_latents.shape[1:]) != (self.output_size, 16, 16):
+            raise ValueError(
+                "RAE/DINOv2 patch latents must have shape [N,768,16,16], "
+                f"got {tuple(patch_latents.shape)}"
+            )
+        if not torch.isfinite(patch_latents).all():
+            raise FloatingPointError("RAE/DINOv2 patch latents contain NaN or infinity")
+        output = self._apply_cls_residual_mlp(features)
+        if not torch.isfinite(output).all():
+            raise FloatingPointError("RAE/DINOv2 CLS contains NaN or infinity")
+        return output, patch_latents.float()
 
 
 # Keep the old import name available for external callers while using the

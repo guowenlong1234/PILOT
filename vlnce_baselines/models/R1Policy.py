@@ -153,6 +153,10 @@ class ETP(Net):
             else torch.device("cpu")
         )
         self.device = device
+        raenwm_config = getattr(model_config, "RAENWM", None)
+        self.raenwm_enabled = bool(
+            getattr(raenwm_config, "enabled", False)
+        ) and bool(getattr(raenwm_config, "emit_patch_latents", False))
 
         print('\nInitalizing the ETP model ...')
         self.vln_bert = get_vlnbert_models(config=model_config, dropout_rate=dropout_rate)
@@ -232,6 +236,10 @@ class ETP(Net):
                 f"{rgb_encoder_type} RGB encoder requires output_size="
                 f"{self.rgb_output_size}, got {configured_rgb_output_size}"
             )
+        if self.raenwm_enabled and rgb_encoder_type != "rae_dinov2":
+            raise ValueError(
+                "MODEL.RAENWM.enabled requires MODEL.RGB_ENCODER.type=rae_dinov2"
+            )
         self.space_pool_rgb = nn.Sequential(nn.AdaptiveAvgPool2d((1,1)), nn.Flatten(start_dim=2))
     
         self.pano_img_idxes = np.arange(0, 12, dtype=np.int64)        # 逆时针
@@ -288,7 +296,27 @@ class ETP(Net):
             obs_view12['depth'] = depth_batch
             obs_view12['rgb'] = rgb_batch
             depth_embedding = self.depth_encoder(obs_view12)  # torch.Size([bs, 128, 4, 4])
-            rgb_embedding = self.rgb_encoder(obs_view12)
+            pano_rae_latents = None
+            if self.raenwm_enabled:
+                rgb_embedding, packed_rae_latents = (
+                    self.rgb_encoder.forward_with_patch_latents(obs_view12)
+                )
+                packed_rae_latents = packed_rae_latents.reshape(
+                    batch_size,
+                    NUM_IMGS,
+                    768,
+                    16,
+                    16,
+                )
+                pano_rae_latents = torch.cat(
+                    (
+                        packed_rae_latents[:, 0:1],
+                        torch.flip(packed_rae_latents[:, 1:], [1]),
+                    ),
+                    dim=1,
+                ).contiguous()
+            else:
+                rgb_embedding = self.rgb_encoder(obs_view12)
 
             ''' waypoint prediction ----------------------------- '''
             # Waypoint selection is discrete and contributes no gradient.
@@ -486,8 +514,10 @@ class ETP(Net):
                 'pano_rgb': pano_rgb,               # B x 12 x 2048
                 'pano_depth': pano_depth,           # B x 12 x 128
                 'pano_angle_fts': pano_angle_fts,   # 12 x 4
-                'pano_img_idxes': pano_img_idxes,   # 12 
+                'pano_img_idxes': pano_img_idxes,   # 12
             }
+            if pano_rae_latents is not None:
+                outputs['pano_rae_latents'] = pano_rae_latents
             
             return outputs
 

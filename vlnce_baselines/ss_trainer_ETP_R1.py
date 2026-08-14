@@ -38,7 +38,11 @@ from vlnce_baselines.common.runtime_compat import (
 )
 from vlnce_baselines.common.amp_utils import step_amp_optimizer
 from vlnce_baselines.common.utils import extract_instruction_tokens
-from vlnce_baselines.models.graph_utils import GraphMap, MAX_DIST
+from vlnce_baselines.models.graph_utils import (
+    GraphMap,
+    MAX_DIST,
+    heading_from_quaternion,
+)
 from vlnce_baselines.models.checkpoint_utils import (
     navigation_state_dict,
     report_navigation_incompatible_keys,
@@ -113,6 +117,80 @@ class RLTrainer(BaseVLNCETrainer):
         super().__init__(config)
         self.max_len = int(config.IL.max_traj_len) #  * 0.97 transfered gt path got 0.96 spl
         self.illegal_episodes_count = 0
+        self.raenwm_runtime = None
+        self.last_raenwm_prediction = None
+        self._raenwm_head_state_override = None
+        self._raenwm_context_source_logged = False
+
+    def _raenwm_enabled(self):
+        model_config = getattr(self.config, "MODEL", None)
+        raenwm_config = getattr(model_config, "RAENWM", None)
+        return bool(getattr(raenwm_config, "enabled", False))
+
+    def _initialize_raenwm_runtime(self, num_envs):
+        if not self._raenwm_enabled():
+            self.raenwm_runtime = None
+            self.last_raenwm_prediction = None
+            return None
+        if self.raenwm_runtime is None:
+            from vlnce_baselines.nwm.runtime import NwmPredictionRuntime
+
+            self.raenwm_runtime = NwmPredictionRuntime(
+                self.config.MODEL.RAENWM,
+                self.device,
+                head_state_dict_override=self._raenwm_head_state_override,
+            )
+            self._raenwm_head_state_override = None
+        self.raenwm_runtime.reset(num_envs)
+        self.last_raenwm_prediction = None
+        self._raenwm_context_source_logged = False
+        return self.raenwm_runtime
+
+    def _run_raenwm_prediction(
+        self,
+        front_latents,
+        cur_pos,
+        cur_ori,
+        cand_vp,
+        cand_pos,
+    ):
+        runtime = self.raenwm_runtime
+        if runtime is None:
+            return None
+        if front_latents is None:
+            raise RuntimeError(
+                "RAE-NWM is enabled but waypoint output has no pano_rae_latents"
+            )
+        yaws = [heading_from_quaternion(orientation) for orientation in cur_ori]
+        runtime.update_contexts(front_latents, cur_pos, yaws)
+
+        from vlnce_baselines.nwm.runtime import NwmQuery
+
+        queries = []
+        for env_index, (env_vp, env_pos) in enumerate(zip(cand_vp, cand_pos)):
+            for query_id, target_position in zip(env_vp, env_pos):
+                queries.append(
+                    NwmQuery(
+                        env_index=env_index,
+                        query_id=str(query_id),
+                        current_position=np.asarray(cur_pos[env_index], dtype=np.float32),
+                        current_yaw=float(yaws[env_index]),
+                        target_position=np.asarray(target_position, dtype=np.float32),
+                    )
+                )
+        prediction = runtime.predict(queries)
+        self.last_raenwm_prediction = prediction
+        if not self._raenwm_context_source_logged and not prediction.meta.get("empty", False):
+            logger.info(
+                "RAE-NWM prediction-only bridge active: records=%d skipped=%s "
+                "pred_latent_shape=%s pred_cls_shape=%s",
+                len(prediction.meta.get("records", [])),
+                dict(prediction.meta.get("skipped", {})),
+                tuple(prediction.pred_latent.shape),
+                tuple(prediction.pred_cls.shape),
+            )
+            self._raenwm_context_source_logged = True
+        return prediction
 
     def _create_grad_scaler(self):
         init_scale = self.config.IL.amp_init_scale
@@ -452,6 +530,10 @@ class RLTrainer(BaseVLNCETrainer):
         action_space: Space,
     ):
         start_iter = 0
+        if self._raenwm_enabled():
+            config.defrost()
+            config.MODEL.RAENWM.emit_patch_latents = True
+            config.freeze()
         policy = baseline_registry.get_policy(self.config.MODEL.policy_name)
         self.policy = policy.from_config(
             config=config,
@@ -537,6 +619,10 @@ class RLTrainer(BaseVLNCETrainer):
             else:
                 ckpt_path = config.IL.ckpt_to_load
             ckpt_dict = self.load_checkpoint(ckpt_path, map_location="cpu")
+            if self._raenwm_enabled():
+                self._raenwm_head_state_override = ckpt_dict.get(
+                    "raenwm_heads_state_dict"
+                )
             validate_rgb_checkpoint_metadata(ckpt_dict, config)
             if config.IL.is_requeue:
                 if training_state is None:
@@ -1351,6 +1437,7 @@ class RLTrainer(BaseVLNCETrainer):
                                self.config.MODEL.merge_ghost, 
                                ghost_aug) for _ in range(self.envs.num_envs)]
         prev_vp = [None] * self.envs.num_envs
+        self._initialize_raenwm_runtime(self.envs.num_envs)
 
         for stepk in range(self.max_len): 
             total_actions += self.envs.num_envs
@@ -1363,6 +1450,15 @@ class RLTrainer(BaseVLNCETrainer):
                 observations = batch,
                 in_train = (mode == 'train' and self.config.IL.waypoint_aug), 
             )
+            raenwm_front_latents = None
+            if self.raenwm_runtime is not None:
+                pano_latents = wp_outputs.pop("pano_rae_latents", None)
+                if pano_latents is None:
+                    raise RuntimeError(
+                        "RAE-NWM is enabled but waypoint output has no "
+                        "pano_rae_latents"
+                    )
+                raenwm_front_latents = pano_latents[:, 0].detach()
 
             # pano encoder
             vp_inputs = self._vp_feature_variable(wp_outputs)
@@ -1423,6 +1519,13 @@ class RLTrainer(BaseVLNCETrainer):
                 cur_vp.append(cur_vp_i)
                 cand_vp.append(cand_vp_i)
                 cand_pos.append(cand_pos_i) 
+            self._run_raenwm_prediction(
+                raenwm_front_latents,
+                cur_pos,
+                cur_ori,
+                cand_vp,
+                cand_pos,
+            )
             for i in range(self.envs.num_envs):
                 cur_embeds = avg_pano_embeds[i]
                 cand_embeds = pano_embeds[i][vp_inputs['nav_types'][i]==1] 
@@ -1618,6 +1721,8 @@ class RLTrainer(BaseVLNCETrainer):
                         observations.pop(i)
                         self.gmaps.pop(i)
                         prev_vp.pop(i)
+                        if self.raenwm_runtime is not None:
+                            self.raenwm_runtime.pause_at(i)
                         all_txt_ids = torch.cat((all_txt_ids[:i], all_txt_ids[i + 1:]), dim=0)
                         all_txt_task_encoding = torch.cat((all_txt_task_encoding[:i], all_txt_task_encoding[i + 1:]), dim=0)
                         all_txt_masks = torch.cat((all_txt_masks[:i], all_txt_masks[i + 1:]), dim=0)
