@@ -62,7 +62,7 @@ def test_legacy452500_eval_watch_pins_current_sft_and_pretrain_blocker():
         "r2r_sft_legacy452500_nonvisual_20260815/eval_watch_val_unseen",
         "model_best_step_220000.pt",
         "ETPR1_R2R_EVAL_CHECKPOINT_ORDER:-ascending",
-        "/home/a6000/gwl/ETP-R1/data/pretrain_resume_source_250000",
+        "pretrain_src/pretrain_src/train_r2r.py",
         'manage_rae_r2r_eval_watch_host.sh" "${1:-status}"',
     )
     for token in required_tokens:

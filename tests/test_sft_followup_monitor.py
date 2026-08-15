@@ -11,6 +11,7 @@ def test_followup_monitor_waits_for_both_jobs_and_verifies_final_best():
         "train_state.iter${CURRENT_ITERS}.pth",
         "grep -q '^exit_code=0$'",
         "remote_pretrain_running",
+        "pretrain_src/pretrain_src/train_r2r.py",
         "model_step_500000.pt",
         "train_state_500000.pt",
         "remote_pretrain_not_successfully_complete",

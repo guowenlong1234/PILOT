@@ -59,7 +59,8 @@ current_sft_completed() {
 
 remote_pretrain_running() {
     ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE_HOST" \
-        "ps -eo args | grep -F -- '$REMOTE_PRETRAIN_ROOT' | grep -v grep" \
+        "ps -eo args | grep -F -- 'pretrain_src/pretrain_src/train_r2r.py' | \
+         grep -F -- '$REMOTE_PRETRAIN_ROOT' | grep -v grep" \
         >/dev/null 2>&1
 }
 
