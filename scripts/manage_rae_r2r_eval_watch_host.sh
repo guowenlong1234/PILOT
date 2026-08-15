@@ -19,6 +19,7 @@ NUM_ENVIRONMENTS=${ETPR1_R2R_EVAL_NUM_ENVIRONMENTS:-8}
 POLL_SECONDS=${ETPR1_R2R_EVAL_POLL_SECONDS:-30}
 RETRY_SECONDS=${ETPR1_R2R_EVAL_RETRY_SECONDS:-60}
 GPU_IDLE_LIMIT_MIB=${ETPR1_R2R_EVAL_GPU_IDLE_LIMIT_MIB:-1024}
+BLOCKING_PROCESS_PATTERN=${ETPR1_R2R_EVAL_BLOCKING_PROCESS_PATTERN:-}
 CHECKPOINT_ORDER=${ETPR1_R2R_EVAL_CHECKPOINT_ORDER:-$(checkpoint_order_from_config "$CONFIG_FILE")}
 PID_FILE=${EVAL_ROOT}/watch.pid
 LOG_FILE=${EVAL_ROOT}/watch.log
@@ -52,6 +53,15 @@ protected_task_running() {
         >/dev/null 2>&1
 }
 
+blocking_project_task_running() {
+    [ -n "$BLOCKING_PROCESS_PATTERN" ] || return 1
+    [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)" = true ] || return 1
+    docker exec -e BLOCKING_PROCESS_PATTERN="$BLOCKING_PROCESS_PATTERN" \
+        "$CONTAINER" bash -lc \
+        'ps -eo args | grep -F -- "$BLOCKING_PROCESS_PATTERN" | grep -v grep' \
+        >/dev/null 2>&1
+}
+
 gpu_is_idle() {
     local used
     used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits \
@@ -77,6 +87,10 @@ evaluate_checkpoint() {
 
     if protected_task_running; then
         echo "checkpoint_waiting_at=$(date --iso-8601=seconds) iter=$iteration reason=protected_etpnav_task"
+        return 2
+    fi
+    if blocking_project_task_running; then
+        echo "checkpoint_waiting_at=$(date --iso-8601=seconds) iter=$iteration reason=blocking_project_task pattern=$BLOCKING_PROCESS_PATTERN"
         return 2
     fi
     if ! gpu_is_idle; then
@@ -186,6 +200,7 @@ show_status() {
     echo "checkpoints=$(find "$CKPT_DIR" -maxdepth 1 -type f -name 'ckpt.iter*.pth' 2>/dev/null | wc -l)"
     echo "results=$(find "$RESULT_DIR" -maxdepth 1 -type f -name 'stats_ckpt_*_val_unseen.json' 2>/dev/null | wc -l)"
     echo "checkpoint_order=$CHECKPOINT_ORDER config=$CONFIG_FILE"
+    echo "blocking_process_pattern=${BLOCKING_PROCESS_PATTERN:-none}"
     nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu \
         --format=csv,noheader
     [ -f "$LOG_FILE" ] && tail -n 25 "$LOG_FILE"

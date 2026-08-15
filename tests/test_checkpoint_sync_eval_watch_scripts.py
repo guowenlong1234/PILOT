@@ -43,7 +43,27 @@ def test_eval_watch_uses_isolated_container_and_skips_valid_results():
         "NUM_ENVIRONMENTS=${ETPR1_R2R_EVAL_NUM_ENVIRONMENTS:-8}",
         'valid_result "$result" && return 0',
         "protected_etpnav_task",
+        "blocking_project_task",
+        "ETPR1_R2R_EVAL_BLOCKING_PROCESS_PATTERN",
         "gpu_busy",
+    )
+    for token in required_tokens:
+        assert token in source
+
+
+def test_legacy452500_eval_watch_pins_current_sft_and_pretrain_blocker():
+    source = Path(
+        "scripts/manage_legacy452500_r2r_sft_eval_watch_host.sh"
+    ).read_text(encoding="utf-8")
+
+    required_tokens = (
+        "r2r_sft_legacy452500_nonvisual_20260815/checkpoints/",
+        "rae_dinov2_etpnav_cls_768_legacy452500_nonvisual_r2r_sft",
+        "r2r_sft_legacy452500_nonvisual_20260815/eval_watch_val_unseen",
+        "model_best_step_220000.pt",
+        "ETPR1_R2R_EVAL_CHECKPOINT_ORDER:-ascending",
+        "/home/a6000/gwl/ETP-R1/data/pretrain_resume_source_250000",
+        'manage_rae_r2r_eval_watch_host.sh" "${1:-status}"',
     )
     for token in required_tokens:
         assert token in source
