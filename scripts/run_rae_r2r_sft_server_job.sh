@@ -10,6 +10,8 @@ OUTPUT_ROOT=${ETPR1_R2R_SFT_OUTPUT_ROOT:-data/logs/rae_dinov2_etpnav_cls_768/r2r
 SFT_ITERS=${ETPR1_R2R_SFT_ITERS:-2000}
 GRADIENT_ACCUMULATION_STEPS=${ETPR1_R2R_SFT_GRADIENT_ACCUMULATION_STEPS:-1}
 PRETRAINED_PATH=${ETPR1_R2R_SFT_PRETRAINED_PATH:-/mnt/data2tb/ETP-R1_data/pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768_raw_cls_20260810/best/model_best_step_220000.pt}
+CHECKPOINT_SYNC_ENABLED=${ETPR1_R2R_SFT_CHECKPOINT_SYNC_ENABLED:-True}
+CHECKPOINT_SYNC_DESTINATION=${ETPR1_R2R_SFT_CHECKPOINT_SYNC_DESTINATION:-a6000@10.10.10.2:/home/a6000/gwl/ETP-R1/data/logs/rae_dinov2_etpnav_cls_768/r2r_sft_panorama_order/checkpoints/rae_dinov2_etpnav_cls_768_r2r_sft_panorama_order}
 RUNTIME_ROOT=${ETPR1_SERVER_RUNTIME_ROOT:-${REPO_ROOT}/.runtime/server_sft}
 PYTHON_BIN=${ETPR1_SERVER_PYTHON:-/home/gwl/miniconda3/envs/etpnav_unified/bin/python}
 TORCHRUN_BIN=${ETPR1_SERVER_TORCHRUN:-/home/gwl/miniconda3/envs/etpnav_unified/bin/torchrun}
@@ -77,6 +79,8 @@ fi
     echo "sft_iters=$SFT_ITERS"
     echo "gradient_accumulation_steps=$GRADIENT_ACCUMULATION_STEPS"
     echo "pretrained_path=$PRETRAINED_PATH"
+    echo "checkpoint_sync_enabled=$CHECKPOINT_SYNC_ENABLED"
+    echo "checkpoint_sync_destination=$CHECKPOINT_SYNC_DESTINATION"
     echo "python=$PYTHON_BIN"
     "$PYTHON_BIN" -c \
         'import sys, torch, transformers; print(f"versions=python:{sys.version.split()[0]} torch:{torch.__version__} cuda:{torch.version.cuda} transformers:{transformers.__version__}")'
@@ -114,6 +118,8 @@ set +e
     IL.resumable_checkpoints True \
     IL.keep_last_train_states 3 \
     IL.keep_train_state_every_n_iters 5000 \
+    IL.checkpoint_sync_enabled "$CHECKPOINT_SYNC_ENABLED" \
+    IL.checkpoint_sync_destination "$CHECKPOINT_SYNC_DESTINATION" \
     "${resume_args[@]}" \
     TASK_CONFIG.SIMULATOR.HABITAT_SIM_V0.ALLOW_SLIDING True \
     TASK_CONFIG.DATASET.SUFFIX _90 \

@@ -119,6 +119,8 @@ def test_server_r2r_sft_job_uses_requested_batch_and_schedule_defaults():
         "IL.batch_size 8",
         'IL.gradient_accumulation_steps "$GRADIENT_ACCUMULATION_STEPS"',
         'IL.iters "$SFT_ITERS"',
+        'IL.checkpoint_sync_enabled "$CHECKPOINT_SYNC_ENABLED"',
+        'IL.checkpoint_sync_destination "$CHECKPOINT_SYNC_DESTINATION"',
         "IL.sample_ratio 0.75",
         "IL.decay_interval 3000",
     )
