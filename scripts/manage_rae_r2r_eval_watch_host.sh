@@ -204,6 +204,7 @@ show_status() {
     nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu \
         --format=csv,noheader
     [ -f "$LOG_FILE" ] && tail -n 25 "$LOG_FILE"
+    return 0
 }
 
 case "$ACTION" in

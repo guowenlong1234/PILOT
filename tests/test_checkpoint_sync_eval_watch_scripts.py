@@ -50,6 +50,9 @@ def test_eval_watch_uses_isolated_container_and_skips_valid_results():
     for token in required_tokens:
         assert token in source
 
+    status_body = source.split("show_status() {", 1)[1].split("\n}", 1)[0]
+    assert "return 0" in status_body
+
 
 def test_legacy452500_eval_watch_pins_current_sft_and_pretrain_blocker():
     source = Path(
@@ -104,6 +107,9 @@ def test_second_eval_handoff_requires_all_valid_first_results_and_idle_gpu():
     )
     for token in required_tokens:
         assert token in source
+
+    status_body = source.split("show_status() {", 1)[1].split("\n}", 1)[0]
+    assert "return 0" in status_body
 
 
 def test_checkpoint_order_and_watch_directory_come_from_one_config(tmp_path):

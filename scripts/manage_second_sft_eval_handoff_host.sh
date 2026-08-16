@@ -129,6 +129,7 @@ show_status() {
         echo "second_eval=waiting"
     fi
     [ -f "$LOG_FILE" ] && tail -n 20 "$LOG_FILE"
+    return 0
 }
 
 case "$ACTION" in
