@@ -68,6 +68,28 @@ def test_restart_only_appends_steps_newer_for_each_tag(tmp_path):
     assert appended == 1
 
 
+def test_has_new_results_checks_each_metric_independently(tmp_path):
+    write_result(tmp_path, 400, spl=0.4, success=0.5)
+    records = normalizer.discover_results(tmp_path, "val_unseen")
+
+    assert normalizer.has_new_results(
+        records,
+        {
+            "eval_spl/val_unseen": 400,
+            "eval_success/val_unseen": 200,
+        },
+        "val_unseen",
+    )
+    assert not normalizer.has_new_results(
+        records,
+        {
+            "eval_spl/val_unseen": 400,
+            "eval_success/val_unseen": 400,
+        },
+        "val_unseen",
+    )
+
+
 def test_existing_event_file_restores_real_maximum_steps(tmp_path):
     writer = normalizer.SummaryWriter(str(tmp_path))
     writer.add_scalar("eval_spl/val_unseen", 0.2, 200)

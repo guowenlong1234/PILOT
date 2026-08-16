@@ -88,6 +88,15 @@ def append_results(writer, records, maximum_steps, split):
     return appended, maximum_iteration
 
 
+def has_new_results(records, maximum_steps, split):
+    return any(
+        iteration
+        > maximum_steps.get(f"eval_{key}/{split}", -1)
+        for iteration, metrics in records
+        for key in metrics
+    )
+
+
 def build_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -120,29 +129,29 @@ def main(argv=None):
             raise ValueError(f"Result directory does not exist: {result_dir}")
         output_logdir = output_root / name
         output_logdir.mkdir(parents=True, exist_ok=True)
-        maximum_steps = load_maximum_steps(output_logdir)
-        writer = SummaryWriter(str(output_logdir))
-        runs.append((name, result_dir, writer, maximum_steps))
+        runs.append((name, result_dir, output_logdir))
 
-    try:
-        while True:
-            for name, result_dir, writer, maximum_steps in runs:
-                records = discover_results(result_dir, args.split)
+    while True:
+        for name, result_dir, output_logdir in runs:
+            records = discover_results(result_dir, args.split)
+            maximum_steps = load_maximum_steps(output_logdir)
+            if not has_new_results(records, maximum_steps, args.split):
+                continue
+            writer = SummaryWriter(str(output_logdir))
+            try:
                 appended, maximum_iteration = append_results(
                     writer, records, maximum_steps, args.split
                 )
-                if appended:
-                    print(
-                        f"run={name} appended_scalars={appended} "
-                        f"max_iteration={maximum_iteration}",
-                        flush=True,
-                    )
-            if args.once:
-                return
-            time.sleep(args.reload_interval)
-    finally:
-        for _name, _result_dir, writer, _maximum_steps in runs:
-            writer.close()
+            finally:
+                writer.close()
+            print(
+                f"run={name} appended_scalars={appended} "
+                f"max_iteration={maximum_iteration}",
+                flush=True,
+            )
+        if args.once:
+            return
+        time.sleep(args.reload_interval)
 
 
 if __name__ == "__main__":
