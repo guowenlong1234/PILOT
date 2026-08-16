@@ -81,6 +81,42 @@ ETPR1_R2R_GRPO_LOG_EVERY
 ETPR1_R2R_GRPO_KEEP_LAST_STATES
 ETPR1_R2R_GRPO_KEEP_STATE_EVERY
 ETPR1_R2R_GRPO_MASTER_PORT
+ETPR1_R2R_GRPO_CHECKPOINT_SYNC_ENABLED
+ETPR1_R2R_GRPO_CHECKPOINT_SYNC_DESTINATION
+```
+
+## Checkpoint 同步到测评机
+
+正式入口默认开启模型 checkpoint 同步。每次本地模型和训练状态都原子保存
+完成后，会启动独立后台进程，把模型 checkpoint 经 2.5 GbE 直连同步到：
+
+```text
+a6000@10.10.10.2:/home/a6000/gwl/ETP-R1/<OUTPUT_ROOT>/checkpoints/<EXP_NAME>
+```
+
+传输先写入测评机目标目录下的 `.incoming`，核对文件大小后再原子改名；
+评测端不会看到半份 checkpoint。同步失败会写入训练机 checkpoint 目录下的
+`checkpoint_sync.log`，不会中断 GRPO 训练。
+
+和 SFT 当前策略一致，只同步可用于评测的 `ckpt.iterN.pth`。包含优化器、
+调度器和随机状态的 `train_state.iterN.pth` 留在训练机，用于本机断点恢复，
+不复制到测评机。
+
+自定义相对输出目录时，同步目标会自动跟随实验名和输出目录。使用绝对输出
+目录时，应显式指定测评机目标：
+
+```bash
+ETPR1_R2R_GRPO_OUTPUT_ROOT=/mnt/data2tb/my_grpo \
+ETPR1_R2R_GRPO_CHECKPOINT_SYNC_DESTINATION=a6000@10.10.10.2:/home/a6000/gwl/ETP-R1/data/logs/my_grpo/checkpoints/my_grpo \
+ETPR1_R2R_GRPO_EXP_NAME=my_grpo \
+scripts/manage_rae_r2r_grpo_server.sh start
+```
+
+如需临时关闭：
+
+```bash
+ETPR1_R2R_GRPO_CHECKPOINT_SYNC_ENABLED=False \
+scripts/manage_rae_r2r_grpo_server.sh start
 ```
 
 ## 断点恢复

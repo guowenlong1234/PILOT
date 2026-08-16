@@ -14,6 +14,13 @@ GRPO_KEEP_LAST_STATES=${ETPR1_R2R_GRPO_KEEP_LAST_STATES:-3}
 GRPO_KEEP_STATE_EVERY=${ETPR1_R2R_GRPO_KEEP_STATE_EVERY:-250}
 SFT_CHECKPOINT=${ETPR1_R2R_GRPO_SFT_CHECKPOINT:-data/logs/rae_dinov2_etpnav_cls_768/r2r_sft_legacy452500_nonvisual_20260815/checkpoints/rae_dinov2_etpnav_cls_768_legacy452500_nonvisual_r2r_sft/ckpt.iter8000.pth}
 PRETRAINED_PATH=${ETPR1_R2R_GRPO_PRETRAINED_PATH:-pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768_legacy_base_transfer/model_step_452500_nonvisual_transfer.pt}
+CHECKPOINT_SYNC_ENABLED=${ETPR1_R2R_GRPO_CHECKPOINT_SYNC_ENABLED:-True}
+if [[ "$OUTPUT_ROOT" = /* ]]; then
+    DEFAULT_CHECKPOINT_SYNC_DESTINATION=""
+else
+    DEFAULT_CHECKPOINT_SYNC_DESTINATION="a6000@10.10.10.2:/home/a6000/gwl/ETP-R1/${OUTPUT_ROOT}/checkpoints/${EXP_NAME}"
+fi
+CHECKPOINT_SYNC_DESTINATION=${ETPR1_R2R_GRPO_CHECKPOINT_SYNC_DESTINATION:-$DEFAULT_CHECKPOINT_SYNC_DESTINATION}
 RUNTIME_ROOT=${ETPR1_SERVER_RUNTIME_ROOT:-${REPO_ROOT}/.runtime/server_sft}
 PYTHON_BIN=${ETPR1_SERVER_PYTHON:-/home/gwl/miniconda3/envs/etpnav_unified/bin/python}
 TORCHRUN_BIN=${ETPR1_SERVER_TORCHRUN:-/home/gwl/miniconda3/envs/etpnav_unified/bin/torchrun}
@@ -40,6 +47,10 @@ for integer_setting in \
 done
 if ! [[ "$GRPO_KEEP_STATE_EVERY" =~ ^[0-9]+$ ]]; then
     echo "GRPO_KEEP_STATE_EVERY must be a non-negative integer" >&2
+    exit 2
+fi
+if [ "$CHECKPOINT_SYNC_ENABLED" = True ] && [ -z "$CHECKPOINT_SYNC_DESTINATION" ]; then
+    echo "Set ETPR1_R2R_GRPO_CHECKPOINT_SYNC_DESTINATION when using an absolute output root" >&2
     exit 2
 fi
 
@@ -86,6 +97,8 @@ fi
     echo "grpo_log_every=$GRPO_LOG_EVERY"
     echo "sft_checkpoint=$SFT_CHECKPOINT"
     echo "pretrained_path=$PRETRAINED_PATH"
+    echo "checkpoint_sync_enabled=$CHECKPOINT_SYNC_ENABLED"
+    echo "checkpoint_sync_destination=$CHECKPOINT_SYNC_DESTINATION"
     "$PYTHON_BIN" -c \
         'import sys, torch, transformers, habitat, habitat_sim; print(f"versions=python:{sys.version.split()[0]} torch:{torch.__version__} cuda:{torch.version.cuda} transformers:{transformers.__version__} habitat:{habitat.__version__} habitat_sim:{habitat_sim.__version__}")'
     nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu \
@@ -125,6 +138,8 @@ set +e
     GRPO.resumable_checkpoints True \
     GRPO.keep_last_train_states "$GRPO_KEEP_LAST_STATES" \
     GRPO.keep_train_state_every_n_iters "$GRPO_KEEP_STATE_EVERY" \
+    GRPO.checkpoint_sync_enabled "$CHECKPOINT_SYNC_ENABLED" \
+    GRPO.checkpoint_sync_destination "$CHECKPOINT_SYNC_DESTINATION" \
     GRPO.ckpt_to_load "$SFT_CHECKPOINT" \
     "${resume_args[@]}" \
     TASK_CONFIG.SIMULATOR.HABITAT_SIM_V0.ALLOW_SLIDING True \

@@ -149,6 +149,11 @@ def test_server_r2r_grpo_job_uses_two_gpu_dino_formal_configuration():
         "GRPO.resumable_checkpoints True",
         'GRPO.keep_last_train_states "$GRPO_KEEP_LAST_STATES"',
         'GRPO.keep_train_state_every_n_iters "$GRPO_KEEP_STATE_EVERY"',
+        'GRPO.checkpoint_sync_enabled "$CHECKPOINT_SYNC_ENABLED"',
+        'GRPO.checkpoint_sync_destination "$CHECKPOINT_SYNC_DESTINATION"',
+        "ETPR1_R2R_GRPO_CHECKPOINT_SYNC_ENABLED",
+        "ETPR1_R2R_GRPO_CHECKPOINT_SYNC_DESTINATION",
+        "a6000@10.10.10.2:/home/a6000/gwl/ETP-R1/",
         "TASK_CONFIG.DATASET.SUFFIX _10",
         "MODEL.RGB_ENCODER.precision ambient",
     )

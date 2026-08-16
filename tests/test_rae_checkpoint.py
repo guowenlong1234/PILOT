@@ -764,6 +764,55 @@ def test_resumable_grpo_requires_runtime_state(tmp_path):
         trainer.save_checkpoint(10)
 
 
+def test_resumable_grpo_launches_model_checkpoint_sync_after_both_saves(
+    tmp_path, monkeypatch
+):
+    config, _ = _config(tmp_path)
+    config.CHECKPOINT_FOLDER = str(tmp_path)
+    config.ONLY_LAST_SAVEALL = True
+    destination = "a6000@10.10.10.2:/remote/grpo/checkpoints"
+    config.GRPO = SimpleNamespace(
+        iters=1000,
+        resumable_checkpoints=True,
+        keep_last_train_states=3,
+        keep_train_state_every_n_iters=250,
+        checkpoint_sync_enabled=True,
+        checkpoint_sync_destination=destination,
+    )
+    trainer = object.__new__(GrpoTrainer)
+    trainer.config = config
+    trainer.policy = _FakePolicy()
+    trainer.optimizer = _StateHolder()
+    trainer.scheduler = _StateHolder()
+    trainer.scaler = _StateHolder()
+    trainer._resume_contract = lambda: {"world_size": 2}
+    events = []
+    monkeypatch.setattr(
+        grpo_trainer_module,
+        "atomic_torch_save",
+        lambda obj, path: events.append(("save", path)),
+    )
+    monkeypatch.setattr(
+        grpo_trainer_module,
+        "prune_training_states",
+        lambda *args: [],
+    )
+    monkeypatch.setattr(
+        grpo_trainer_module,
+        "launch_checkpoint_sync",
+        lambda path, target: events.append(("sync", path, target)) or 42,
+    )
+
+    trainer.save_checkpoint(
+        10,
+        runtime_state={"format_version": 1, "world_size": 2, "ranks": []},
+    )
+
+    assert [event[0] for event in events] == ["save", "save", "sync"]
+    assert events[-1][1].endswith("ckpt.iter10.pth")
+    assert events[-1][2] == destination
+
+
 def test_grpo_restores_environment_and_rng_state(monkeypatch):
     trainer = object.__new__(GrpoTrainer)
     trainer.local_rank = 0

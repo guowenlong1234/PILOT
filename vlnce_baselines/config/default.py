@@ -68,6 +68,8 @@ _C.GRPO.train_all = False
 _C.GRPO.resumable_checkpoints = False
 _C.GRPO.keep_last_train_states = 3
 _C.GRPO.keep_train_state_every_n_iters = 0
+_C.GRPO.checkpoint_sync_enabled = False
+_C.GRPO.checkpoint_sync_destination = ""
 # -----------------------------------------------------------------------------
 # IMITATION LEARNING CONFIG
 # -----------------------------------------------------------------------------

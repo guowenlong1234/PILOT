@@ -63,6 +63,7 @@ from vlnce_baselines.common.online_checkpoint import (
     latest_complete_checkpoint_pair,
     prune_training_states,
 )
+from vlnce_baselines.common.checkpoint_sync import launch_checkpoint_sync
 from torch.nn.utils.rnn import pad_sequence
 import cv2
 import copy
@@ -135,6 +136,36 @@ class RLTrainer(BaseVLNCETrainer):
             ),
         }
 
+    def _launch_checkpoint_sync(self, checkpoint_path):
+        enabled = bool(
+            getattr(self.config.GRPO, "checkpoint_sync_enabled", False)
+        )
+        if not enabled:
+            return
+        destination = str(
+            getattr(self.config.GRPO, "checkpoint_sync_destination", "")
+        ).strip()
+        if not destination:
+            raise ValueError(
+                "GRPO.checkpoint_sync_destination must be set when "
+                "GRPO.checkpoint_sync_enabled=True"
+            )
+        try:
+            pid = launch_checkpoint_sync(checkpoint_path, destination)
+        except Exception:
+            logger.exception(
+                "Failed to launch asynchronous GRPO checkpoint sync for %s",
+                checkpoint_path,
+            )
+            return
+        logger.info(
+            "Launched asynchronous GRPO checkpoint sync: pid=%d source=%s "
+            "destination=%s",
+            pid,
+            checkpoint_path,
+            destination,
+        )
+
     def save_checkpoint(self, iteration: int, runtime_state=None):
         state_dict, rgb_encoder_meta = navigation_state_dict(
             self.policy, self.config
@@ -183,6 +214,7 @@ class RLTrainer(BaseVLNCETrainer):
                     "Pruned old GRPO training states: %s",
                     ", ".join(path.name for path in removed),
                 )
+            self._launch_checkpoint_sync(checkpoint_path)
             return
 
         if self.config.ONLY_LAST_SAVEALL and (not iteration == self.config.GRPO.iters):
@@ -203,6 +235,7 @@ class RLTrainer(BaseVLNCETrainer):
                 obj=checkpoint,
                 f=checkpoint_path,
             )
+        self._launch_checkpoint_sync(checkpoint_path)
 
     def _capture_runtime_state(self):
         self.envs.resume_all()
