@@ -118,7 +118,12 @@ show_status() {
         printf 'model_checkpoints='
         find "$CHECKPOINT_DIR" -maxdepth 1 -type f -name 'ckpt.iter*.pth' | wc -l
         printf 'training_states='
-        find "$TRAIN_STATE_DIR" -maxdepth 1 -type f -name 'train_state.iter*.pth' 2>/dev/null | wc -l
+        if [ -d "$TRAIN_STATE_DIR" ]; then
+            find "$TRAIN_STATE_DIR" -maxdepth 1 -type f \
+                -name 'train_state.iter*.pth' | wc -l
+        else
+            echo 0
+        fi
     fi
     if [ -e "$LATEST_LOG" ]; then
         echo "latest_log=$(readlink -f -- "$LATEST_LOG")"

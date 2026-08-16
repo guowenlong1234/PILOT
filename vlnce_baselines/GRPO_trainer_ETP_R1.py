@@ -105,6 +105,7 @@ class RLTrainer(BaseVLNCETrainer):
         return {
             "world_size": int(self.config.GPU_NUMBERS),
             "num_environments_per_rank": int(self.config.NUM_ENVIRONMENTS),
+            "batch_size": int(grpo.batch_size),
             "total_iters": int(grpo.iters),
             "log_every": int(grpo.log_every),
             "lr": float(grpo.lr),
@@ -119,8 +120,19 @@ class RLTrainer(BaseVLNCETrainer):
             "enable_all_dropouts": bool(grpo.enable_all_dropouts),
             "dropout_in_sampling": bool(grpo.dropout_in_sampling),
             "dropout_rate": float(grpo.dropout_rate),
+            "max_traj_len": int(grpo.max_traj_len),
+            "max_text_len": int(grpo.max_text_len),
+            "loc_noise": float(grpo.loc_noise),
             "waypoint_aug": bool(grpo.waypoint_aug),
+            "ghost_aug": float(grpo.ghost_aug),
+            "back_algo": str(grpo.back_algo),
+            "tryout": bool(grpo.tryout),
             "task_type": str(self.config.MODEL.task_type),
+            "pretrained_path": str(self.config.MODEL.pretrained_path),
+            "dataset_suffix": str(self.config.TASK_CONFIG.DATASET.SUFFIX),
+            "allow_sliding": bool(
+                self.config.TASK_CONFIG.SIMULATOR.HABITAT_SIM_V0.ALLOW_SLIDING
+            ),
         }
 
     def save_checkpoint(self, iteration: int, runtime_state=None):
