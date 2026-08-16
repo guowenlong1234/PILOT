@@ -58,6 +58,11 @@ import json
 from copy import deepcopy
 from torch.cuda.amp import autocast, GradScaler
 from vlnce_baselines.common.ops import pad_tensors_wgrad, gen_seq_masks
+from vlnce_baselines.common.online_checkpoint import (
+    atomic_torch_save,
+    latest_complete_checkpoint_pair,
+    prune_training_states,
+)
 from torch.nn.utils.rnn import pad_sequence
 import cv2
 import copy
@@ -95,32 +100,168 @@ class RLTrainer(BaseVLNCETrainer):
             if self.config.EVAL.SAVE_RESULTS:
                 self._make_results_dir()
 
-    def save_checkpoint(self, iteration: int):
+    def _resume_contract(self):
+        grpo = self.config.GRPO
+        return {
+            "world_size": int(self.config.GPU_NUMBERS),
+            "num_environments_per_rank": int(self.config.NUM_ENVIRONMENTS),
+            "total_iters": int(grpo.iters),
+            "log_every": int(grpo.log_every),
+            "lr": float(grpo.lr),
+            "warmup_iters": int(grpo.warmup_iters),
+            "min_lr_ratio": float(grpo.min_lr_ratio),
+            "sample_num": int(grpo.sample_num),
+            "update_epochs": int(grpo.update_epochs),
+            "grpo_beta": float(grpo.grpo_beta),
+            "grpo_epsilon": float(grpo.grpo_epsilon),
+            "max_grad_norm": float(grpo.max_grad_norm),
+            "enable_amp": bool(grpo.enable_amp),
+            "enable_all_dropouts": bool(grpo.enable_all_dropouts),
+            "dropout_in_sampling": bool(grpo.dropout_in_sampling),
+            "dropout_rate": float(grpo.dropout_rate),
+            "waypoint_aug": bool(grpo.waypoint_aug),
+            "task_type": str(self.config.MODEL.task_type),
+        }
+
+    def save_checkpoint(self, iteration: int, runtime_state=None):
         state_dict, rgb_encoder_meta = navigation_state_dict(
             self.policy, self.config
         )
+        resumable = bool(
+            getattr(self.config.GRPO, "resumable_checkpoints", False)
+        )
+        checkpoint = {
+            "state_dict": state_dict,
+            "rgb_encoder": rgb_encoder_meta,
+            "config": self.config,
+            "iteration": iteration,
+        }
+        checkpoint_path = os.path.join(
+            self.config.CHECKPOINT_FOLDER, f"ckpt.iter{iteration}.pth"
+        )
+        if resumable:
+            if runtime_state is None:
+                raise ValueError(
+                    "Resumable GRPO checkpoints require runtime state"
+                )
+            training_state = {
+                "format_version": 1,
+                "iteration": iteration,
+                "model_checkpoint": os.path.basename(checkpoint_path),
+                "resume_contract": self._resume_contract(),
+                "optim_state": self.optimizer.state_dict(),
+                "scheduler_state": self.scheduler.state_dict(),
+                "scaler_state": self.scaler.state_dict(),
+                "runtime_state": runtime_state,
+            }
+            training_state_path = os.path.join(
+                self.config.CHECKPOINT_FOLDER,
+                "train_states",
+                f"train_state.iter{iteration}.pth",
+            )
+            atomic_torch_save(checkpoint, checkpoint_path)
+            atomic_torch_save(training_state, training_state_path)
+            removed = prune_training_states(
+                os.path.dirname(training_state_path),
+                int(self.config.GRPO.keep_last_train_states),
+                int(self.config.GRPO.keep_train_state_every_n_iters),
+            )
+            if removed:
+                logger.info(
+                    "Pruned old GRPO training states: %s",
+                    ", ".join(path.name for path in removed),
+                )
+            return
+
         if self.config.ONLY_LAST_SAVEALL and (not iteration == self.config.GRPO.iters):
             torch.save(
-                        obj={
-                            "state_dict": state_dict,
-                            "rgb_encoder": rgb_encoder_meta,
-                            "config": self.config, 
-                            "iteration": iteration
-                        },
-                        f=os.path.join(self.config.CHECKPOINT_FOLDER, f"ckpt.iter{iteration}.pth"),
+                        obj=checkpoint,
+                        f=checkpoint_path,
                     )
         else:
-            torch.save(
-                obj={
-                    "state_dict": state_dict,
-                    "rgb_encoder": rgb_encoder_meta,
-                    "config": self.config, 
-                    "optim_state": self.optimizer.state_dict(), 
-                    "scheduler_state": self.scheduler.state_dict(), 
-                    "iteration": iteration, 
-                },
-                f=os.path.join(self.config.CHECKPOINT_FOLDER, f"ckpt.iter{iteration}.pth"),
+            checkpoint.update(
+                {
+                    "optim_state": self.optimizer.state_dict(),
+                    "scheduler_state": self.scheduler.state_dict(),
+                }
             )
+            if hasattr(self, "scaler"):
+                checkpoint["scaler_state"] = self.scaler.state_dict()
+            torch.save(
+                obj=checkpoint,
+                f=checkpoint_path,
+            )
+
+    def _capture_runtime_state(self):
+        self.envs.resume_all()
+        environment_states = self.envs.call(
+            ["get_episode_iterator_state"] * self.envs.num_envs
+        )
+        local_state = {
+            "rank": int(self.local_rank),
+            "num_envs": int(self.envs.num_envs),
+            "environments": environment_states,
+            "python_rng_state": random.getstate(),
+            "numpy_rng_state": np.random.get_state(),
+            "torch_rng_state": torch.get_rng_state(),
+            "cuda_rng_state": torch.cuda.get_rng_state(self.device),
+        }
+        if self.world_size > 1:
+            rank_states = [None for _ in range(self.world_size)]
+            distr.all_gather_object(rank_states, local_state)
+        else:
+            rank_states = [local_state]
+        return {
+            "format_version": 1,
+            "world_size": int(self.world_size),
+            "ranks": rank_states,
+        }
+
+    def _restore_runtime_state(self, state):
+        if not isinstance(state, dict) or state.get("format_version") != 1:
+            raise ValueError("Unsupported or missing GRPO runtime state")
+        if state.get("world_size") != self.world_size:
+            raise ValueError(
+                "Cannot resume GRPO after changing the number of ranks: "
+                f"checkpoint={state.get('world_size')}, "
+                f"current={self.world_size}"
+            )
+        rank_states = state.get("ranks")
+        if not isinstance(rank_states, list):
+            raise ValueError("GRPO runtime state is missing rank states")
+        by_rank = {
+            item.get("rank"): item
+            for item in rank_states
+            if isinstance(item, dict)
+        }
+        if set(by_rank) != set(range(self.world_size)):
+            raise ValueError("GRPO runtime state contains the wrong ranks")
+        local_state = by_rank[self.local_rank]
+        environments = local_state.get("environments")
+        if (
+            local_state.get("num_envs") != self.envs.num_envs
+            or not isinstance(environments, list)
+            or len(environments) != self.envs.num_envs
+        ):
+            raise ValueError(
+                "Cannot resume GRPO after changing environments per rank"
+            )
+        self.envs.call(
+            ["set_episode_iterator_state"] * self.envs.num_envs,
+            [{"state": item} for item in environments],
+        )
+        random.setstate(local_state["python_rng_state"])
+        np.random.set_state(local_state["numpy_rng_state"])
+        torch.set_rng_state(local_state["torch_rng_state"])
+        torch.cuda.set_rng_state(
+            local_state["cuda_rng_state"], device=self.device
+        )
+        logger.info(
+            "Restored exact GRPO runtime state for rank %d across %d "
+            "environment(s)",
+            self.local_rank,
+            self.envs.num_envs,
+        )
 
     def _set_config(self):
         self.split = self.config.TASK_CONFIG.DATASET.SPLIT
@@ -348,19 +489,66 @@ class RLTrainer(BaseVLNCETrainer):
             return decayed_lr_multiplier
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
 
-        if load_from_ckpt: 
-            if config.GRPO.is_requeue: 
-                import glob
-                search_pattern = os.path.join(config.CHECKPOINT_FOLDER, "*.pth")
-                ckpt_list = glob.glob(search_pattern)
-                ckpt_list.sort(key=os.path.getmtime)
-                ckpt_path = ckpt_list[-1] 
+        self._resume_training_state = None
+        if load_from_ckpt:
+            training_state = None
+            if config.GRPO.is_requeue:
+                if config.GRPO.resumable_checkpoints:
+                    ckpt_path, training_state_path = (
+                        latest_complete_checkpoint_pair(
+                            config.CHECKPOINT_FOLDER
+                        )
+                    )
+                    training_state = torch.load(
+                        training_state_path, map_location="cpu"
+                    )
+                else:
+                    raise ValueError(
+                        "GRPO resume requires GRPO.resumable_checkpoints=True"
+                    )
             else:
                 ckpt_path = config.GRPO.ckpt_to_load
             ckpt_dict = self.load_checkpoint(ckpt_path, map_location="cpu")
             validate_rgb_checkpoint_metadata(ckpt_dict, config)
             if config.GRPO.is_requeue:
-                start_iter = ckpt_dict["iteration"]
+                required_training_state = {
+                    "iteration",
+                    "model_checkpoint",
+                    "resume_contract",
+                    "optim_state",
+                    "scheduler_state",
+                    "scaler_state",
+                    "runtime_state",
+                }
+                missing = sorted(
+                    required_training_state.difference(training_state)
+                )
+                if missing:
+                    raise ValueError(
+                        "GRPO resume training state is incomplete; missing "
+                        f"{missing}: {training_state_path}"
+                    )
+                start_iter = int(training_state["iteration"])
+                if ckpt_dict.get("iteration") != start_iter:
+                    raise ValueError(
+                        "GRPO model and training-state iteration mismatch: "
+                        f"model={ckpt_dict.get('iteration')} "
+                        f"state={start_iter}"
+                    )
+                referenced_model = training_state["model_checkpoint"]
+                if referenced_model != os.path.basename(ckpt_path):
+                    raise ValueError(
+                        "GRPO training state references the wrong model: "
+                        f"{referenced_model!r} != "
+                        f"{os.path.basename(ckpt_path)!r}"
+                    )
+                current_contract = self._resume_contract()
+                if training_state["resume_contract"] != current_contract:
+                    raise ValueError(
+                        "GRPO resume configuration mismatch: "
+                        f"checkpoint={training_state['resume_contract']!r}, "
+                        f"current={current_contract!r}"
+                    )
             else:
                 start_iter = 0
 
@@ -389,10 +577,13 @@ class RLTrainer(BaseVLNCETrainer):
             )
 
             if config.GRPO.is_requeue:
-                self.optimizer.load_state_dict(ckpt_dict["optim_state"])
-                print("optimizer is load from checkpoint")
-                if "scheduler_state" in ckpt_dict:
-                    self.scheduler.load_state_dict(ckpt_dict["scheduler_state"])
+                self.optimizer.load_state_dict(training_state["optim_state"])
+                self.scheduler.load_state_dict(
+                    training_state["scheduler_state"]
+                )
+                self.scaler.load_state_dict(training_state["scaler_state"])
+                self._resume_training_state = training_state
+                print("optimizer, scheduler, and scaler loaded from checkpoint")
             else:
                 print("optimizer is initialized")
             logger.info(f"Loaded weights from checkpoint: {ckpt_path}, iteration: {start_iter}")
@@ -564,6 +755,14 @@ class RLTrainer(BaseVLNCETrainer):
             observation_space=observation_space,
             action_space=action_space,
         )
+        if self._resume_training_state is not None:
+            self._restore_runtime_state(
+                self._resume_training_state["runtime_state"]
+            )
+            logger.info(
+                "Resumed complete GRPO training state from iteration %d",
+                start_iter,
+            )
 
         total_iter = self.config.GRPO.iters 
         log_every  = self.config.GRPO.log_every 
@@ -606,6 +805,10 @@ class RLTrainer(BaseVLNCETrainer):
                     if not v_list: continue
                     final_logs[k] = np.mean(v_list)
 
+            runtime_state = None
+            if self.config.GRPO.resumable_checkpoints:
+                runtime_state = self._capture_runtime_state()
+
             if self.local_rank < 1:
                 loss_str = f'iter {cur_iter}: '
                 for k, avg_val in final_logs.items():
@@ -616,7 +819,11 @@ class RLTrainer(BaseVLNCETrainer):
                 writer.add_scalar('train/lr', current_lr, cur_iter)
                 logger.info(loss_str)
                 logger.info(f"lr: {current_lr}")
-                self.save_checkpoint(cur_iter)
+                self.save_checkpoint(
+                    cur_iter, runtime_state=runtime_state
+                )
+            if self.world_size > 1:
+                distr.barrier()
         
     def _train_interval(self, interval):
         if self.world_size > 1:

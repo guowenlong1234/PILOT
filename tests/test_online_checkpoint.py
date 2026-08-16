@@ -126,3 +126,44 @@ def test_server_r2r_sft_job_uses_requested_batch_and_schedule_defaults():
     )
     for token in required_tokens:
         assert token in source
+
+
+def test_server_r2r_grpo_job_uses_two_gpu_dino_formal_configuration():
+    source = Path(
+        "scripts/run_rae_r2r_grpo_server_job.sh"
+    ).read_text(encoding="utf-8")
+
+    required_tokens = (
+        "ETPR1_R2R_GRPO_SFT_CHECKPOINT",
+        "ckpt.iter8000.pth",
+        "ETPR1_R2R_GRPO_PRETRAINED_PATH",
+        "model_step_452500_nonvisual_transfer.pt",
+        "GRPO_ITERS=${ETPR1_R2R_GRPO_ITERS:-1000}",
+        "--nproc_per_node=2",
+        "GPU_NUMBERS 2",
+        "NUM_ENVIRONMENTS 8",
+        "GRPO.batch_size 8",
+        "GRPO.sample_num 8",
+        "GRPO.update_epochs 1",
+        "GRPO.grpo_beta 0.04",
+        "GRPO.resumable_checkpoints True",
+        'GRPO.keep_last_train_states "$GRPO_KEEP_LAST_STATES"',
+        'GRPO.keep_train_state_every_n_iters "$GRPO_KEEP_STATE_EVERY"',
+        "TASK_CONFIG.DATASET.SUFFIX _10",
+        "MODEL.RGB_ENCODER.precision ambient",
+    )
+    for token in required_tokens:
+        assert token in source
+    assert "sha256sum" not in source
+
+
+def test_server_r2r_grpo_manager_requires_complete_pair_for_resume():
+    source = Path(
+        "scripts/manage_rae_r2r_grpo_server.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "check_two_gpus_idle" in source
+    assert '"${#gpu_rows[@]}" -ne 2' in source
+    assert "require_complete_pair" in source
+    assert "train_state.iter${iteration}.pth" in source
+    assert "use resume or a new output root" in source

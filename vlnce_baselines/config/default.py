@@ -65,6 +65,9 @@ _C.GRPO.grpo_beta = 0.01
 _C.GRPO.grpo_epsilon = 0.2
 _C.GRPO.max_grad_norm = 1.0
 _C.GRPO.train_all = False
+_C.GRPO.resumable_checkpoints = False
+_C.GRPO.keep_last_train_states = 3
+_C.GRPO.keep_train_state_every_n_iters = 0
 # -----------------------------------------------------------------------------
 # IMITATION LEARNING CONFIG
 # -----------------------------------------------------------------------------

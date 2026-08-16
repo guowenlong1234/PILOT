@@ -1,13 +1,16 @@
 import hashlib
 import inspect
+import random
 import re
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import numpy as np
 import torch
 
 from vlnce_baselines.GRPO_trainer_ETP_R1 import RLTrainer as GrpoTrainer
+from vlnce_baselines import GRPO_trainer_ETP_R1 as grpo_trainer_module
 from vlnce_baselines import ss_trainer_ETP_R1 as sft_trainer_module
 from vlnce_baselines.models import checkpoint_utils as checkpoint_module
 from vlnce_baselines.models.checkpoint_utils import (
@@ -690,6 +693,111 @@ def test_resumable_sft_saves_model_and_training_state_separately(
         training_state["episode_iterator_state"]
         is episode_iterator_state
     )
+
+
+def test_resumable_grpo_saves_atomic_model_and_training_state_pair(
+    tmp_path, monkeypatch
+):
+    config, _ = _config(tmp_path)
+    config.CHECKPOINT_FOLDER = str(tmp_path)
+    config.ONLY_LAST_SAVEALL = True
+    config.GRPO = SimpleNamespace(
+        iters=1000,
+        resumable_checkpoints=True,
+        keep_last_train_states=3,
+        keep_train_state_every_n_iters=250,
+    )
+    trainer = object.__new__(GrpoTrainer)
+    trainer.config = config
+    trainer.policy = _FakePolicy()
+    trainer.optimizer = _StateHolder()
+    trainer.scheduler = _StateHolder()
+    trainer.scaler = _StateHolder()
+    trainer._resume_contract = lambda: {"world_size": 2}
+    saved = []
+    monkeypatch.setattr(
+        grpo_trainer_module,
+        "atomic_torch_save",
+        lambda obj, path: saved.append((obj, path)),
+    )
+    monkeypatch.setattr(
+        grpo_trainer_module,
+        "prune_training_states",
+        lambda *args: [],
+    )
+    runtime_state = {"format_version": 1, "world_size": 2, "ranks": []}
+
+    trainer.save_checkpoint(10, runtime_state=runtime_state)
+
+    assert len(saved) == 2
+    model, model_path = saved[0]
+    training_state, training_state_path = saved[1]
+    assert model_path.endswith("ckpt.iter10.pth")
+    assert training_state_path.endswith(
+        "train_states/train_state.iter10.pth"
+    )
+    assert "optim_state" not in model
+    assert training_state["model_checkpoint"] == "ckpt.iter10.pth"
+    assert training_state["iteration"] == 10
+    assert training_state["resume_contract"] == {"world_size": 2}
+    assert training_state["optim_state"] == {"value": 1}
+    assert training_state["scheduler_state"] == {"value": 1}
+    assert training_state["scaler_state"] == {"value": 1}
+    assert training_state["runtime_state"] is runtime_state
+
+
+def test_resumable_grpo_requires_runtime_state(tmp_path):
+    config, _ = _config(tmp_path)
+    config.CHECKPOINT_FOLDER = str(tmp_path)
+    config.ONLY_LAST_SAVEALL = True
+    config.GRPO = SimpleNamespace(
+        iters=1000,
+        resumable_checkpoints=True,
+        keep_last_train_states=3,
+        keep_train_state_every_n_iters=250,
+    )
+    trainer = object.__new__(GrpoTrainer)
+    trainer.config = config
+    trainer.policy = _FakePolicy()
+
+    with pytest.raises(ValueError, match="require runtime state"):
+        trainer.save_checkpoint(10)
+
+
+def test_grpo_restores_environment_and_rng_state(monkeypatch):
+    trainer = object.__new__(GrpoTrainer)
+    trainer.local_rank = 0
+    trainer.world_size = 1
+    trainer.device = 0
+    trainer.envs = _FakeVectorEnvs([{"worker": 0}])
+    cuda_states = []
+    monkeypatch.setattr(
+        torch.cuda,
+        "set_rng_state",
+        lambda state, device: cuda_states.append((state, device)),
+    )
+    runtime_state = {
+        "format_version": 1,
+        "world_size": 1,
+        "ranks": [
+            {
+                "rank": 0,
+                "num_envs": 1,
+                "environments": [{"worker": 0}],
+                "python_rng_state": random.getstate(),
+                "numpy_rng_state": np.random.get_state(),
+                "torch_rng_state": torch.get_rng_state(),
+                "cuda_rng_state": torch.tensor([1], dtype=torch.uint8),
+            }
+        ],
+    }
+
+    trainer._restore_runtime_state(runtime_state)
+
+    function_names, function_args_list = trainer.envs.calls[-1]
+    assert function_names == ["set_episode_iterator_state"]
+    assert function_args_list == [{"state": {"worker": 0}}]
+    assert cuda_states[0][1] == 0
 
 
 def test_resumable_sft_launches_configured_checkpoint_sync_after_both_saves(
