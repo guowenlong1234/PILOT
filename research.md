@@ -51,6 +51,8 @@ README 原始说明要求创建 `etpr1` conda 环境，核心环境为 Python 3.
 - `scripts/manage_rae_r2r_eval_watch_host.sh start|status|tail|stop`：测评机宿主机持续监控同步完成的 checkpoint，在确认 ETPNav 未占用 GPU 后，通过 `gwl-etpr1-rae` 和 `etpr1_rae` 串行完成 R2R `val_unseen` 全量评测。
 - `scripts/manage_legacy452500_r2r_sft_eval_watch_host.sh start|status|tail|stop`：本次旧最佳预训练迁移 SFT 的专用测评入口；固定 checkpoint/结果目录，并等待测评机 `pretrain_resume_source_250000` 训练进程退出且 GPU 空闲后，再按迭代正序启动完整 R2R `val_unseen` 评测。
 - `scripts/manage_eval_best_pretrain_sft_followup_server.sh start|status|tail|stop`：训练机上的 SFT 自动接力入口。它要求当前 15,000 次 SFT 正常退出且最终模型/训练状态成对存在，同时要求测评机预训练正常完成第 500,000 步；随后读取最终 `best_metrics.json`，经 2.5 GbE 直连复制最佳模型并核对大小与 SHA-256，再以相同双卡 SFT 参数在新目录启动下一轮训练。
+- `scripts/manage_eval_best465000_r2r_sft_eval_watch_host.sh start|status|tail|stop`：测评机第二轮 SFT 的专用评测入口，固定使用第 465,000 步预训练基座、单卡、8 环境、完整 1,839 个 `val_unseen` episode，并按 checkpoint 迭代正序评测。
+- `scripts/manage_second_sft_eval_handoff_host.sh start|status|tail|stop`：测评机两轮 SFT 评测自动接力入口。它逐个验证第一轮的 75 份 JSON 结果，等第一轮全部完成且 GPU 显存低于 1 GiB 后，只启动一次第二轮专用 watcher。
 
 ## Important Modules And Functions
 
@@ -132,6 +134,7 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 - 2026-08-15 18:33（Asia/Shanghai），测评机已启动本次 SFT 的专用评测 watcher，日志为 `data/logs/rae_dinov2_etpnav_cls_768/r2r_sft_legacy452500_nonvisual_20260815/eval_watch_val_unseen/watch.log`。启动时已收到 2 个 SFT checkpoint、结果数为 0；日志明确以 `reason=blocking_project_task` 等待仍在运行的预训练，没有创建评测 `run.py` 进程。18:44 收紧进程匹配条件以排除长期 TensorBoard 后重启，当前 PID 为 `1489031`；预训练退出后还会检查 4090 显存不超过 1 GiB，才按迭代正序逐个进行完整 R2R `val_unseen` 评测。
 - 2026-08-15 18:45（Asia/Shanghai），训练机已启动“当前 SFT 完成后使用测评机最终预训练最佳模型再训一次”的接力 watcher，PID 为 `983219`，日志为 `data/logs/rae_dinov2_etpnav_cls_768/eval_best_sft_followup_monitor/watch.log`。部署时当前 SFT 仍正常运行，watcher 状态为 `reason=current_sft_running`。测评机预训练当时的临时最佳为第 465,000 步、联合分数 `1.6718887749`，但 watcher 不提前固定该点；它只会在测评机第 500,000 步模型和训练状态存在且 supervisor 为 `exit_code=0` 后读取最终最佳。预训练进程判定同时匹配 `train_r2r.py` 与输出根目录，不会把长期 TensorBoard 误认为训练进程。下一轮固定沿用双卡、每卡 8 环境、每卡 batch 8、梯度累积 1、15,000 次及当前全部 SFT 调度参数，并使用新的实验与同步目录。
 - 2026-08-16 10:21（Asia/Shanghai），两个自动接力均已生效。测评机预训练于 01:11 正常完成第 500,000 步，最终最佳仍为第 465,000 步、联合分数 `1.6718887749`。第一轮 legacy452500 SFT 于 10:09 正常完成 15,000 次并以 `exit_code=0` 退出；训练机接力 watcher 随后复制并校验最终最佳模型，于 10:10 启动同参数第二轮 `rae_dinov2_etpnav_cls_768_eval_best465000_r2r_sft`，核验时约到第 227 次且第 200 次 checkpoint 已同步测评机。测评机 watcher 已完成第一轮 SFT 的 60/75 个完整 R2R `val_unseen` 评测，正在评估第 61 个 `ckpt.iter12200.pth`；两台机器均无运行时错误。
+- 2026-08-16 10:30（Asia/Shanghai），测评机已启动两轮评测接力 watcher，PID 为 `1623716`，日志为 `data/logs/rae_dinov2_etpnav_cls_768/second_sft_eval_handoff/watch.log`。启动后确认第一轮已有 61/75 份有效结果，日志明确为 `reason=first_eval_incomplete`；第一轮 watcher PID `1489031` 继续单独评测 `ckpt.iter12400.pth`，第二轮 watcher 仍停止，已有 1 个同步 checkpoint、0 份结果，没有提前占用 GPU。第一轮达到 75 份有效 JSON 且 GPU 低于 1 GiB 后，接力脚本会以同样的单卡、8 环境和完整 1,839 episode 参数按正序启动第二轮评测。
 - 2026-08-13 已修复离线 RAE/DINOv2 全景生成的俯仰相机漂移；生成器现在使用 ETPNav 的零传感器偏移方案。训练机当前使用的 10,567 视点 `RAE-DINOv2-B-14-RAW-CLS-views-habitat.hdf5` 仍是修复前旧逻辑采集的，本次按用户要求不重新生成。
 - 2026-08-13 SFT 检查点保存支持通过 `IL.checkpoint_sync_enabled` 和 `IL.checkpoint_sync_destination` 异步原子同步；两机间使用 `10.10.10.1/10.10.10.2` 的 2.5 GbE 直连。持续监控和批量评测通过 `EVAL.checkpoint_order` 选择正序或倒序，并从同一配置的同步目标推导本地监控目录。
 - 2026-08-13 运行状态：训练机的双卡 R2R SFT 已按用户要求正常停止，checkpoint 同步守护进程也已停止；最后一对完整模型/训练状态为第 14,200 次迭代。测评机的 R2R `val_unseen` 监控和正在执行的第 14,200 次迭代 checkpoint 评测也已停止，已完成的 70 份评测结果保持不变。停止后两台机器均无训练/测评计算进程：训练机两张 A6000 的计算显存占用为空，测评机 4090 仅保留约 130 MiB 桌面基础占用。训练机 TensorBoard 和测评机日志查看器不是计算任务，仍保持运行。
@@ -152,6 +155,8 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 - 测评机只有一张 RTX 4090。现有 ETPNav 任务占用 GPU 时，不得并行启动全量特征生成、预训练、SFT、GRPO 或完整评测，也不得擅自中断 ETPNav。
 
 ## Last Reviewed
+
+2026-08-16，任务上下文：为测评机部署两轮 SFT checkpoint 评测自动接力。检查并验证了通用评测 watcher、第二轮固定参数入口和结果完整性/GPU 空闲交接脚本；本地与测评机容器针对性测试均为 `8 passed`。测评机现场确认第一轮只有一个 `run.py`，接力 watcher 正等待 61/75，第二轮没有提前启动。
 
 2026-08-14，任务上下文：在保持每个 MLM/SAP DataLoader 两个 worker 的前提下修复预训练 CPU OOM。实现 JSONL 惰性 mmap 索引、有界特征 LRU、干净 `spawn`、训练/验证 worker 分离、预取和锁页内存约束，并补齐恢复脚本的显式参数。测评机专用容器完成真实样本数值一致性、2,000/5,000 micro-batch 内存平台、CUDA 先初始化顺序和退出清理验证；没有启动或恢复正式训练。
 
