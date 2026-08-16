@@ -138,6 +138,9 @@ resolve_selected_resources() {
     esac
     [ -s "$SELECTED_LOCAL_CKPT" ] || { echo "Selected local checkpoint is missing: $SELECTED_LOCAL_CKPT" >&2; return 1; }
     [ -s "$SELECTED_LOCAL_PRETRAIN" ] || { echo "Selected local pretrain is missing: $SELECTED_LOCAL_PRETRAIN" >&2; return 1; }
+    # Remote SFT copies may be intentionally removed after their evaluations.
+    # The training-machine original is authoritative for GRPO and disk sizing.
+    SELECTED_BYTES=$(stat -c %s -- "$SELECTED_LOCAL_CKPT")
 }
 
 available_bytes_local() {

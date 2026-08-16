@@ -39,7 +39,9 @@ def finite_metric(metrics, key, path):
 
 def load_run(label, result_dir, checkpoint_dir, expected):
     result_dir = Path(result_dir)
-    checkpoint_dir = Path(checkpoint_dir)
+    check_checkpoint = checkpoint_dir != "-"
+    if check_checkpoint:
+        checkpoint_dir = Path(checkpoint_dir)
     found = {}
     for path in result_dir.glob("stats_ckpt_*_val_unseen.json"):
         match = RESULT_RE.fullmatch(path.name)
@@ -68,9 +70,15 @@ def load_run(label, result_dir, checkpoint_dir, expected):
             raise ValueError(f"{result_path}: expected a JSON object")
         success = finite_metric(metrics, "success", result_path)
         spl = finite_metric(metrics, "spl", result_path)
-        checkpoint = checkpoint_dir / f"ckpt.iter{iteration}.pth"
-        if not checkpoint.is_file() or checkpoint.stat().st_size <= 0:
-            raise ValueError(f"{label}: checkpoint missing or empty: {checkpoint}")
+        checkpoint = None
+        checkpoint_bytes = 0
+        if check_checkpoint:
+            checkpoint = checkpoint_dir / f"ckpt.iter{iteration}.pth"
+            if not checkpoint.is_file() or checkpoint.stat().st_size <= 0:
+                raise ValueError(
+                    f"{label}: checkpoint missing or empty: {checkpoint}"
+                )
+            checkpoint_bytes = checkpoint.stat().st_size
         rows.append(
             {
                 "run": label,
@@ -79,8 +87,10 @@ def load_run(label, result_dir, checkpoint_dir, expected):
                 "spl": spl,
                 "score": success + spl,
                 "result_path": str(result_path.resolve()),
-                "checkpoint_path": str(checkpoint.resolve()),
-                "checkpoint_bytes": checkpoint.stat().st_size,
+                "checkpoint_path": (
+                    str(checkpoint.resolve()) if checkpoint is not None else None
+                ),
+                "checkpoint_bytes": checkpoint_bytes,
             }
         )
     return rows

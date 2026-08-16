@@ -76,6 +76,35 @@ def test_selector_rejects_an_incomplete_evaluation_set(tmp_path):
     assert "missing=[400]" in result.stderr
 
 
+def test_selector_can_use_results_after_remote_checkpoint_copies_are_removed(
+    tmp_path,
+):
+    candidate = write_run(
+        tmp_path, "round1", [(200, 0.6, 0.4), (400, 0.7, 0.5)]
+    )
+    label, result_dir, _ = candidate.split("=", 2)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SELECTOR),
+            "--total-iterations",
+            "400",
+            "--checkpoint-interval",
+            "200",
+            "--candidate",
+            f"{label}={result_dir}=-",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    selected = json.loads(result.stdout)
+
+    assert selected["iteration"] == 400
+    assert selected["checkpoint_path"] is None
+    assert selected["checkpoint_bytes"] == 0
+
+
 def test_followup_runs_one_grpo_and_keeps_original_checkpoint_interval():
     source = MONITOR.read_text(encoding="utf-8")
     required_tokens = (
@@ -92,6 +121,7 @@ def test_followup_runs_one_grpo_and_keeps_original_checkpoint_interval():
         "eval_disk_space",
         "TRAIN_MIN_FREE_GIB",
         "GRPO_CHECKPOINT_SYNC_DESTINATION",
+        'SELECTED_BYTES=$(stat -c %s -- "$SELECTED_LOCAL_CKPT")',
     )
     for token in required_tokens:
         assert token in source
