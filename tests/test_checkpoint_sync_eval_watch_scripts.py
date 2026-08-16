@@ -69,6 +69,43 @@ def test_legacy452500_eval_watch_pins_current_sft_and_pretrain_blocker():
         assert token in source
 
 
+def test_second_sft_eval_watch_pins_matching_checkpoint_and_hyperparameters():
+    source = Path(
+        "scripts/manage_eval_best465000_r2r_sft_eval_watch_host.sh"
+    ).read_text(encoding="utf-8")
+
+    required_tokens = (
+        "r2r_sft_eval_best465000_20260816/checkpoints/",
+        "rae_dinov2_etpnav_cls_768_eval_best465000_r2r_sft",
+        "r2r_sft_eval_best465000_20260816/eval_watch_val_unseen",
+        "data/pretrain_resume_source_250000/best/model_best_step_465000.pt",
+        "ETPR1_R2R_EVAL_NUM_ENVIRONMENTS:-8",
+        "ETPR1_R2R_EVAL_CHECKPOINT_ORDER:-ascending",
+        'manage_rae_r2r_eval_watch_host.sh" "${1:-status}"',
+    )
+    for token in required_tokens:
+        assert token in source
+
+
+def test_second_eval_handoff_requires_all_valid_first_results_and_idle_gpu():
+    source = Path(
+        "scripts/manage_second_sft_eval_handoff_host.sh"
+    ).read_text(encoding="utf-8")
+
+    required_tokens = (
+        "FIRST_EXPECTED_RESULTS:-75",
+        "json.load(stream)",
+        "first_eval_incomplete",
+        "gpu_busy_after_first_eval",
+        'if ! gpu_is_idle; then',
+        'if "$SECOND_WATCH" start; then',
+        "second_eval_launched_at",
+        "launched.env",
+    )
+    for token in required_tokens:
+        assert token in source
+
+
 def test_checkpoint_order_and_watch_directory_come_from_one_config(tmp_path):
     checkpoint_dir = tmp_path / "received"
     checkpoint_dir.mkdir()
