@@ -90,6 +90,33 @@ def test_has_new_results_checks_each_metric_independently(tmp_path):
     )
 
 
+def test_custom_tag_prefix_keeps_grpo_axis_separate(tmp_path):
+    write_result(tmp_path, 10, spl=0.4, success=0.5)
+    records = normalizer.discover_results(tmp_path, "val_unseen")
+    writer = FakeWriter()
+
+    appended, maximum = normalizer.append_results(
+        writer,
+        records,
+        {},
+        "val_unseen",
+        "grpo_eval",
+    )
+
+    assert writer.values == [
+        ("grpo_eval_spl/val_unseen", 0.4, 10),
+        ("grpo_eval_success/val_unseen", 0.5, 10),
+    ]
+    assert appended == 2
+    assert maximum == 10
+    assert normalizer.has_new_results(
+        records,
+        {"grpo_eval_spl/val_unseen": 10},
+        "val_unseen",
+        "grpo_eval",
+    )
+
+
 def test_existing_event_file_restores_real_maximum_steps(tmp_path):
     writer = normalizer.SummaryWriter(str(tmp_path))
     writer.add_scalar("eval_spl/val_unseen", 0.2, 200)

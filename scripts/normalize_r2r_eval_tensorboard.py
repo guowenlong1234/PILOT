@@ -15,6 +15,7 @@ from tensorboardX import SummaryWriter
 
 
 RUN_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+TAG_PREFIX_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def parse_run_spec(value):
@@ -71,13 +72,19 @@ def load_maximum_steps(logdir):
     return maximum_steps
 
 
-def append_results(writer, records, maximum_steps, split):
+def metric_tag(key, split, tag_prefix="eval"):
+    return f"{tag_prefix}_{key}/{split}"
+
+
+def append_results(
+    writer, records, maximum_steps, split, tag_prefix="eval"
+):
     appended = 0
     maximum_iteration = -1
     for iteration, metrics in records:
         maximum_iteration = max(maximum_iteration, iteration)
         for key in sorted(metrics):
-            tag = f"eval_{key}/{split}"
+            tag = metric_tag(key, split, tag_prefix)
             if iteration <= maximum_steps.get(tag, -1):
                 continue
             writer.add_scalar(tag, metrics[key], iteration)
@@ -88,10 +95,10 @@ def append_results(writer, records, maximum_steps, split):
     return appended, maximum_iteration
 
 
-def has_new_results(records, maximum_steps, split):
+def has_new_results(records, maximum_steps, split, tag_prefix="eval"):
     return any(
         iteration
-        > maximum_steps.get(f"eval_{key}/{split}", -1)
+        > maximum_steps.get(metric_tag(key, split, tag_prefix), -1)
         for iteration, metrics in records
         for key in metrics
     )
@@ -108,6 +115,7 @@ def build_parser():
     )
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--split", default="val_unseen")
+    parser.add_argument("--tag-prefix", default="eval")
     parser.add_argument("--reload-interval", type=float, default=10.0)
     parser.add_argument("--once", action="store_true")
     return parser
@@ -117,6 +125,11 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.reload_interval <= 0:
         raise ValueError("--reload-interval must be positive")
+    if not TAG_PREFIX_RE.fullmatch(args.tag_prefix):
+        raise ValueError(
+            "tag prefix may contain only letters, digits, dot, "
+            "underscore, and dash"
+        )
     names = [name for name, _path in args.run]
     if len(names) != len(set(names)):
         raise ValueError("run names must be unique")
@@ -135,12 +148,18 @@ def main(argv=None):
         for name, result_dir, output_logdir in runs:
             records = discover_results(result_dir, args.split)
             maximum_steps = load_maximum_steps(output_logdir)
-            if not has_new_results(records, maximum_steps, args.split):
+            if not has_new_results(
+                records, maximum_steps, args.split, args.tag_prefix
+            ):
                 continue
             writer = SummaryWriter(str(output_logdir))
             try:
                 appended, maximum_iteration = append_results(
-                    writer, records, maximum_steps, args.split
+                    writer,
+                    records,
+                    maximum_steps,
+                    args.split,
+                    args.tag_prefix,
                 )
             finally:
                 writer.close()
