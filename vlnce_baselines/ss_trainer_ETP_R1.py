@@ -191,6 +191,14 @@ class RLTrainer(BaseVLNCETrainer):
         adapter = getattr(self, "raenwm_rgb_fusion_adapter", None)
         return getattr(adapter, "module", adapter) if adapter is not None else None
 
+    def _raenwm_heads_state_dict(self):
+        runtime = getattr(self, "raenwm_runtime", None)
+        predictor = getattr(runtime, "predictor", None)
+        heads = getattr(predictor, "heads", None)
+        if heads is not None:
+            return getattr(heads, "module", heads).state_dict()
+        return getattr(self, "_raenwm_head_state_override", None)
+
     def _load_raenwm_rgb_fusion_from_checkpoint(
         self, checkpoint, *, allow_missing
     ):
@@ -418,6 +426,9 @@ class RLTrainer(BaseVLNCETrainer):
             checkpoint["raenwm_rgb_fusion_adapter_state_dict"] = (
                 fusion_adapter.state_dict()
             )
+        heads_state_dict = self._raenwm_heads_state_dict()
+        if heads_state_dict is not None:
+            checkpoint["raenwm_heads_state_dict"] = heads_state_dict
         checkpoint_path = os.path.join(
             self.config.CHECKPOINT_FOLDER, f"ckpt.iter{iteration}.pth"
         )

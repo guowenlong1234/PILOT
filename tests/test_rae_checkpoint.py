@@ -644,6 +644,9 @@ def test_sft_checkpoint_saves_rgb_fusion_adapter_state(tmp_path, monkeypatch):
     trainer.optimizer = _StateHolder()
     trainer.scheduler = _StateHolder()
     trainer.raenwm_rgb_fusion_adapter = torch.nn.Linear(3, 2)
+    trainer.raenwm_runtime = SimpleNamespace(
+        predictor=SimpleNamespace(heads=torch.nn.Linear(4, 3))
+    )
     captured = {}
     monkeypatch.setattr(
         torch, "save", lambda *, obj, f: captured.update(obj=obj, path=f)
@@ -656,6 +659,9 @@ def test_sft_checkpoint_saves_rgb_fusion_adapter_state(tmp_path, monkeypatch):
     torch.testing.assert_close(
         saved["weight"], trainer.raenwm_rgb_fusion_adapter.weight
     )
+    assert set(captured["obj"]["raenwm_heads_state_dict"]) == {
+        "weight", "bias"
+    }
 
 
 def test_resumable_sft_saves_model_and_training_state_separately(
