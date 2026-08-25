@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,10 +11,12 @@ from vlnce_baselines.nwm.etp_adapter import (
     NwmEtpAdapter,
     RaeEtpAdapterConfig,
     RaeGhostInputRequest,
+    RaeLatentTargetRequest,
 )
 from vlnce_baselines.nwm.predictor import _extract_ema_state, _freeze_for_inference
 from vlnce_baselines.nwm.raenwm_core.infer_compat import _sample_time_latent
 from vlnce_baselines.nwm.runtime import RaeNwmLatentNormalizer
+from vlnce_baselines.nwm.active_lookahead import dino_cwp_future
 
 
 def _write_stats(path, mean=2.0, var=4.0):
@@ -111,6 +114,44 @@ def test_context_adapter_skips_until_four_frames_and_tracks_query_ids():
 
     adapter.pause_at(0)
     assert adapter.buffers == []
+
+
+def test_historical_context_snapshot_and_latent_target_batch_are_detached_cpu_copies():
+    adapter = NwmEtpAdapter(RaeEtpAdapterConfig(context_size=4))
+    adapter.reset(1)
+    for step in range(4):
+        latent = torch.full((768, 16, 16), float(step), requires_grad=True)
+        adapter.update_context(
+            0,
+            rgb=None,
+            position=np.asarray([0.0, 0.0, -step], dtype=np.float32),
+            yaw=0.0,
+            latent=latent,
+        )
+    snapshot = adapter.source_context_snapshot(
+        0, source_front_vp="front3", source_high_level_step=3
+    )
+    assert snapshot is not None
+    assert snapshot.context_latents.device.type == "cpu"
+    assert not snapshot.context_latents.requires_grad
+    assert tuple(snapshot.context_latents.shape) == (4, 768, 16, 16)
+
+    request = RaeLatentTargetRequest(
+        env_index=0,
+        ghost_vp="g0",
+        snapshot=snapshot,
+        target_position=np.asarray([1.0, 0.0, -3.0], dtype=np.float32),
+    )
+    batch = adapter.build_raenwm_latent_batch([request], device="cpu")
+    assert tuple(batch.context_latent.shape) == (1, 4, 768, 16, 16)
+    assert batch.records[0].ghost_vp == "g0"
+
+
+def test_predicted_future_can_only_invoke_nwm_through_runtime():
+    source = inspect.getsource(dino_cwp_future._predict_nwm_rows)
+    assert "raenwm_runtime.predict_latent_targets" in source
+    assert "raenwm_predictor" not in source
+    assert "predict_time_with_heads" not in source
 
 
 def test_static_run_of_three_is_dropped():

@@ -164,6 +164,29 @@ class RaeContextFrame:
     latent: Optional[torch.Tensor] = None
 
 
+@dataclass(frozen=True)
+class RaeSourceContextSnapshot:
+    """Episode-local four-frame latent context for one persistent q0 source."""
+
+    source_front_vp: str
+    source_high_level_step: int
+    context_latents: torch.Tensor
+    source_position: np.ndarray
+    source_yaw: float
+
+
+@dataclass(frozen=True)
+class RaeLatentTargetRequest:
+    """One latent-context NWM target used by predicted active lookahead."""
+
+    env_index: int
+    ghost_vp: str
+    snapshot: RaeSourceContextSnapshot
+    target_position: np.ndarray
+    target_yaw: Optional[float] = None
+    horizon_override: Optional[float] = None
+
+
 @dataclass
 class RaeContextBufferStats:
     pushed_frames: int = 0
@@ -342,6 +365,41 @@ class NwmEtpAdapter:
             latent=latent,
         )
 
+    def source_context_snapshot(
+        self,
+        env_index: int,
+        *,
+        source_front_vp: str,
+        source_high_level_step: int,
+    ) -> Optional[RaeSourceContextSnapshot]:
+        """Copy four normalized latent frames to immutable CPU storage."""
+
+        index = self._require_env_index(env_index)
+        frames = self.buffers[index].get_context()
+        if len(frames) != self.config.context_size:
+            return None
+        if any(frame.latent is None for frame in frames):
+            return None
+        context = torch.stack(
+            [frame.latent.detach().to(device="cpu", dtype=torch.float32) for frame in frames],
+            dim=0,
+        ).contiguous()
+        if context.ndim != 4 or int(context.shape[0]) != self.config.context_size:
+            raise ValueError(
+                "source latent context must have shape [T,C,H,W], "
+                f"got {tuple(context.shape)}"
+            )
+        if not bool(torch.isfinite(context).all()):
+            return None
+        latest = frames[-1]
+        return RaeSourceContextSnapshot(
+            source_front_vp=str(source_front_vp),
+            source_high_level_step=int(source_high_level_step),
+            context_latents=context,
+            source_position=_as_position3(latest.position),
+            source_yaw=_wrap_to_pi(float(latest.yaw)),
+        )
+
     def _local_displacement_m(self, current_position, current_yaw: float, ghost_position):
         cur = _as_position3(current_position)
         ghost = _as_position3(ghost_position)
@@ -399,6 +457,127 @@ class NwmEtpAdapter:
             distance_m=float(distance_m),
             horizon=float(horizon),
             condition=condition,
+        )
+
+    def build_target_record(
+        self,
+        *,
+        env_index: int,
+        ghost_vp: str,
+        source_position,
+        source_yaw: float,
+        target_position,
+        target_yaw: Optional[float] = None,
+        horizon_override: Optional[float] = None,
+    ) -> RaeGhostInputRecord:
+        """Build a condition for a historical context and explicit target."""
+
+        dx_m, dy_m, distance_m, bearing_delta = self._local_displacement_m(
+            current_position=source_position,
+            current_yaw=source_yaw,
+            ghost_position=target_position,
+        )
+        norm_dx, norm_dy = self._normalize_xy(dx_m, dy_m)
+        horizon = (
+            self._horizon_from_distance(distance_m)
+            if horizon_override is None
+            else float(
+                np.clip(
+                    float(horizon_override),
+                    self.config.min_horizon,
+                    self.config.max_horizon,
+                )
+            )
+        )
+        dtheta = (
+            bearing_delta
+            if target_yaw is None
+            else _wrap_to_pi(float(target_yaw) - float(source_yaw))
+        )
+        condition = NwmCondition(
+            dx=norm_dx,
+            dy=norm_dy,
+            dtheta=dtheta,
+            rel_t=horizon / 128.0,
+        )
+        return RaeGhostInputRecord(
+            env_index=_as_env_index(env_index),
+            ghost_vp=str(ghost_vp),
+            local_dx_m=float(dx_m),
+            local_dy_m=float(dy_m),
+            distance_m=float(distance_m),
+            horizon=float(horizon),
+            condition=condition,
+        )
+
+    def build_raenwm_latent_batch(
+        self,
+        requests: Sequence[RaeLatentTargetRequest],
+        device="cpu",
+    ) -> RaeNwmInputBatch:
+        """Batch heterogeneous historical latent contexts for frozen inference."""
+
+        device = torch.device(device)
+        if not requests:
+            return self._empty_batch(device=device)
+        contexts = []
+        records = []
+        for request in requests:
+            snapshot = request.snapshot
+            context = snapshot.context_latents
+            if not torch.is_tensor(context) or context.ndim != 4:
+                raise ValueError("latent target context must have shape [T,C,H,W]")
+            if int(context.shape[0]) != self.config.context_size:
+                raise ValueError(
+                    "latent target context length differs from NWM context size: "
+                    f"{context.shape[0]} vs {self.config.context_size}"
+                )
+            if not bool(torch.isfinite(context).all()):
+                raise ValueError("latent target context contains non-finite values")
+            contexts.append(context.to(dtype=torch.float32))
+            records.append(
+                self.build_target_record(
+                    env_index=request.env_index,
+                    ghost_vp=request.ghost_vp,
+                    source_position=snapshot.source_position,
+                    source_yaw=snapshot.source_yaw,
+                    target_position=request.target_position,
+                    target_yaw=request.target_yaw,
+                    horizon_override=request.horizon_override,
+                )
+            )
+
+        condition_values = [
+            [
+                record.condition.dx,
+                record.condition.dy,
+                record.condition.dtheta,
+                record.condition.rel_t,
+            ]
+            for record in records
+        ]
+        return RaeNwmInputBatch(
+            context=torch.empty(
+                (0, self.config.context_size, 3, self.config.image_size, self.config.image_size),
+                dtype=torch.float32,
+                device=device,
+            ),
+            curr_delta=torch.as_tensor(
+                [values[:3] for values in condition_values],
+                dtype=torch.float32,
+                device=device,
+            ).unsqueeze(1),
+            rel_t=torch.as_tensor(
+                [values[3] for values in condition_values],
+                dtype=torch.float32,
+                device=device,
+            ),
+            condition_tensor=torch.as_tensor(
+                condition_values, dtype=torch.float32, device=device
+            ),
+            context_latent=torch.stack(contexts, dim=0).to(device=device),
+            records=records,
+            skipped={},
         )
 
     def _empty_batch(self, device, skipped: Optional[Dict[str, int]] = None) -> RaeNwmInputBatch:

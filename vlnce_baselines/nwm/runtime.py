@@ -10,6 +10,7 @@ from vlnce_baselines.nwm.etp_adapter import (
     NwmEtpAdapter,
     RaeEtpAdapterConfig,
     RaeGhostInputRequest,
+    RaeLatentTargetRequest,
 )
 from vlnce_baselines.nwm.predictor import RaeNwmHeadPredictor
 from vlnce_baselines.nwm.types import NwmPrediction
@@ -204,6 +205,40 @@ class NwmPredictionRuntime:
                 yaw=float(yaws[env_index]),
                 latent=normalized[env_index],
             )
+
+    def source_context_snapshot(
+        self,
+        env_index: int,
+        *,
+        source_front_vp: str,
+        source_high_level_step: int,
+    ):
+        """Return a detached CPU copy of the normalized four-frame context."""
+
+        return self.adapter.source_context_snapshot(
+            env_index,
+            source_front_vp=source_front_vp,
+            source_high_level_step=source_high_level_step,
+        )
+
+    def predict_latent_targets(
+        self,
+        requests: Sequence[RaeLatentTargetRequest],
+        *,
+        initial_noise: Optional[torch.Tensor] = None,
+    ) -> NwmPrediction:
+        """Predict q0/q1 from saved contexts through the owned frozen predictor."""
+
+        self.last_batch = self.adapter.build_raenwm_latent_batch(
+            requests, device=self.device
+        )
+        self.last_prediction = self.predictor.predict_time_with_heads_from_etp_batch(
+            self.last_batch,
+            return_rgb=False,
+            generator=self.generator,
+            initial_noise=initial_noise,
+        )
+        return self.last_prediction
 
     def predict(
         self,

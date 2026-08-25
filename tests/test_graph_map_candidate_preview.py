@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 import sys
 import types
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -90,3 +91,39 @@ def test_preview_classifies_node_and_existing_ghost_and_preserves_goal_cache():
     assert graph.ghost_goal_dists["g0"] == [4.0, 2.0]
     graph.delete_ghost("g0")
     assert "g0" not in graph.ghost_goal_dists
+
+
+def test_persistent_q0_and_source_context_follow_ghost_lifecycle():
+    graph = _graph()
+    zero = np.zeros(3, dtype=np.float32)
+    ghost_pos = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+    mapping = graph.update_graph(
+        None, 1, "0", zero, torch.zeros(2), ["0_0"], [ghost_pos],
+        torch.ones(1, 2), [ghost_pos.copy()],
+    )
+    records = graph.record_persistent_q0_candidates(
+        mapping,
+        [ghost_pos],
+        [ghost_pos],
+        [{
+            "valid": True,
+            "raw_position": ghost_pos,
+            "position": ghost_pos,
+            "navmesh_island": 2,
+        }],
+        [3],
+        [1.0],
+        source_front_vp="0",
+        source_high_level_step=0,
+    )
+    assert len(records) == 1
+    assert graph.select_persistent_q0("g0") is records[0]
+    snapshot = SimpleNamespace(
+        source_front_vp="0", source_high_level_step=0
+    )
+    graph.record_raenwm_source_context(snapshot)
+    assert graph.get_raenwm_source_context(records[0]) is snapshot
+
+    graph.delete_ghost("g0")
+    assert "g0" not in graph.ghost_persistent_q0
+    assert graph.raenwm_source_contexts == {}

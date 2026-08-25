@@ -456,6 +456,87 @@ class VLNCEDaggerEnv(habitat.RLEnv):
         ori = np.array([*(agent_state.rotation.imag), agent_state.rotation.real])
         return (pos, ori)
 
+    def _normalize_candidate_q0_trajectory(self, trajectory):
+        """Normalize each temporary action endpoint on the start navmesh island."""
+
+        sim = self._env.sim
+        pathfinder = sim.pathfinder
+        raw_points = [
+            np.asarray(point, dtype=np.float32).reshape(3) for point in trajectory
+        ]
+        try:
+            raw_start = raw_points[0]
+            normalized = (
+                raw_start.copy()
+                if sim.is_navigable(raw_start)
+                else np.asarray(pathfinder.snap_point(raw_start), dtype=np.float32)
+            )
+            if (
+                normalized.shape != (3,)
+                or not np.isfinite(normalized).all()
+                or not sim.is_navigable(normalized)
+            ):
+                raise RuntimeError("live agent start is not navigable")
+            island = int(pathfinder.get_island(normalized))
+            normalized_trace = [normalized.copy()]
+            for step_index, raw_endpoint in enumerate(raw_points[1:], start=1):
+                endpoint = np.asarray(
+                    pathfinder.try_step(normalized, raw_endpoint), dtype=np.float32
+                )
+                if (
+                    endpoint.shape == (3,)
+                    and np.isfinite(endpoint).all()
+                    and not sim.is_navigable(endpoint)
+                ):
+                    endpoint = np.asarray(
+                        pathfinder.snap_point(endpoint, island), dtype=np.float32
+                    )
+                if (
+                    endpoint.shape != (3,)
+                    or not np.isfinite(endpoint).all()
+                    or not sim.is_navigable(endpoint)
+                ):
+                    raise RuntimeError(
+                        f"trajectory step {step_index} is not navigable"
+                    )
+                if int(pathfinder.get_island(endpoint)) != island:
+                    raise RuntimeError(
+                        f"trajectory step {step_index} changed navmesh island"
+                    )
+                normalized = endpoint
+                normalized_trace.append(normalized.copy())
+            raw_final = raw_points[-1]
+            correction = normalized - raw_final
+            return {
+                "valid": True,
+                "position": normalized.copy(),
+                "navmesh_island": island,
+                "normalized_trajectory": normalized_trace,
+                "q0_was_normalized": not np.allclose(
+                    normalized, raw_final, atol=1.0e-7, rtol=0.0
+                ),
+                "q0_normalization_distance_m": float(np.linalg.norm(correction)),
+                "q0_normalization_horizontal_m": float(
+                    np.hypot(correction[0], correction[2])
+                ),
+                "q0_normalization_vertical_m": float(abs(correction[1])),
+                "error_type": None,
+                "error": None,
+            }
+        except Exception as exc:
+            return {
+                "valid": False,
+                "position": raw_points[-1].copy(),
+                "navmesh_island": None,
+                "normalized_trajectory": [],
+                "q0_was_normalized": False,
+                "q0_normalization_distance_m": 0.0,
+                "q0_normalization_horizontal_m": 0.0,
+                "q0_normalization_vertical_m": 0.0,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+
     def get_navigation_state(
         self,
         angles,
@@ -496,37 +577,72 @@ class VLNCEDaggerEnv(habitat.RLEnv):
         ].actuation.amount
         candidate_positions = []
         candidate_goal_distances = []
+        candidate_q0_records = []
         try:
             for angle, forward in zip(angles, forwards):
-                theta = (
-                    np.arctan2(
-                        init_rotation.imag[1],
-                        init_rotation.real,
+                trajectory = [init_position.copy()]
+                post_position = init_position.copy()
+                estimated_position = init_position.copy()
+                estimated_heading = heading_from_quaternion(init_rotation) + float(angle)
+                estimated_position[0] -= float(forward) * np.sin(estimated_heading)
+                estimated_position[2] -= float(forward) * np.cos(estimated_heading)
+                try:
+                    theta = (
+                        np.arctan2(init_rotation.imag[1], init_rotation.real)
+                        + angle / 2
                     )
-                    + angle / 2
-                )
-                rotation = np.quaternion(
-                    np.cos(theta),
-                    0,
-                    np.sin(theta),
-                    0,
-                )
-                sim.set_agent_state(init_position, rotation)
-                for _ in range(int(forward // init_forward)):
-                    sim.step_without_obs(forward_action)
-                post_position = np.array(
-                    sim.get_agent_state().position,
-                    copy=True,
-                )
+                    rotation = np.quaternion(
+                        np.cos(theta), 0, np.sin(theta), 0
+                    )
+                    sim.set_agent_state(init_position, rotation)
+                    low_level_steps = int(forward // init_forward)
+                    for _ in range(low_level_steps):
+                        sim.step_without_obs(forward_action)
+                        trajectory.append(
+                            np.asarray(
+                                sim.get_agent_state().position,
+                                dtype=np.float32,
+                            ).copy()
+                        )
+                    post_position = trajectory[-1].copy()
+                    record = self._normalize_candidate_q0_trajectory(trajectory)
+                    record.update(
+                        {
+                            "raw_position": post_position.copy(),
+                            "estimated_position": estimated_position.copy(),
+                            "candidate_angle_rad": float(angle),
+                            "candidate_forward_m": float(forward),
+                            "low_level_step_m": float(init_forward),
+                            "trajectory_steps": low_level_steps,
+                        }
+                    )
+                except Exception as exc:
+                    record = {
+                        "valid": False,
+                        "position": post_position.copy(),
+                        "raw_position": post_position.copy(),
+                        "estimated_position": estimated_position.copy(),
+                        "navmesh_island": None,
+                        "normalized_trajectory": [],
+                        "candidate_angle_rad": float(angle),
+                        "candidate_forward_m": float(forward),
+                        "low_level_step_m": float(init_forward),
+                        "trajectory_steps": max(0, len(trajectory) - 1),
+                        "q0_was_normalized": False,
+                        "q0_normalization_distance_m": 0.0,
+                        "q0_normalization_horizontal_m": 0.0,
+                        "q0_normalization_vertical_m": 0.0,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    }
+                finally:
+                    sim.set_agent_state(init_position, init_rotation)
                 candidate_positions.append(post_position)
+                candidate_q0_records.append(record)
                 if include_candidate_goal_distances:
                     candidate_goal_distances.append(
-                        sim.geodesic_distance(
-                            post_position,
-                            goal_position,
-                        )
+                        sim.geodesic_distance(post_position, goal_position)
                     )
-                sim.set_agent_state(init_position, init_rotation)
         finally:
             sim.set_agent_state(init_position, init_rotation)
 
@@ -536,6 +652,7 @@ class VLNCEDaggerEnv(habitat.RLEnv):
             "current_goal_distance": current_goal_distance,
             "candidate_positions": candidate_positions,
             "candidate_goal_distances": candidate_goal_distances,
+            "candidate_q0_records": candidate_q0_records,
         }
 
     def get_observation_at(self,

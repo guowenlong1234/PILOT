@@ -161,6 +161,8 @@ class GraphMap(object):
         self.ghost_fronts = {}      # viewpoint to front_vp id
         self.ghost_real_pos = {}    # for training
         self.ghost_goal_dists = {}  # cached geodesic distance for real pos
+        self.ghost_persistent_q0 = {}
+        self.raenwm_source_contexts = {}
         self.has_real_pos = has_real_pos
         self.merge_ghost = merge_ghost
         self.ghost_aug = ghost_aug  # 0 ~ 1, noise level
@@ -247,9 +249,100 @@ class GraphMap(object):
         self.ghost_mean_pos.pop(vp)
         self.ghost_embeds.pop(vp)
         self.ghost_fronts.pop(vp)
+        removed_q0 = self.ghost_persistent_q0.pop(vp, None)
+        if removed_q0:
+            live_context_keys = {
+                self._raenwm_source_context_key(
+                    record.source_front_vp, record.source_high_level_step
+                )
+                for records in self.ghost_persistent_q0.values()
+                for record in records
+            }
+            for record in removed_q0:
+                key = self._raenwm_source_context_key(
+                    record.source_front_vp, record.source_high_level_step
+                )
+                if key not in live_context_keys:
+                    self.raenwm_source_contexts.pop(key, None)
         if self.has_real_pos:
             self.ghost_real_pos.pop(vp)
             self.ghost_goal_dists.pop(vp)
+
+    def record_persistent_q0_candidates(
+        self,
+        candidate_to_ghost,
+        candidate_estimated_positions,
+        candidate_real_positions,
+        candidate_q0_records,
+        candidate_view_indices,
+        candidate_forward_distances,
+        *,
+        source_front_vp,
+        source_high_level_step,
+        skipped_candidates=None,
+    ):
+        """Persist trajectory-valid q0 records for the mapped live ghosts."""
+
+        from vlnce_baselines.nwm.active_lookahead.persistent_q0 import (
+            append_persistent_q0_records,
+            build_persistent_q0_records,
+        )
+
+        records = build_persistent_q0_records(
+            candidate_to_ghost,
+            candidate_estimated_positions,
+            candidate_real_positions,
+            candidate_q0_records,
+            candidate_view_indices,
+            candidate_forward_distances,
+            source_front_vp=source_front_vp,
+            source_high_level_step=source_high_level_step,
+            skipped_candidates=skipped_candidates,
+        )
+        append_persistent_q0_records(self.ghost_persistent_q0, records)
+        return records
+
+    def select_persistent_q0(self, ghost_vp):
+        """Return the canonical legal q0 using the stable source ordering."""
+
+        if ghost_vp not in self.ghost_mean_pos:
+            raise KeyError(f"Unknown ghost vp: {ghost_vp}")
+        from vlnce_baselines.nwm.active_lookahead.persistent_q0 import (
+            select_ghost_canonical_q0,
+        )
+
+        return select_ghost_canonical_q0(
+            self.ghost_persistent_q0,
+            ghost_vp,
+            self.ghost_mean_pos[ghost_vp],
+        )
+
+    @staticmethod
+    def _raenwm_source_context_key(source_front_vp, source_high_level_step):
+        return (str(source_front_vp), int(source_high_level_step))
+
+    def record_raenwm_source_context(self, snapshot):
+        key = self._raenwm_source_context_key(
+            snapshot.source_front_vp,
+            snapshot.source_high_level_step,
+        )
+        existing = self.raenwm_source_contexts.get(key)
+        if existing is not None:
+            if existing is not snapshot:
+                raise ValueError(f"duplicate RAE-NWM source context for {key}")
+            return existing
+        self.raenwm_source_contexts[key] = snapshot
+        return snapshot
+
+    def get_raenwm_source_context(self, persistent_q0):
+        if persistent_q0 is None:
+            return None
+        return self.raenwm_source_contexts.get(
+            self._raenwm_source_context_key(
+                persistent_q0.source_front_vp,
+                persistent_q0.source_high_level_step,
+            )
+        )
 
     def update_graph(self, prev_vp, step_id,
                            cur_vp, cur_pos, cur_embeds,
