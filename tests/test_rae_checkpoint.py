@@ -633,6 +633,31 @@ def test_trainer_save_branches_keep_etpnav_visual_parameters(
         )
 
 
+def test_sft_checkpoint_saves_rgb_fusion_adapter_state(tmp_path, monkeypatch):
+    config, _ = _config(tmp_path)
+    config.CHECKPOINT_FOLDER = str(tmp_path)
+    config.ONLY_LAST_SAVEALL = True
+    config.IL = SimpleNamespace(iters=2, resumable_checkpoints=False)
+    trainer = object.__new__(SftTrainer)
+    trainer.config = config
+    trainer.policy = _FakePolicy()
+    trainer.optimizer = _StateHolder()
+    trainer.scheduler = _StateHolder()
+    trainer.raenwm_rgb_fusion_adapter = torch.nn.Linear(3, 2)
+    captured = {}
+    monkeypatch.setattr(
+        torch, "save", lambda *, obj, f: captured.update(obj=obj, path=f)
+    )
+
+    trainer.save_checkpoint(1)
+
+    saved = captured["obj"]["raenwm_rgb_fusion_adapter_state_dict"]
+    assert set(saved) == {"weight", "bias"}
+    torch.testing.assert_close(
+        saved["weight"], trainer.raenwm_rgb_fusion_adapter.weight
+    )
+
+
 def test_resumable_sft_saves_model_and_training_state_separately(
     tmp_path, monkeypatch
 ):

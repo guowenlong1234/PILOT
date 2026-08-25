@@ -153,6 +153,87 @@ def test_sft_nwm_shadow_bridge_builds_raw_candidate_queries_without_mutation(
             np.testing.assert_array_equal(actual, expected)
 
 
+def _fusion_config(*, trainable=False, gpu_numbers=1):
+    return SimpleNamespace(
+        GPU_NUMBERS=gpu_numbers,
+        MODEL=SimpleNamespace(
+            RGB_ENCODER=SimpleNamespace(type="rae_dinov2", output_size=768),
+            RAENWM=SimpleNamespace(
+                enabled=True,
+                rgb_fusion_enabled=True,
+                rgb_fusion_type="residual_gate",
+                rgb_fusion_alpha=1.0,
+                rgb_fusion_zero_init=True,
+                rgb_fusion_trainable=trainable,
+            ),
+        ),
+    )
+
+
+def test_sft_rgb_fusion_groups_preview_queries_once_per_ghost(monkeypatch):
+    trainer = object.__new__(RLTrainer)
+    trainer.config = _fusion_config()
+    monkeypatch.setattr(
+        sft_trainer_module,
+        "heading_from_quaternion",
+        lambda value: float(value),
+    )
+    preview = SimpleNamespace
+    queries = trainer._build_raenwm_preview_queries(
+        [np.zeros(3, dtype=np.float32)],
+        [0.25],
+        [[
+            preview(
+                target_kind="new_ghost",
+                target_vp="g0",
+                position=np.asarray([1.0, 0.0, 0.0]),
+            ),
+            preview(
+                target_kind="new_ghost",
+                target_vp="g0",
+                position=np.asarray([3.0, 0.0, 0.0]),
+            ),
+            preview(
+                target_kind="node", target_vp="0", position=np.zeros(3)
+            ),
+        ]],
+    )
+    assert len(queries) == 1
+    assert queries[0].query_id == "g0"
+    np.testing.assert_array_equal(
+        queries[0].target_position,
+        np.asarray([2.0, 0.0, 0.0], dtype=np.float32),
+    )
+
+
+def test_sft_rgb_fusion_checkpoint_loading_is_strict():
+    trainer = object.__new__(RLTrainer)
+    trainer.config = _fusion_config()
+    trainer.device = torch.device("cpu")
+    trainer.raenwm_rgb_fusion_adapter = None
+    adapter = trainer._initialize_raenwm_rgb_fusion_adapter()
+    state = adapter.state_dict()
+    trainer._load_raenwm_rgb_fusion_from_checkpoint(
+        {"raenwm_rgb_fusion_adapter_state_dict": state},
+        allow_missing=False,
+    )
+    assert len(state) == 10
+    with pytest.raises(ValueError, match="missing required"):
+        trainer._load_raenwm_rgb_fusion_from_checkpoint({}, allow_missing=False)
+    assert trainer._load_raenwm_rgb_fusion_from_checkpoint(
+        {}, allow_missing=True
+    ) is None
+
+
+def test_sft_trainable_rgb_fusion_rejects_multiple_gpus():
+    trainer = object.__new__(RLTrainer)
+    trainer.config = _fusion_config(trainable=True, gpu_numbers=2)
+    trainer.device = torch.device("cpu")
+    trainer.raenwm_rgb_fusion_adapter = None
+    with pytest.raises(RuntimeError, match="only GPU_NUMBERS=1"):
+        trainer._initialize_raenwm_rgb_fusion_adapter()
+
+
 def test_graph_map_keeps_goal_distances_aligned_with_real_positions():
     graph = GraphMap(
         has_real_pos=True,

@@ -43,6 +43,11 @@ from vlnce_baselines.models.graph_utils import (
     MAX_DIST,
     heading_from_quaternion,
 )
+from vlnce_baselines.nwm.rgb_fusion import (
+    RaeNwmRgbFusionAdapter,
+    apply_rgb_fusion_to_current_candidates,
+    clone_wp_outputs_candidate_rgb,
+)
 from vlnce_baselines.models.checkpoint_utils import (
     navigation_state_dict,
     report_navigation_incompatible_keys,
@@ -118,7 +123,9 @@ class RLTrainer(BaseVLNCETrainer):
         self.max_len = int(config.IL.max_traj_len) #  * 0.97 transfered gt path got 0.96 spl
         self.illegal_episodes_count = 0
         self.raenwm_runtime = None
+        self.raenwm_rgb_fusion_adapter = None
         self.last_raenwm_prediction = None
+        self.last_raenwm_rgb_fusion_diagnostics = None
         self._raenwm_head_state_override = None
         self._raenwm_context_source_logged = False
 
@@ -126,6 +133,83 @@ class RLTrainer(BaseVLNCETrainer):
         model_config = getattr(self.config, "MODEL", None)
         raenwm_config = getattr(model_config, "RAENWM", None)
         return bool(getattr(raenwm_config, "enabled", False))
+
+    def _raenwm_rgb_fusion_enabled(self):
+        return self._raenwm_enabled() and bool(
+            getattr(self.config.MODEL.RAENWM, "rgb_fusion_enabled", False)
+        )
+
+    def _raenwm_rgb_fusion_trainable(self):
+        return self._raenwm_rgb_fusion_enabled() and bool(
+            getattr(self.config.MODEL.RAENWM, "rgb_fusion_trainable", False)
+        )
+
+    def _initialize_raenwm_rgb_fusion_adapter(self):
+        if not self._raenwm_rgb_fusion_enabled():
+            self.raenwm_rgb_fusion_adapter = None
+            return None
+        raenwm_config = self.config.MODEL.RAENWM
+        fusion_type = str(
+            getattr(raenwm_config, "rgb_fusion_type", "residual_gate")
+        ).strip().lower()
+        if fusion_type != "residual_gate":
+            raise ValueError(
+                f"Unsupported MODEL.RAENWM.rgb_fusion_type: {fusion_type}"
+            )
+        encoder_type = str(self.config.MODEL.RGB_ENCODER.type).lower()
+        output_size = int(self.config.MODEL.RGB_ENCODER.output_size)
+        if encoder_type != "rae_dinov2" or output_size != 768:
+            raise ValueError(
+                "RAE-NWM RGB fusion requires MODEL.RGB_ENCODER.type="
+                "rae_dinov2 and output_size=768"
+            )
+        if (
+            self._raenwm_rgb_fusion_trainable()
+            and int(getattr(self.config, "GPU_NUMBERS", 1)) > 1
+        ):
+            raise RuntimeError(
+                "Trainable RAE-NWM RGB fusion supports only GPU_NUMBERS=1"
+            )
+        if self.raenwm_rgb_fusion_adapter is None:
+            self.raenwm_rgb_fusion_adapter = RaeNwmRgbFusionAdapter(
+                input_dim=768,
+                hidden_dim=768,
+                zero_init=bool(
+                    getattr(raenwm_config, "rgb_fusion_zero_init", True)
+                ),
+                alpha=float(
+                    getattr(raenwm_config, "rgb_fusion_alpha", 1.0)
+                ),
+            ).to(self.device)
+        trainable = self._raenwm_rgb_fusion_trainable()
+        self.raenwm_rgb_fusion_adapter.train(trainable)
+        for parameter in self.raenwm_rgb_fusion_adapter.parameters():
+            parameter.requires_grad_(trainable)
+        return self.raenwm_rgb_fusion_adapter
+
+    def _raenwm_rgb_fusion_state_module(self):
+        adapter = getattr(self, "raenwm_rgb_fusion_adapter", None)
+        return getattr(adapter, "module", adapter) if adapter is not None else None
+
+    def _load_raenwm_rgb_fusion_from_checkpoint(
+        self, checkpoint, *, allow_missing
+    ):
+        adapter = self._raenwm_rgb_fusion_state_module()
+        if adapter is None:
+            return None
+        state_dict = checkpoint.get("raenwm_rgb_fusion_adapter_state_dict")
+        if state_dict is None:
+            if allow_missing:
+                logger.info(
+                    "Starting a new single-GPU RGB-fusion training run from "
+                    "a checkpoint without fusion weights"
+                )
+                return None
+            raise ValueError(
+                "Checkpoint is missing required "
+                "raenwm_rgb_fusion_adapter_state_dict"
+            )
+        return adapter.load_state_dict(state_dict, strict=True)
 
     def _initialize_raenwm_runtime(self, num_envs):
         if not self._raenwm_enabled():
@@ -145,6 +229,75 @@ class RLTrainer(BaseVLNCETrainer):
         self.last_raenwm_prediction = None
         self._raenwm_context_source_logged = False
         return self.raenwm_runtime
+
+    def _build_raenwm_preview_queries(
+        self, cur_pos, cur_ori, candidate_previews
+    ):
+        from vlnce_baselines.nwm.runtime import NwmQuery
+
+        queries = []
+        for env_index, previews in enumerate(candidate_previews):
+            grouped_positions = OrderedDict()
+            for preview in previews:
+                if preview.target_kind not in ("new_ghost", "existing_ghost"):
+                    continue
+                grouped_positions.setdefault(str(preview.target_vp), []).append(
+                    np.asarray(preview.position, dtype=np.float32)
+                )
+            for ghost_vp, positions in grouped_positions.items():
+                queries.append(NwmQuery(
+                    env_index=env_index,
+                    query_id=ghost_vp,
+                    current_position=np.asarray(
+                        cur_pos[env_index], dtype=np.float32
+                    ),
+                    current_yaw=float(
+                        heading_from_quaternion(cur_ori[env_index])
+                    ),
+                    target_position=np.mean(positions, axis=0).astype(np.float32),
+                ))
+        return queries
+
+    def _run_raenwm_rgb_fusion_prediction(
+        self,
+        front_latents,
+        cur_pos,
+        cur_ori,
+        candidate_previews,
+        wp_outputs,
+    ):
+        runtime = self.raenwm_runtime
+        self.last_raenwm_rgb_fusion_diagnostics = None
+        if runtime is None:
+            return None
+        if front_latents is None:
+            raise RuntimeError(
+                "RAE-NWM is enabled but waypoint output has no pano_rae_latents"
+            )
+        yaws = [heading_from_quaternion(value) for value in cur_ori]
+        runtime.update_contexts(front_latents, cur_pos, yaws)
+        prediction = runtime.predict(
+            self._build_raenwm_preview_queries(
+                cur_pos, cur_ori, candidate_previews
+            )
+        )
+        self.last_raenwm_prediction = prediction
+        self.last_raenwm_rgb_fusion_diagnostics = (
+            apply_rgb_fusion_to_current_candidates(
+                wp_outputs,
+                candidate_previews,
+                prediction,
+                self.raenwm_rgb_fusion_adapter,
+            )
+        )
+        return prediction
+
+    def _raenwm_rgb_fusion_applied_last_step(self):
+        diagnostics = self.last_raenwm_rgb_fusion_diagnostics or []
+        return any(
+            int((item or {}).get("fused_candidate_count", 0)) > 0
+            for item in diagnostics
+        )
 
     def _run_raenwm_prediction(
         self,
@@ -260,6 +413,11 @@ class RLTrainer(BaseVLNCETrainer):
             "config": self.config,
             "iteration": iteration,
         }
+        fusion_adapter = self._raenwm_rgb_fusion_state_module()
+        if fusion_adapter is not None:
+            checkpoint["raenwm_rgb_fusion_adapter_state_dict"] = (
+                fusion_adapter.state_dict()
+            )
         checkpoint_path = os.path.join(
             self.config.CHECKPOINT_FOLDER, f"ckpt.iter{iteration}.pth"
         )
@@ -528,6 +686,7 @@ class RLTrainer(BaseVLNCETrainer):
         load_from_ckpt: bool,
         observation_space: Space,
         action_space: Space,
+        allow_missing_fusion_checkpoint: bool = False,
     ):
         start_iter = 0
         if self._raenwm_enabled():
@@ -551,6 +710,16 @@ class RLTrainer(BaseVLNCETrainer):
 
         self.policy.to(self.device)
         self.waypoint_predictor.to(self.device)
+        self._initialize_raenwm_rgb_fusion_adapter()
+        if (
+            self._raenwm_rgb_fusion_enabled()
+            and not load_from_ckpt
+            and not allow_missing_fusion_checkpoint
+        ):
+            raise ValueError(
+                "RGB fusion evaluation/inference requires a checkpoint with "
+                "raenwm_rgb_fusion_adapter_state_dict"
+            )
         self.num_recurrent_layers = self.policy.net.num_recurrent_layers
 
         if self.config.GPU_NUMBERS > 1:
@@ -561,6 +730,11 @@ class RLTrainer(BaseVLNCETrainer):
                 output_device=device_id, find_unused_parameters=False, broadcast_buffers=False)
         
         param_optimizer = list(self.policy.named_parameters())
+        if self._raenwm_rgb_fusion_trainable():
+            param_optimizer.extend(
+                (f"raenwm_rgb_fusion_adapter.{name}", parameter)
+                for name, parameter in self.raenwm_rgb_fusion_adapter.named_parameters()
+            )
         no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
         optimizer_grouped_parameters = [
             {'params': [p for n, p in param_optimizer
@@ -679,6 +853,10 @@ class RLTrainer(BaseVLNCETrainer):
                 incompatible_keys = self.policy.load_state_dict(new_state_dict, strict=False)
             else:
                 incompatible_keys = self.policy.load_state_dict(ckpt_dict["state_dict"], strict=False)
+            self._load_raenwm_rgb_fusion_from_checkpoint(
+                ckpt_dict,
+                allow_missing=bool(allow_missing_fusion_checkpoint),
+            )
             
             if self.local_rank < 1:
                 report_navigation_incompatible_keys(
@@ -996,6 +1174,10 @@ class RLTrainer(BaseVLNCETrainer):
             self.config.IL.load_from_ckpt,
             observation_space=observation_space,
             action_space=action_space,
+            allow_missing_fusion_checkpoint=(
+                self._raenwm_rgb_fusion_trainable()
+                and not self.config.IL.is_requeue
+            ),
         )
 
         total_iter = self.config.IL.iters
@@ -1460,14 +1642,15 @@ class RLTrainer(BaseVLNCETrainer):
                     )
                 raenwm_front_latents = pano_latents[:, 0].detach()
 
-            # pano encoder
-            vp_inputs = self._vp_feature_variable(wp_outputs)
-            vp_inputs.update({
-                'mode': 'panorama',
-            })
-            pano_embeds, pano_masks = self.policy.net(**vp_inputs)
-            avg_pano_embeds = torch.sum(pano_embeds * pano_masks.unsqueeze(2), 1) / \
-                              torch.sum(pano_masks, 1, keepdim=True)
+            fusion_enabled = self._raenwm_rgb_fusion_enabled()
+            if not fusion_enabled:
+                # Preserve the prediction-only path's original call order.
+                vp_inputs = self._vp_feature_variable(wp_outputs)
+                vp_inputs.update({'mode': 'panorama'})
+                pano_embeds, pano_masks = self.policy.net(**vp_inputs)
+                avg_pano_embeds = torch.sum(
+                    pano_embeds * pano_masks.unsqueeze(2), 1
+                ) / torch.sum(pano_masks, 1, keepdim=True)
 
             current_goal_distances = None
             cand_goal_dists = None
@@ -1512,20 +1695,51 @@ class RLTrainer(BaseVLNCETrainer):
                 cand_real_pos = [None] * self.envs.num_envs
 
             cur_vp, cand_vp, cand_pos = [], [], []
+            candidate_previews = []
             for i in range(self.envs.num_envs):
                 cur_vp_i, cand_vp_i, cand_pos_i = self.gmaps[i].identify_node(
                     cur_pos[i], cur_ori[i], wp_outputs['cand_angles'][i], wp_outputs['cand_distances'][i]
                 )
                 cur_vp.append(cur_vp_i)
                 cand_vp.append(cand_vp_i)
-                cand_pos.append(cand_pos_i) 
-            self._run_raenwm_prediction(
-                raenwm_front_latents,
-                cur_pos,
-                cur_ori,
-                cand_vp,
-                cand_pos,
-            )
+                cand_pos.append(cand_pos_i)
+                if fusion_enabled:
+                    candidate_previews.append(
+                        self.gmaps[i].preview_candidate_mapping(
+                            cur_vp_i, cur_pos[i], cand_vp_i, cand_pos_i
+                        )
+                    )
+
+            if fusion_enabled:
+                raw_wp_outputs = clone_wp_outputs_candidate_rgb(wp_outputs)
+                self._run_raenwm_rgb_fusion_prediction(
+                    raenwm_front_latents,
+                    cur_pos,
+                    cur_ori,
+                    candidate_previews,
+                    wp_outputs,
+                )
+                vp_inputs = self._vp_feature_variable(wp_outputs)
+                vp_inputs.update({'mode': 'panorama'})
+                pano_embeds, pano_masks = self.policy.net(**vp_inputs)
+                node_pano_embeds, node_pano_masks = pano_embeds, pano_masks
+                if self._raenwm_rgb_fusion_applied_last_step():
+                    raw_vp_inputs = self._vp_feature_variable(raw_wp_outputs)
+                    raw_vp_inputs.update({'mode': 'panorama'})
+                    node_pano_embeds, node_pano_masks = self.policy.net(
+                        **raw_vp_inputs
+                    )
+                avg_pano_embeds = torch.sum(
+                    node_pano_embeds * node_pano_masks.unsqueeze(2), 1
+                ) / torch.sum(node_pano_masks, 1, keepdim=True)
+            else:
+                self._run_raenwm_prediction(
+                    raenwm_front_latents,
+                    cur_pos,
+                    cur_ori,
+                    cand_vp,
+                    cand_pos,
+                )
             for i in range(self.envs.num_envs):
                 cur_embeds = avg_pano_embeds[i]
                 cand_embeds = pano_embeds[i][vp_inputs['nav_types'][i]==1] 
@@ -1534,7 +1748,11 @@ class RLTrainer(BaseVLNCETrainer):
                                         cand_vp[i], cand_pos[i], cand_embeds,
                                         cand_real_pos[i],
                                         None if cand_goal_dists is None
-                                        else cand_goal_dists[i])
+                                        else cand_goal_dists[i],
+                                        candidate_preview=(
+                                            candidate_previews[i]
+                                            if fusion_enabled else None
+                                        ))
 
             nav_inputs = self._nav_gmap_variable(cur_vp, cur_pos, cur_ori, task_type)
             nav_inputs.update({

@@ -1,4 +1,5 @@
 from collections import defaultdict
+from dataclasses import dataclass
 import numpy as np
 from copy import deepcopy
 import networkx as nx
@@ -69,6 +70,15 @@ def estimate_cand_pos(pos, ori, ang, dis):
     cand_pos[:, 1] = pos[1]                        # y
     cand_pos[:, 2] = pos[2] - dis * np.cos(ang)    # z
     return cand_pos
+
+
+@dataclass(frozen=True)
+class CandidatePreview:
+    candidate_vp: str
+    target_kind: str
+    target_vp: str
+    position: object
+    front_vp: str
 
 
 class FloydGraph(object):
@@ -183,6 +193,55 @@ class GraphMap(object):
         cand_pos = [p for p in estimate_cand_pos(cur_pos, cur_ori, cand_ang, cand_dis)]
         return cur_vp, cand_vp, cand_pos
 
+    def preview_candidate_mapping(self, cur_vp, cur_pos, cand_vp, cand_pos):
+        if len(cand_vp) != len(cand_pos):
+            raise ValueError("candidate viewpoint and position counts must match")
+        node_pos = dict(self.node_pos)
+        node_pos[cur_vp] = cur_pos
+        previews = []
+        next_ghost_cnt = int(self.ghost_cnt)
+        reserved_ghost_pos = dict(self.ghost_mean_pos)
+        reserved_ghost_counts = {
+            gvp: len(self.ghost_pos.get(gvp, []))
+            for gvp in reserved_ghost_pos
+        }
+        for cvp, cpos in zip(cand_vp, cand_pos):
+            localized_nvp = self._localize(cpos, node_pos)
+            if localized_nvp is not None:
+                previews.append(CandidatePreview(
+                    cvp, "node", localized_nvp, cpos, cur_vp
+                ))
+                continue
+
+            localized_gvp = None
+            if self.merge_ghost:
+                localized_gvp = self._localize(cpos, reserved_ghost_pos)
+            if localized_gvp is None:
+                gvp = f"g{next_ghost_cnt}"
+                next_ghost_cnt += 1
+                reserved_ghost_pos[gvp] = cpos
+                reserved_ghost_counts[gvp] = 1
+                previews.append(CandidatePreview(
+                    cvp, "new_ghost", gvp, cpos, cur_vp
+                ))
+            else:
+                count = max(
+                    1, int(reserved_ghost_counts.get(localized_gvp, 1))
+                )
+                reserved_ghost_pos[localized_gvp] = (
+                    reserved_ghost_pos[localized_gvp] * count + cpos
+                ) / (count + 1)
+                reserved_ghost_counts[localized_gvp] = count + 1
+                kind = (
+                    "existing_ghost"
+                    if localized_gvp in self.ghost_pos
+                    else "new_ghost"
+                )
+                previews.append(CandidatePreview(
+                    cvp, kind, localized_gvp, cpos, cur_vp
+                ))
+        return previews
+
     def delete_ghost(self, vp):
         self.ghost_pos.pop(vp)
         self.ghost_mean_pos.pop(vp)
@@ -195,7 +254,8 @@ class GraphMap(object):
     def update_graph(self, prev_vp, step_id,
                            cur_vp, cur_pos, cur_embeds,
                            cand_vp, cand_pos, cand_embeds, 
-                           cand_real_pos, cand_goal_dists=None):
+                           cand_real_pos, cand_goal_dists=None,
+                           candidate_preview=None):
         if cand_goal_dists is None:
             cand_goal_dists = [None] * len(cand_vp)
         if len(cand_goal_dists) != len(cand_vp):
@@ -213,45 +273,34 @@ class GraphMap(object):
         self.node_pos[cur_vp] = cur_pos
         self.node_embeds[cur_vp] = cur_embeds
         self.node_stepId[cur_vp] = step_id
-        for i, (cvp, cpos, cembeds) in enumerate(zip(cand_vp, cand_pos, cand_embeds)):
-            localized_nvp = self._localize(cpos, self.node_pos)
+        candidate_to_ghost = []
+        if candidate_preview is None:
+            candidate_preview = self.preview_candidate_mapping(
+                cur_vp, cur_pos, cand_vp, cand_pos
+            )
+        if len(candidate_preview) != len(cand_vp):
+            raise ValueError(
+                "candidate_preview length must match cand_vp length: "
+                f"{len(candidate_preview)} vs {len(cand_vp)}"
+            )
+        for i, (cvp, cpos, cembeds, preview) in enumerate(zip(
+            cand_vp, cand_pos, cand_embeds, candidate_preview
+        )):
+            if preview.candidate_vp != cvp:
+                raise ValueError(
+                    "candidate_preview order must match cand_vp: "
+                    f"{preview.candidate_vp} vs {cvp}"
+                )
+            if preview.target_kind == "node":
+                localized_nvp = preview.target_vp
             # cand overlap with node, connect cur_vp with localized_nvp
-            if localized_nvp is not None :
                 dis = calc_position_distance(cur_pos, self.node_pos[localized_nvp])
                 self.graph_nx.add_edge(cur_vp, localized_nvp, weight=dis)
+                candidate_to_ghost.append((cvp, None))
             # cand not overlap with node, create/update ghost
-            else:
-                if self.merge_ghost:
-                    localized_gvp = self._localize(cpos, self.ghost_mean_pos)
-                    # create ghost
-                    if localized_gvp is None:
-                        gvp = f'g{str(self.ghost_cnt)}'
-                        self.ghost_cnt += 1
-                        self.ghost_pos[gvp] = [cpos]
-                        self.ghost_mean_pos[gvp] = cpos
-                        self.ghost_embeds[gvp] = [cembeds, 1]
-                        self.ghost_fronts[gvp] = [cur_vp]
-                        if self.has_real_pos:
-                            self.ghost_real_pos[gvp] = [cand_real_pos[i]]
-                            self.ghost_goal_dists[gvp] = [
-                                cand_goal_dists[i]
-                            ]
-                    # update ghost
-                    else:
-                        gvp = localized_gvp
-                        self.ghost_pos[gvp].append(cpos)
-                        self.ghost_mean_pos[gvp] = np.mean(self.ghost_pos[gvp], axis=0)
-                        self.ghost_embeds[gvp][0] = self.ghost_embeds[gvp][0] + cembeds
-                        self.ghost_embeds[gvp][1] += 1
-                        self.ghost_fronts[gvp].append(cur_vp)
-                        if self.has_real_pos:
-                            self.ghost_real_pos[gvp].append(cand_real_pos[i])
-                            self.ghost_goal_dists[gvp].append(
-                                cand_goal_dists[i]
-                            )
-                else:
-                    gvp = f'g{str(self.ghost_cnt)}'
-                    self.ghost_cnt += 1
+            elif preview.target_kind in ("new_ghost", "existing_ghost"):
+                gvp = preview.target_vp
+                if preview.target_kind == "new_ghost" and gvp not in self.ghost_pos:
                     self.ghost_pos[gvp] = [cpos]
                     self.ghost_mean_pos[gvp] = cpos
                     self.ghost_embeds[gvp] = [cembeds, 1]
@@ -259,6 +308,31 @@ class GraphMap(object):
                     if self.has_real_pos:
                         self.ghost_real_pos[gvp] = [cand_real_pos[i]]
                         self.ghost_goal_dists[gvp] = [cand_goal_dists[i]]
+                    if gvp.startswith("g"):
+                        self.ghost_cnt = max(
+                            self.ghost_cnt, int(gvp[1:]) + 1
+                        )
+                else:
+                    if gvp not in self.ghost_pos:
+                        raise KeyError(f"Unknown preview ghost vp: {gvp}")
+                    self.ghost_pos[gvp].append(cpos)
+                    self.ghost_mean_pos[gvp] = np.mean(
+                        self.ghost_pos[gvp], axis=0
+                    )
+                    self.ghost_embeds[gvp][0] = (
+                        self.ghost_embeds[gvp][0] + cembeds
+                    )
+                    self.ghost_embeds[gvp][1] += 1
+                    self.ghost_fronts[gvp].append(cur_vp)
+                    if self.has_real_pos:
+                        self.ghost_real_pos[gvp].append(cand_real_pos[i])
+                        self.ghost_goal_dists[gvp].append(cand_goal_dists[i])
+                candidate_to_ghost.append((cvp, gvp))
+            else:
+                raise ValueError(
+                    "Unsupported candidate preview target_kind: "
+                    f"{preview.target_kind}"
+                )
         
         self.ghost_aug_pos = deepcopy(self.ghost_mean_pos)
         if self.ghost_aug != 0:
@@ -270,6 +344,7 @@ class GraphMap(object):
 
         self.shortest_path = dict(nx.all_pairs_dijkstra_path(self.graph_nx))
         self.shortest_dist = dict(nx.all_pairs_dijkstra_path_length(self.graph_nx))
+        return candidate_to_ghost
 
     def front_to_ghost_dist(self, ghost_vp):
         # assume the nearest front

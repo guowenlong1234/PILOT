@@ -195,8 +195,8 @@ _C.MODEL.RGB_ENCODER.cls_residual_mlp_enabled = False
 _C.MODEL.RGB_ENCODER.cls_residual_mlp_hidden_dim = 768
 _C.MODEL.RGB_ENCODER.cls_residual_mlp_zero_init = True
 
-# Prediction-only Stage-0 RAE-NWM bridge. It is disabled unless an experiment
-# supplies all external assets and their checksums.
+# Stage-0 RAE-NWM bridge. Prediction-only and optional RGB fusion are disabled
+# unless an experiment supplies all external assets and their checksums.
 _C.MODEL.RAENWM = CN()
 _C.MODEL.RAENWM.enabled = False
 _C.MODEL.RAENWM.emit_patch_latents = False
@@ -223,6 +223,11 @@ _C.MODEL.RAENWM.max_horizon = 64.0
 _C.MODEL.RAENWM.num_steps = 10
 _C.MODEL.RAENWM.final_only_euler = False
 _C.MODEL.RAENWM.noise_seed = 0
+_C.MODEL.RAENWM.rgb_fusion_enabled = False
+_C.MODEL.RAENWM.rgb_fusion_type = "residual_gate"
+_C.MODEL.RAENWM.rgb_fusion_alpha = 1.0
+_C.MODEL.RAENWM.rgb_fusion_zero_init = True
+_C.MODEL.RAENWM.rgb_fusion_trainable = False
 
 _C.MODEL.DEPTH_ENCODER = CN()
 _C.MODEL.DEPTH_ENCODER.cnn_type = "VlnResnetDepthEncoder"
