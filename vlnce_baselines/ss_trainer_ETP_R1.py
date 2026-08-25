@@ -220,9 +220,12 @@ class RLTrainer(BaseVLNCETrainer):
     def _e24_joint_frozen_modules(self):
         policy_net = getattr(self.policy.net, "module", self.policy.net)
         runtime = self.raenwm_runtime
+        predictor = None if runtime is None else runtime.predictor
+        bundle = None if predictor is None else predictor.bundle
         return {
             "rae_dino_encoder": getattr(policy_net.rgb_encoder, "rae", None),
-            "nwm_predictor": None if runtime is None else runtime.predictor,
+            "nwm_body": None if bundle is None else bundle.model,
+            "nwm_heads": None if predictor is None else predictor.heads,
             "dino_cwp": self.dino_cwp_future_predictor,
             "waypoint_predictor": self.waypoint_predictor,
         }
