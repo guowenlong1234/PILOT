@@ -1,0 +1,153 @@
+BASE_TASK_CONFIG_PATH: run_r2r/r2r_vlnce.yaml
+SIMULATOR_GPU_IDS: [0, 1]
+TORCH_GPU_ID: 0
+TORCH_GPU_IDS: [0, 1]
+
+TRAINER_NAME: SS-ETP-R1
+ENV_NAME: R1Env
+
+GPU_NUMBERS: 2
+NUM_ENVIRONMENTS: 4
+TENSORBOARD_DIR: data/logs/active_lookahead/e24_joint_sft/tensorboard/
+CHECKPOINT_FOLDER: data/logs/active_lookahead/e24_joint_sft/checkpoints/
+RESULTS_DIR: data/logs/active_lookahead/e24_joint_sft/results/
+ONLY_LAST_SAVEALL: True
+
+INFERENCE:
+  SPLIT: test
+  USE_CKPT_CONFIG: False
+  SAMPLE: False
+  CKPT_PATH: ''
+  PREDICTIONS_FILE: ''
+  FORMAT: r2r
+  EPISODE_COUNT: -1
+
+EVAL:
+  checkpoint_order: ascending
+  USE_CKPT_CONFIG: False
+  SPLIT: val_unseen
+  EPISODE_COUNT: -1
+  EPISODE_ID: None
+  CKPT_PATH_DIR: ''
+  fast_eval: False
+
+IL:
+  load_from_ckpt: True
+  is_requeue: False
+  ckpt_to_load: pretrained/active_lookahead/base_iter14200.pth
+  checkpoint_sync_enabled: True
+  checkpoint_sync_destination: 'a6000@10.10.10.2:/home/a6000/gwl/ETP-R1/data/logs/active_lookahead/e24_joint_sft/checkpoints'
+  amp_init_scale: 16384.0
+  resumable_checkpoints: True
+  keep_last_train_states: 3
+  keep_train_state_every_n_iters: 2000
+  use_fused_adamw: True
+  cudnn_benchmark: True
+  log_cuda_memory: True
+  gradient_accumulation_steps: 1
+  iters: 10000
+  log_every: 200
+  lr: 1.0e-5
+  batch_size: 4
+  ml_weight: 1.0
+  expert_policy: spl
+  sample_ratio: 0.75
+  decay_interval: 3000
+  # Preserve ETPNav's absolute schedule from the warm-start checkpoint.
+  sample_ratio_iteration_offset: 14200
+  # ETPNav did not clamp probabilities below 0.15 to zero.
+  sample_ratio_zero_threshold: 0.0
+  warmup_iters: 0
+  min_lr_ratio: 1.0
+  max_traj_len: 15
+  max_text_len: 150
+  loc_noise: 0.5
+  waypoint_aug: True
+  ghost_aug: 0.0
+  back_algo: teleport
+  tryout: True
+
+MODEL:
+  task_type: r2r
+  policy_name: R1Policy
+  NUM_ANGLES: 12
+  pretrained_path: pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768_eval_final_best/model_best_step_465000.pt
+  fix_lang_embedding: False
+  fix_pano_embedding: False
+  use_depth_embedding: True
+  use_sprels: True
+  merge_ghost: True
+  consume_ghost: True
+  spatial_output: False
+  RGB_ENCODER:
+    type: rae_dinov2
+    precision: ambient
+    model_dir: pretrained/rae_dinov2_with_registers_base
+    output_size: 768
+    cls_residual_mlp_enabled: True
+    cls_residual_mlp_hidden_dim: 768
+    cls_residual_mlp_zero_init: True
+  RAENWM:
+    enabled: True
+    emit_patch_latents: True
+    config_path: configs/nwm/raenwm_mp3d.yaml
+    checkpoint_path: pretrained/raenwm_stage0/checkpoint_step_70000.pth.tar
+    checkpoint_sha256: 392fe02045f7c11f006e1efb822914eee5826b8c6fdb2553c87e7de7c1c4df36
+    head_checkpoint_path: pretrained/raenwm_stage0/nwm_heads.pt
+    head_checkpoint_sha256: a4d396021b8bf670c44565c383db1c9288c3bd8988624fa0a59064b6a81dc6e2
+    stat_path: pretrained/raenwm_stage0/stat.pt
+    stat_sha256: 84ede66def5e6e3f25679334dc89cf63b12aacb99cbf0f5ae7ed4ad3187f7e59
+    context_size: 4
+    max_buffer_size: 64
+    metric_waypoint_spacing: 0.24975892673356762
+    pos_eps: 1.0e-3
+    yaw_eps: 1.0e-3
+    static_run_k: 3
+    max_horizon: 64.0
+    num_steps: 10
+    final_only_euler: False
+    noise_seed: 0
+    rgb_fusion_enabled: True
+    rgb_fusion_type: residual_gate
+    rgb_fusion_alpha: 1.0
+    rgb_fusion_zero_init: True
+    rgb_fusion_trainable: True
+  ACTIVE_LOOKAHEAD:
+    enabled: True
+    source: dino_cwp_nwm
+    offline_topk: 5
+    base_checkpoint_path: pretrained/active_lookahead/base_iter14200.pth
+    base_checkpoint_sha256: 1694b175d913404bfef8a53519d6f405db5de7f8b051e8343700125e43f05c61
+    base_iteration: 14200
+    e24_joint_init_path: pretrained/active_lookahead/e24_avg3.pth
+    e24_joint_init_sha256: bae7a9664000235dfc6fb66b43a8a0a38e7645b876e6a6369f732eb7bf404ed8
+    e24_source_base_manifest_sha256: a2e84e88c568633a5a86d9cb2643d1b1cfe0d9b302cc4eb3a1b66dc0802f48c6
+    e24_head_lr: 5.0e-6
+    e24_loss_weight: 1.0
+    e24_train_delta_scale: 1.0
+    e24_action_warmup_iters: 400
+    e24_replay_micro_batch_size: 2
+    e24_replay_storage: cpu_fp16
+    e24_head_gradient_clip_norm: 10.0
+    dino_cwp_checkpoint_path: pretrained/active_lookahead/dino_cwp_best.pt
+    dino_cwp_checkpoint_sha256: 6a45291219907dd027203d224f3f8400631651a83bd01c45b1dea55d93ec0979
+    dino_cwp_none_threshold: 0.3
+    dino_cwp_context_strategy: fixed_initial
+    dino_cwp_heading_policy: face_motion
+    checkpoint_format_version: etpr1-e24-joint-v1
+    smoke_freeze_check: False
+    diagnostics_enabled: True
+  DEPTH_ENCODER:
+    output_size: 256
+  VISUAL_DIM:
+    vis_hidden: 768
+    directional: 128
+  INSTRUCTION_ENCODER:
+    bidirectional: True
+
+TASK_CONFIG:
+  DATASET:
+    SUFFIX: _90
+  SIMULATOR:
+    HABITAT_SIM_V0:
+      ALLOW_SLIDING: True

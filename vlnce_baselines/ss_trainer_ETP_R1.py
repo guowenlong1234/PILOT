@@ -48,6 +48,40 @@ from vlnce_baselines.nwm.rgb_fusion import (
     apply_rgb_fusion_to_current_candidates,
     clone_wp_outputs_candidate_rgb,
 )
+from vlnce_baselines.nwm.active_lookahead.base_freeze import (
+    capture_base_tensor_manifest,
+    compare_base_tensor_manifests,
+)
+from vlnce_baselines.nwm.active_lookahead.dino_cwp_future import (
+    PREDICTED_FUTURE_DIAGNOSTIC_NAMES,
+    load_dino_cwp_predictor,
+    summarize_predicted_future_diagnostics,
+)
+from vlnce_baselines.nwm.active_lookahead.joint_e24 import (
+    E24JointTrainModule,
+    attach_e24_joint_targets,
+    build_e24_joint_step,
+    collate_e24_joint_packs,
+    e24_joint_batch_to_device,
+    e24_joint_denominators,
+    e24_joint_diagnostic_totals,
+    forward_e24_joint_batch,
+    joint_action_scale,
+    load_e24_joint_head,
+    make_e24_joint_dummy_batch,
+    normalized_e24_joint_loss,
+    slice_e24_joint_batch,
+)
+from vlnce_baselines.nwm.active_lookahead.offline_objective import (
+    OfflineDecisionLossConfig,
+)
+from vlnce_baselines.nwm.active_lookahead.offline_checkpoint import sha256_file
+from vlnce_baselines.nwm.active_lookahead.online_e24 import (
+    stop_isolated_e24_actions,
+)
+from vlnce_baselines.nwm.active_lookahead.residual_head import (
+    InterleavedCrossModalTopKFutureLogitResidualHead,
+)
 from vlnce_baselines.models.checkpoint_utils import (
     navigation_state_dict,
     report_navigation_incompatible_keys,
@@ -128,6 +162,199 @@ class RLTrainer(BaseVLNCETrainer):
         self.last_raenwm_rgb_fusion_diagnostics = None
         self._raenwm_head_state_override = None
         self._raenwm_context_source_logged = False
+        self.e24_joint_head = None
+        self.e24_joint_metadata = None
+        self.dino_cwp_future_predictor = None
+        self.dino_cwp_future_metadata = None
+        self._e24_joint_training = False
+        self._e24_joint_replay_packs = []
+        self._e24_joint_iteration = 0
+        self._e24_joint_start_iteration = 0
+        self._e24_future_diagnostic_totals = defaultdict(float)
+        self._e24_joint_frozen_manifest = None
+
+    def _active_lookahead_config(self):
+        return getattr(getattr(self.config, "MODEL", None), "ACTIVE_LOOKAHEAD", None)
+
+    def _active_lookahead_enabled(self):
+        cfg = self._active_lookahead_config()
+        return bool(cfg is not None and getattr(cfg, "enabled", False))
+
+    def _e24_joint_head_state_module(self):
+        module = self.e24_joint_head
+        if module is None:
+            return None
+        module = getattr(module, "module", module)
+        return getattr(module, "head", module)
+
+    def _e24_joint_wrapper_state_module(self):
+        module = self.e24_joint_head
+        return getattr(module, "module", module) if module is not None else None
+
+    def _e24_joint_train_module(self):
+        return self.e24_joint_head
+
+    def _e24_predicted_future_enabled(self):
+        return self._active_lookahead_enabled()
+
+    def _initialize_dino_cwp_future_predictor(self):
+        if not self._active_lookahead_enabled():
+            return None
+        cfg = self._active_lookahead_config()
+        if str(cfg.source).strip().lower() != "dino_cwp_nwm":
+            raise ValueError("ACTIVE_LOOKAHEAD.source must be dino_cwp_nwm")
+        if str(cfg.dino_cwp_context_strategy) != "fixed_initial":
+            raise ValueError("predicted q1 requires fixed_initial context")
+        if str(cfg.dino_cwp_heading_policy) != "face_motion":
+            raise ValueError("predicted q1 requires face_motion heading")
+        if self.dino_cwp_future_predictor is None:
+            model, metadata = load_dino_cwp_predictor(
+                cfg.dino_cwp_checkpoint_path,
+                expected_sha256=cfg.dino_cwp_checkpoint_sha256,
+                device=self.device,
+            )
+            self.dino_cwp_future_predictor = model
+            self.dino_cwp_future_metadata = metadata
+        return self.dino_cwp_future_predictor
+
+    def _e24_joint_frozen_modules(self):
+        policy_net = getattr(self.policy.net, "module", self.policy.net)
+        runtime = self.raenwm_runtime
+        return {
+            "rae_dino_encoder": getattr(policy_net.rgb_encoder, "rae", None),
+            "nwm_predictor": None if runtime is None else runtime.predictor,
+            "dino_cwp": self.dino_cwp_future_predictor,
+            "waypoint_predictor": self.waypoint_predictor,
+        }
+
+    def _validate_e24_joint_provenance(self, checkpoint):
+        cfg = self._active_lookahead_config()
+        if checkpoint.get("e24_joint_format_version") != str(
+            cfg.checkpoint_format_version
+        ):
+            raise ValueError("joint checkpoint has the wrong format version")
+        provenance = checkpoint.get("e24_joint_provenance")
+        if not isinstance(provenance, dict):
+            raise ValueError("joint checkpoint is missing provenance")
+        expected = {
+            "base_checkpoint_sha256": str(cfg.base_checkpoint_sha256),
+            "e24_init_checkpoint_sha256": str(cfg.e24_joint_init_sha256),
+            "dino_cwp_checkpoint_sha256": str(cfg.dino_cwp_checkpoint_sha256),
+            "nwm_checkpoint_sha256": str(self.config.MODEL.RAENWM.checkpoint_sha256),
+            "nwm_heads_sha256": str(self.config.MODEL.RAENWM.head_checkpoint_sha256),
+            "nwm_stat_sha256": str(self.config.MODEL.RAENWM.stat_sha256),
+            "source": "dino_cwp_nwm",
+            "context_strategy": "fixed_initial",
+            "heading_policy": "face_motion",
+            "topk": 5,
+            "base_iteration": int(cfg.base_iteration),
+            "action_warmup_iters": int(cfg.e24_action_warmup_iters),
+            "sample_ratio_iteration_offset": int(
+                self.config.IL.sample_ratio_iteration_offset
+            ),
+            "sample_ratio_zero_threshold": float(
+                self.config.IL.sample_ratio_zero_threshold
+            ),
+            "none_threshold": float(cfg.dino_cwp_none_threshold),
+            "delta_scale": float(cfg.e24_train_delta_scale),
+            "e24_source_base_manifest_sha256": str(
+                cfg.e24_source_base_manifest_sha256
+            ),
+        }
+        mismatches = {
+            key: (provenance.get(key), value)
+            for key, value in expected.items()
+            if provenance.get(key) != value
+        }
+        if mismatches:
+            raise ValueError(f"joint checkpoint provenance mismatch: {mismatches}")
+        return provenance
+
+    def _e24_joint_provenance(self):
+        cfg = self._active_lookahead_config()
+        return {
+            "base_checkpoint_sha256": str(cfg.base_checkpoint_sha256),
+            "base_iteration": int(cfg.base_iteration),
+            "e24_init_checkpoint_sha256": str(cfg.e24_joint_init_sha256),
+            "e24_source_base_manifest_sha256": str(
+                cfg.e24_source_base_manifest_sha256
+            ),
+            "dino_cwp_checkpoint_sha256": str(cfg.dino_cwp_checkpoint_sha256),
+            "nwm_checkpoint_sha256": str(self.config.MODEL.RAENWM.checkpoint_sha256),
+            "nwm_heads_sha256": str(
+                self.config.MODEL.RAENWM.head_checkpoint_sha256
+            ),
+            "nwm_stat_sha256": str(self.config.MODEL.RAENWM.stat_sha256),
+            "source": "dino_cwp_nwm",
+            "q0_contract": "temporary_action_same_island_navmesh",
+            "q1_contract": "nwm_predicted_no_simulator_query",
+            "context_strategy": "fixed_initial",
+            "heading_policy": "face_motion",
+            "topk": 5,
+            "none_threshold": float(cfg.dino_cwp_none_threshold),
+            "action_warmup_iters": int(cfg.e24_action_warmup_iters),
+            "sample_ratio_iteration_offset": int(
+                self.config.IL.sample_ratio_iteration_offset
+            ),
+            "sample_ratio_zero_threshold": float(
+                self.config.IL.sample_ratio_zero_threshold
+            ),
+            "delta_scale": float(cfg.e24_train_delta_scale),
+        }
+
+    def _initialize_e24_joint_head(self, checkpoint=None):
+        if not self._active_lookahead_enabled():
+            self.e24_joint_head = None
+            return None
+        cfg = self._active_lookahead_config()
+        if int(cfg.offline_topk) != 5:
+            raise ValueError("ACTIVE_LOOKAHEAD.offline_topk must be 5")
+        joint_state = None if checkpoint is None else checkpoint.get(
+            "e24_joint_state_dict"
+        )
+        if joint_state is not None:
+            self._validate_e24_joint_provenance(checkpoint)
+            metadata = checkpoint.get("e24_joint_metadata")
+            if not isinstance(metadata, dict) or not isinstance(
+                metadata.get("model_kwargs"), dict
+            ):
+                raise ValueError("joint checkpoint lacks E24 model metadata")
+            head = InterleavedCrossModalTopKFutureLogitResidualHead(
+                **metadata["model_kwargs"]
+            ).to(self.device)
+            wrapper = E24JointTrainModule(head).to(self.device)
+            wrapper.load_state_dict(joint_state, strict=True)
+            self.e24_joint_metadata = dict(metadata)
+        else:
+            head, metadata = load_e24_joint_head(
+                cfg.e24_joint_init_path,
+                device=self.device,
+                expected_checkpoint_sha256=cfg.e24_joint_init_sha256,
+                expected_source_base_manifest_sha256=(
+                    cfg.e24_source_base_manifest_sha256
+                ),
+                topk=int(cfg.offline_topk),
+            )
+            wrapper = E24JointTrainModule(head).to(self.device)
+            self.e24_joint_metadata = metadata
+        self._e24_joint_training = torch.is_grad_enabled()
+        if self._e24_joint_training:
+            wrapper.train()
+            if self.config.GPU_NUMBERS > 1:
+                wrapper = DDP(
+                    wrapper,
+                    device_ids=[self.device.index],
+                    output_device=self.device.index,
+                    find_unused_parameters=False,
+                    broadcast_buffers=False,
+                )
+        else:
+            wrapper.eval()
+            for parameter in wrapper.parameters():
+                parameter.requires_grad_(False)
+        self.e24_joint_head = wrapper
+        self._e24_joint_start_iteration = 0
+        return wrapper
 
     def _raenwm_enabled(self):
         model_config = getattr(self.config, "MODEL", None)
@@ -163,13 +390,6 @@ class RLTrainer(BaseVLNCETrainer):
                 "RAE-NWM RGB fusion requires MODEL.RGB_ENCODER.type="
                 "rae_dinov2 and output_size=768"
             )
-        if (
-            self._raenwm_rgb_fusion_trainable()
-            and int(getattr(self.config, "GPU_NUMBERS", 1)) > 1
-        ):
-            raise RuntimeError(
-                "Trainable RAE-NWM RGB fusion supports only GPU_NUMBERS=1"
-            )
         if self.raenwm_rgb_fusion_adapter is None:
             self.raenwm_rgb_fusion_adapter = RaeNwmRgbFusionAdapter(
                 input_dim=768,
@@ -186,6 +406,38 @@ class RLTrainer(BaseVLNCETrainer):
         for parameter in self.raenwm_rgb_fusion_adapter.parameters():
             parameter.requires_grad_(trainable)
         return self.raenwm_rgb_fusion_adapter
+
+    def _broadcast_raenwm_rgb_fusion_state(self):
+        adapter = self._raenwm_rgb_fusion_state_module()
+        if (
+            adapter is None
+            or not self._raenwm_rgb_fusion_trainable()
+            or int(getattr(self, "world_size", 1)) <= 1
+        ):
+            return False
+        if not distr.is_available() or not distr.is_initialized():
+            raise RuntimeError("distributed RGB fusion requires torch.distributed")
+        for tensor in list(adapter.parameters()) + list(adapter.buffers()):
+            distr.broadcast(tensor.data, src=0)
+        return True
+
+    def _synchronize_raenwm_rgb_fusion_gradients(self):
+        adapter = self._raenwm_rgb_fusion_state_module()
+        world_size = int(getattr(self, "world_size", 1))
+        if (
+            adapter is None
+            or not self._raenwm_rgb_fusion_trainable()
+            or world_size <= 1
+        ):
+            return False
+        if not distr.is_available() or not distr.is_initialized():
+            raise RuntimeError("distributed RGB fusion requires torch.distributed")
+        for parameter in adapter.parameters():
+            if parameter.grad is None:
+                parameter.grad = torch.zeros_like(parameter)
+            distr.all_reduce(parameter.grad, op=distr.ReduceOp.SUM)
+            parameter.grad.div_(world_size)
+        return True
 
     def _raenwm_rgb_fusion_state_module(self):
         adapter = getattr(self, "raenwm_rgb_fusion_adapter", None)
@@ -353,6 +605,18 @@ class RLTrainer(BaseVLNCETrainer):
             self._raenwm_context_source_logged = True
         return prediction
 
+    def _record_e24_source_contexts(self, *, stepk, cur_vp):
+        if not self._active_lookahead_enabled() or self.raenwm_runtime is None:
+            return
+        for env_index, (front_vp, gmap) in enumerate(zip(cur_vp, self.gmaps)):
+            snapshot = self.raenwm_runtime.source_context_snapshot(
+                env_index,
+                source_front_vp=str(front_vp),
+                source_high_level_step=int(stepk),
+            )
+            if snapshot is not None:
+                gmap.record_raenwm_source_context(snapshot)
+
     def _create_grad_scaler(self):
         init_scale = self.config.IL.amp_init_scale
         if (
@@ -421,6 +685,20 @@ class RLTrainer(BaseVLNCETrainer):
             "config": self.config,
             "iteration": iteration,
         }
+        if self._active_lookahead_enabled():
+            e24_wrapper = self._e24_joint_wrapper_state_module()
+            if e24_wrapper is None:
+                raise RuntimeError("active lookahead has no E24 module to save")
+            checkpoint.update(
+                {
+                    "e24_joint_format_version": str(
+                        self._active_lookahead_config().checkpoint_format_version
+                    ),
+                    "e24_joint_state_dict": e24_wrapper.state_dict(),
+                    "e24_joint_metadata": dict(self.e24_joint_metadata or {}),
+                    "e24_joint_provenance": self._e24_joint_provenance(),
+                }
+            )
         fusion_adapter = self._raenwm_rgb_fusion_state_module()
         if fusion_adapter is not None:
             checkpoint["raenwm_rgb_fusion_adapter_state_dict"] = (
@@ -438,7 +716,9 @@ class RLTrainer(BaseVLNCETrainer):
                     "Resumable SFT checkpoints require episode iterator state"
                 )
             training_state = {
-                "format_version": 2,
+                "format_version": (
+                    3 if self._active_lookahead_enabled() else 2
+                ),
                 "iteration": iteration,
                 "model_checkpoint": os.path.basename(checkpoint_path),
                 "optim_state": self.optimizer.state_dict(),
@@ -700,6 +980,9 @@ class RLTrainer(BaseVLNCETrainer):
         allow_missing_fusion_checkpoint: bool = False,
     ):
         start_iter = 0
+        ckpt_dict = None
+        ckpt_path = None
+        training_state = None
         if self._raenwm_enabled():
             config.defrost()
             config.MODEL.RAENWM.emit_patch_latents = True
@@ -739,6 +1022,56 @@ class RLTrainer(BaseVLNCETrainer):
             device_id = self.device.index
             self.policy.net = DDP(self.policy.net.to(self.device), device_ids=[device_id],
                 output_device=device_id, find_unused_parameters=False, broadcast_buffers=False)
+
+        if load_from_ckpt:
+            if config.IL.is_requeue:
+                if config.IL.resumable_checkpoints:
+                    ckpt_path, training_state_path = latest_complete_checkpoint_pair(
+                        config.CHECKPOINT_FOLDER
+                    )
+                    training_state = torch.load(
+                        training_state_path, map_location="cpu"
+                    )
+                else:
+                    ckpt_path = latest_checkpoint_path(config.CHECKPOINT_FOLDER)
+            else:
+                ckpt_path = config.IL.ckpt_to_load
+            ckpt_dict = self.load_checkpoint(ckpt_path, map_location="cpu")
+            if self._active_lookahead_enabled():
+                if ckpt_dict.get("e24_joint_state_dict") is None:
+                    actual_base_sha = sha256_file(ckpt_path)
+                    if actual_base_sha != str(
+                        self._active_lookahead_config().base_checkpoint_sha256
+                    ):
+                        raise ValueError(
+                            "active-lookahead base checkpoint SHA256 mismatch: "
+                            f"expected={self._active_lookahead_config().base_checkpoint_sha256} "
+                            f"actual={actual_base_sha}"
+                        )
+                else:
+                    self._validate_e24_joint_provenance(ckpt_dict)
+            if self._raenwm_enabled() and not self._active_lookahead_enabled():
+                self._raenwm_head_state_override = ckpt_dict.get(
+                    "raenwm_heads_state_dict"
+                )
+
+        if self._active_lookahead_enabled():
+            if not self._raenwm_enabled() or not self._raenwm_rgb_fusion_trainable():
+                raise ValueError(
+                    "active lookahead requires enabled RAE-NWM and trainable RGB fusion"
+                )
+            self._initialize_dino_cwp_future_predictor()
+            if (
+                config.IL.is_requeue
+                and (
+                    ckpt_dict is None
+                    or ckpt_dict.get("e24_joint_state_dict") is None
+                )
+            ):
+                raise ValueError(
+                    "active-lookahead requeue requires E24 state in the model checkpoint"
+                )
+            self._initialize_e24_joint_head(ckpt_dict)
         
         param_optimizer = list(self.policy.named_parameters())
         if self._raenwm_rgb_fusion_trainable():
@@ -750,11 +1083,22 @@ class RLTrainer(BaseVLNCETrainer):
         optimizer_grouped_parameters = [
             {'params': [p for n, p in param_optimizer
                         if not any(nd in n for nd in no_decay)],
-            'weight_decay': 0.01},
+            'weight_decay': 0.01, 'lr': float(self.config.IL.lr),
+            'name': 'navigation_decay'},
             {'params': [p for n, p in param_optimizer
                         if any(nd in n for nd in no_decay)],
-            'weight_decay': 0.0}
+            'weight_decay': 0.0, 'lr': float(self.config.IL.lr),
+            'name': 'navigation_no_decay'}
         ]
+        if self._active_lookahead_enabled() and self._e24_joint_training:
+            optimizer_grouped_parameters.append(
+                {
+                    'params': list(self.e24_joint_head.parameters()),
+                    'weight_decay': 0.01,
+                    'lr': float(self._active_lookahead_config().e24_head_lr),
+                    'name': 'e24',
+                }
+            )
 
         use_fused_adamw = bool(
             getattr(self.config.IL, "use_fused_adamw", False)
@@ -786,28 +1130,6 @@ class RLTrainer(BaseVLNCETrainer):
         # self.scheduler.step()
 
         if load_from_ckpt:
-            training_state = None
-            if config.IL.is_requeue:
-                if config.IL.resumable_checkpoints:
-                    ckpt_path, training_state_path = (
-                        latest_complete_checkpoint_pair(
-                            config.CHECKPOINT_FOLDER
-                        )
-                    )
-                    training_state = torch.load(
-                        training_state_path, map_location="cpu"
-                    )
-                else:
-                    ckpt_path = latest_checkpoint_path(
-                        config.CHECKPOINT_FOLDER
-                    )
-            else:
-                ckpt_path = config.IL.ckpt_to_load
-            ckpt_dict = self.load_checkpoint(ckpt_path, map_location="cpu")
-            if self._raenwm_enabled():
-                self._raenwm_head_state_override = ckpt_dict.get(
-                    "raenwm_heads_state_dict"
-                )
             validate_rgb_checkpoint_metadata(ckpt_dict, config)
             if config.IL.is_requeue:
                 if training_state is None:
@@ -896,11 +1218,32 @@ class RLTrainer(BaseVLNCETrainer):
                 training_state_format = training_state.get(
                     "format_version", 1
                 )
-                if training_state_format not in (1, 2):
+                if training_state_format not in (1, 2, 3):
                     raise ValueError(
                         "Unsupported SFT training-state format: "
                         f"{training_state_format!r}"
                     )
+                if self._active_lookahead_enabled():
+                    if training_state_format != 3:
+                        raise ValueError(
+                            "active-lookahead requeue requires training-state format 3"
+                        )
+                    saved_groups = training_state["optim_state"].get(
+                        "param_groups", []
+                    )
+                    current_groups = self.optimizer.param_groups
+                    if len(saved_groups) != 3 or len(current_groups) != 3:
+                        raise ValueError(
+                            "active-lookahead requeue requires exactly three optimizer groups"
+                        )
+                    if [group.get("name") for group in saved_groups] != [
+                        "navigation_decay",
+                        "navigation_no_decay",
+                        "e24",
+                    ]:
+                        raise ValueError(
+                            "active-lookahead optimizer group names do not match the joint contract"
+                        )
                 episode_iterator_state = training_state.get(
                     "episode_iterator_state"
                 )
@@ -921,6 +1264,8 @@ class RLTrainer(BaseVLNCETrainer):
                         episode_iterator_state
                     )
             logger.info(f"Loaded weights from checkpoint: {ckpt_path}, iteration: {start_iter}")
+
+        self._broadcast_raenwm_rgb_fusion_state()
 			
         params = sum(param.numel() for param in self.policy.parameters())
         params_t = sum(
@@ -1207,10 +1552,15 @@ class RLTrainer(BaseVLNCETrainer):
             interval = min(log_every, max(total_iter-idx, 0))
             cur_iter = idx + interval
 
-            sample_ratio = self.config.IL.sample_ratio ** ((idx) // self.config.IL.decay_interval + 1)
-
-            if sample_ratio <= 0.15:
+            schedule_iteration = idx + int(
+                self.config.IL.sample_ratio_iteration_offset
+            )
+            sample_ratio = self.config.IL.sample_ratio ** (
+                schedule_iteration // self.config.IL.decay_interval + 1
+            )
+            if sample_ratio <= float(self.config.IL.sample_ratio_zero_threshold):
                 sample_ratio = 0.0
+            self._e24_joint_iteration = int(idx)
             logger.info(f"sample ratio: {sample_ratio}")
             logs = self._train_interval(interval, self.config.IL.ml_weight, sample_ratio)
 
@@ -1235,8 +1585,224 @@ class RLTrainer(BaseVLNCETrainer):
                     episode_iterator_state=episode_iterator_state,
                 )
         
+    def _e24_joint_loss_config(self):
+        return OfflineDecisionLossConfig(
+            signed_weight=0.25,
+            present_signed_weight=1.0,
+            absent_signed_weight=1.0,
+            final_weight=1.0,
+            pair_weight=0.5,
+            regularization_weight=0.001,
+            absent_noop_weight=0.05,
+            correct_row_weight=2.0,
+            wrong_row_weight=1.0,
+        )
+
+    def _flush_e24_future_diagnostics(self):
+        summary = self._aggregate_e24_future_diagnostics()
+        if summary is None:
+            return
+        for name, value in summary.items():
+            self.logs[f"E24_future_{name}"].append(value)
+
+    def _aggregate_e24_future_diagnostics(self):
+        if not self._e24_predicted_future_enabled():
+            return None
+        values = torch.tensor(
+            [self._e24_future_diagnostic_totals[name] for name in PREDICTED_FUTURE_DIAGNOSTIC_NAMES],
+            dtype=torch.float64,
+            device=self.device,
+        )
+        if self.world_size > 1:
+            distr.all_reduce(values, op=distr.ReduceOp.SUM)
+        totals = dict(zip(PREDICTED_FUTURE_DIAGNOSTIC_NAMES, values.tolist()))
+        return summarize_predicted_future_diagnostics(totals)
+
+    def _backward_e24_joint_replay(self):
+        if not self._e24_joint_training:
+            return
+        self._flush_e24_future_diagnostics()
+        active_cfg = self._active_lookahead_config()
+        batch = collate_e24_joint_packs(self._e24_joint_replay_packs)
+        self._e24_joint_replay_packs = []
+        loss_config = self._e24_joint_loss_config()
+        local_denominators = (
+            {name: 0.0 for name in ("signed", "decision_weight", "regularization", "absent_noop")}
+            if batch is None
+            else e24_joint_denominators(batch, loss_config)
+        )
+        denominator_names = tuple(local_denominators)
+        denominator_tensor = torch.tensor(
+            [local_denominators[name] for name in denominator_names],
+            dtype=torch.float64,
+            device=self.device,
+        )
+        if self.world_size > 1:
+            distr.all_reduce(denominator_tensor, op=distr.ReduceOp.SUM)
+        global_denominators = {
+            name: float(value)
+            for name, value in zip(denominator_names, denominator_tensor.tolist())
+        }
+        micro_batch = int(active_cfg.e24_replay_micro_batch_size)
+        local_rows = 0 if batch is None else int(batch["owner_embeddings"].shape[0])
+        local_rounds = int(math.ceil(local_rows / micro_batch)) if local_rows else 0
+        rounds_tensor = torch.tensor(local_rounds, dtype=torch.long, device=self.device)
+        if self.world_size > 1:
+            distr.all_reduce(rounds_tensor, op=distr.ReduceOp.MAX)
+        replay_rounds = int(rounds_tensor.item())
+        if replay_rounds == 0:
+            for name in (
+                "loss", "signed_loss", "final_loss", "pair_loss",
+                "regularization_loss", "absent_noop_loss", "valid_decisions",
+                "teacher_in_top5_rate", "future_valid_rate", "fix", "harm",
+                "delta_mean", "delta_abs_mean", "delta_saturation_rate",
+                "replay_seconds",
+            ):
+                self.logs[f"E24_{name}"].append(0.0)
+            return
+
+        replay_started = time.perf_counter()
+        dummy = make_e24_joint_dummy_batch(topk=int(active_cfg.offline_topk))
+        train_module = self._e24_joint_train_module()
+        head_dtype = next(train_module.parameters()).dtype
+        metric_totals = defaultdict(float)
+        for replay_index in range(replay_rounds):
+            start = replay_index * micro_batch
+            real_micro = batch is not None and start < local_rows
+            if real_micro:
+                micro = slice_e24_joint_batch(
+                    batch, start, min(start + micro_batch, local_rows)
+                )
+            else:
+                micro = dummy
+            micro = e24_joint_batch_to_device(
+                micro, self.device, dtype=head_dtype
+            )
+            sync_context = (
+                train_module.no_sync()
+                if isinstance(train_module, DDP) and replay_index + 1 < replay_rounds
+                else nullcontext()
+            )
+            with sync_context:
+                # The retained E24 head uses indexed writes into dense FP32
+                # buffers. CUDA autocast can make the indexed source FP16 and
+                # violates PyTorch's exact-dtype index_put contract. Keep the
+                # small replay microbatch in FP32; navigation still uses AMP
+                # and both losses share the same GradScaler/optimizer step.
+                with torch.autocast(device_type=self.device.type, enabled=False):
+                    result, deltas = forward_e24_joint_batch(
+                        train_module, micro, loss_config=loss_config
+                    )
+                    replay_loss = normalized_e24_joint_loss(
+                        result,
+                        global_denominators=global_denominators,
+                        config=loss_config,
+                        world_size=self.world_size,
+                        loss_weight=float(active_cfg.e24_loss_weight),
+                    )
+                self.scaler.scale(replay_loss).backward()
+            metric_totals["loss"] += float(replay_loss.detach().cpu())
+            signed_count = result.teacher_present_count + result.teacher_absent_count
+            metric_totals["signed_numerator"] += (
+                float(result.signed_loss.detach().cpu()) * signed_count
+            )
+            metric_totals["final_numerator"] += (
+                float(result.final_loss.detach().cpu()) * result.decision_weight_sum
+            )
+            metric_totals["pair_numerator"] += (
+                float(result.pair_loss.detach().cpu()) * result.decision_weight_sum
+            )
+            metric_totals["regularization_numerator"] += (
+                float(result.regularization_loss.detach().cpu())
+                * result.regularization_candidate_count
+            )
+            metric_totals["absent_noop_numerator"] += (
+                float(result.absent_noop_loss.detach().cpu())
+                * result.absent_noop_candidate_count
+            )
+            if real_micro:
+                for name, value in e24_joint_diagnostic_totals(
+                    micro,
+                    deltas,
+                    delta_max=float(self._e24_joint_head_state_module().delta_max),
+                ).items():
+                    metric_totals[name] += value
+
+        diagnostic_names = (
+            "teacher_eligible", "teacher_in_top5", "future_slots", "future_valid",
+            "fix", "harm", "delta_sum", "delta_abs_sum", "delta_count",
+            "delta_saturated",
+        )
+        diagnostics = torch.tensor(
+            [metric_totals[name] for name in diagnostic_names],
+            dtype=torch.float64,
+            device=self.device,
+        )
+        if self.world_size > 1:
+            distr.all_reduce(diagnostics, op=distr.ReduceOp.SUM)
+        global_metrics = dict(zip(diagnostic_names, diagnostics.tolist()))
+
+        loss_names = (
+            "loss", "signed_numerator", "final_numerator", "pair_numerator",
+            "regularization_numerator", "absent_noop_numerator",
+        )
+        losses = torch.tensor(
+            [metric_totals[name] for name in loss_names],
+            dtype=torch.float64,
+            device=self.device,
+        )
+        if self.world_size > 1:
+            distr.all_reduce(losses, op=distr.ReduceOp.SUM)
+        global_losses = dict(zip(loss_names, losses.tolist()))
+        self.logs["E24_loss"].append(global_losses["loss"] / self.world_size)
+        for name, denominator_name in (
+            ("signed", "signed"),
+            ("final", "decision_weight"),
+            ("pair", "decision_weight"),
+            ("regularization", "regularization"),
+            ("absent_noop", "absent_noop"),
+        ):
+            self.logs[f"E24_{name}_loss"].append(
+                global_losses[f"{name}_numerator"]
+                / max(1.0, global_denominators[denominator_name])
+            )
+        self.logs["E24_valid_decisions"].append(global_denominators["signed"])
+        self.logs["E24_teacher_in_top5_rate"].append(
+            global_metrics["teacher_in_top5"]
+            / max(1.0, global_metrics["teacher_eligible"])
+        )
+        self.logs["E24_future_valid_rate"].append(
+            global_metrics["future_valid"] / max(1.0, global_metrics["future_slots"])
+        )
+        self.logs["E24_fix"].append(global_metrics["fix"])
+        self.logs["E24_harm"].append(global_metrics["harm"])
+        self.logs["E24_delta_mean"].append(
+            global_metrics["delta_sum"] / max(1.0, global_metrics["delta_count"])
+        )
+        self.logs["E24_delta_abs_mean"].append(
+            global_metrics["delta_abs_sum"] / max(1.0, global_metrics["delta_count"])
+        )
+        self.logs["E24_delta_saturation_rate"].append(
+            global_metrics["delta_saturated"]
+            / max(1.0, global_metrics["delta_count"])
+        )
+        self.logs["E24_replay_seconds"].append(time.perf_counter() - replay_started)
+
+    @staticmethod
+    def _joint_parameter_grad_norm(parameters):
+        squared = None
+        for parameter in parameters:
+            if parameter.grad is None:
+                continue
+            value = parameter.grad.detach().float().square().sum()
+            squared = value if squared is None else squared + value
+        return 0.0 if squared is None else float(squared.sqrt().cpu())
+
+
     def _train_interval(self, interval, ml_weight, sample_ratio):
         self.policy.train()
+        if self._e24_joint_training:
+            self.e24_joint_head.train()
         if self.world_size > 1:
             self.policy.net.module.rgb_encoder.eval()
             self.policy.net.module.depth_encoder.eval()
@@ -1266,6 +1832,8 @@ class RLTrainer(BaseVLNCETrainer):
             )
         for idx in pbar:
             self.optimizer.zero_grad(set_to_none=True)
+            self._e24_joint_replay_packs = []
+            self._e24_future_diagnostic_totals = defaultdict(float)
             for accumulation_idx in range(accumulation_steps):
                 should_sync = (
                     self.world_size <= 1
@@ -1283,11 +1851,37 @@ class RLTrainer(BaseVLNCETrainer):
                     self.scaler.scale(
                         self.loss / accumulation_steps
                     ).backward()
+            self._backward_e24_joint_replay()
+            self.scaler.unscale_(self.optimizer)
+            self._synchronize_raenwm_rgb_fusion_gradients()
+            if self._e24_joint_training:
+                e24_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.e24_joint_head.parameters(),
+                    float(
+                        self._active_lookahead_config().e24_head_gradient_clip_norm
+                    ),
+                )
+                self.logs["E24_grad_norm"].append(float(e24_grad_norm.cpu()))
             step_amp_optimizer(
                 self.scaler,
                 self.optimizer,
                 self.scheduler,
             )
+            if self._e24_joint_training:
+                self._e24_joint_iteration += 1
+            if (
+                self._active_lookahead_enabled()
+                and bool(self._active_lookahead_config().smoke_freeze_check)
+                and self._e24_joint_frozen_manifest is not None
+            ):
+                comparison = compare_base_tensor_manifests(
+                    self._e24_joint_frozen_manifest,
+                    capture_base_tensor_manifest(self._e24_joint_frozen_modules()),
+                )
+                if not comparison["exact_match"]:
+                    raise RuntimeError(
+                        f"frozen active-lookahead tensors changed: {comparison}"
+                    )
 
             if self.local_rank < 1:
                 pbar.set_postfix({'iter': f'{idx+1}/{interval}'})
@@ -1392,10 +1986,13 @@ class RLTrainer(BaseVLNCETrainer):
         else:
             eps_to_eval = min(self.config.EVAL.EPISODE_COUNT, sum(self.envs.number_of_episodes))
         self.stat_eps = {}
+        self._e24_future_diagnostic_totals = defaultdict(float)
         self.pbar = tqdm.tqdm(total=eps_to_eval) if self.config.use_pbar else None
 
+        evaluation_started = time.perf_counter()
         while len(self.stat_eps) < eps_to_eval:
             self.rollout('eval')
+        evaluation_elapsed_seconds = time.perf_counter() - evaluation_started
 
         self.envs.close()
 
@@ -1421,6 +2018,7 @@ class RLTrainer(BaseVLNCETrainer):
                 aggregated_states[k] = v
         
         split = self.config.TASK_CONFIG.DATASET.SPLIT
+        lookahead_diagnostics = self._aggregate_e24_future_diagnostics()
         if self.config.EVAL.SAVE_RESULTS:
             fname = os.path.join(
                 self.config.RESULTS_DIR,
@@ -1437,6 +2035,27 @@ class RLTrainer(BaseVLNCETrainer):
                 )
                 with open(fname, "w") as f:
                     json.dump(aggregated_states, f, indent=2)
+                if lookahead_diagnostics is not None:
+                    diagnostic_path = os.path.join(
+                        self.config.RESULTS_DIR,
+                        f"lookahead_ckpt_{checkpoint_index}_{split}.json",
+                    )
+                    temporary_path = diagnostic_path + ".tmp"
+                    payload = {
+                        "format_version": "etpr1-active-lookahead-diagnostics-v1",
+                        "checkpoint_path": str(checkpoint_path),
+                        "checkpoint_index": int(checkpoint_index),
+                        "split": str(split),
+                        "episodes": int(total),
+                        "elapsed_seconds": float(evaluation_elapsed_seconds),
+                        "oracle_q1_calls": float(
+                            lookahead_diagnostics.get("oracle_q1_requested", 0.0)
+                        ),
+                        "metrics": lookahead_diagnostics,
+                    }
+                    with open(temporary_path, "w") as f:
+                        json.dump(payload, f, indent=2, sort_keys=True)
+                    os.replace(temporary_path, diagnostic_path)
 
             logger.info(f"Episodes evaluated: {total}")
             checkpoint_num = checkpoint_index + 1
@@ -1623,7 +2242,11 @@ class RLTrainer(BaseVLNCETrainer):
         total_actions = 0.
         
         not_done_index = list(range(self.envs.num_envs)) 
-        have_real_pos = (mode == 'train' or self.config.VIDEO_OPTION) 
+        have_real_pos = (
+            mode == 'train'
+            or bool(self.config.VIDEO_OPTION)
+            or self._active_lookahead_enabled()
+        )
         ghost_aug = self.config.IL.ghost_aug if mode == 'train' else 0
         self.gmaps = [GraphMap(have_real_pos, 
                                self.config.IL.loc_noise, 
@@ -1631,6 +2254,14 @@ class RLTrainer(BaseVLNCETrainer):
                                ghost_aug) for _ in range(self.envs.num_envs)]
         prev_vp = [None] * self.envs.num_envs
         self._initialize_raenwm_runtime(self.envs.num_envs)
+        if (
+            self._active_lookahead_enabled()
+            and bool(self._active_lookahead_config().smoke_freeze_check)
+            and self._e24_joint_frozen_manifest is None
+        ):
+            self._e24_joint_frozen_manifest = capture_base_tensor_manifest(
+                self._e24_joint_frozen_modules()
+            )
 
         for stepk in range(self.max_len): 
             total_actions += self.envs.num_envs
@@ -1665,7 +2296,12 @@ class RLTrainer(BaseVLNCETrainer):
 
             current_goal_distances = None
             cand_goal_dists = None
-            if mode == 'train' or self.config.VIDEO_OPTION:
+            candidate_q0_records = None
+            if (
+                mode == 'train'
+                or self.config.VIDEO_OPTION
+                or self._active_lookahead_enabled()
+            ):
                 navigation_states = self.envs.call(
                     ["get_navigation_state"] * self.envs.num_envs,
                     [
@@ -1691,6 +2327,10 @@ class RLTrainer(BaseVLNCETrainer):
                     state["candidate_positions"]
                     for state in navigation_states
                 ]
+                candidate_q0_records = [
+                    state["candidate_q0_records"]
+                    for state in navigation_states
+                ]
                 if mode == 'train':
                     current_goal_distances = [
                         state["current_goal_distance"]
@@ -1707,6 +2347,7 @@ class RLTrainer(BaseVLNCETrainer):
 
             cur_vp, cand_vp, cand_pos = [], [], []
             candidate_previews = []
+            batch_candidate_to_ghost = []
             for i in range(self.envs.num_envs):
                 cur_vp_i, cand_vp_i, cand_pos_i = self.gmaps[i].identify_node(
                     cur_pos[i], cur_ori[i], wp_outputs['cand_angles'][i], wp_outputs['cand_distances'][i]
@@ -1754,7 +2395,7 @@ class RLTrainer(BaseVLNCETrainer):
             for i in range(self.envs.num_envs):
                 cur_embeds = avg_pano_embeds[i]
                 cand_embeds = pano_embeds[i][vp_inputs['nav_types'][i]==1] 
-                self.gmaps[i].update_graph(prev_vp[i], stepk+1,
+                candidate_to_ghost = self.gmaps[i].update_graph(prev_vp[i], stepk+1,
                                         cur_vp[i], cur_pos[i], cur_embeds,
                                         cand_vp[i], cand_pos[i], cand_embeds,
                                         cand_real_pos[i],
@@ -1764,6 +2405,23 @@ class RLTrainer(BaseVLNCETrainer):
                                             candidate_previews[i]
                                             if fusion_enabled else None
                                         ))
+                batch_candidate_to_ghost.append(candidate_to_ghost)
+
+            if self._active_lookahead_enabled():
+                if candidate_q0_records is None:
+                    raise RuntimeError("active lookahead did not receive candidate q0 records")
+                for i, gmap in enumerate(self.gmaps):
+                    gmap.record_persistent_q0_candidates(
+                        batch_candidate_to_ghost[i],
+                        cand_pos[i],
+                        cand_real_pos[i],
+                        candidate_q0_records[i],
+                        wp_outputs['cand_img_idxes'][i],
+                        wp_outputs['cand_distances'][i],
+                        source_front_vp=str(cur_vp[i]),
+                        source_high_level_step=int(stepk),
+                    )
+                self._record_e24_source_contexts(stepk=stepk, cur_vp=cur_vp)
 
             nav_inputs = self._nav_gmap_variable(cur_vp, cur_pos, cur_ori, task_type)
             nav_inputs.update({
@@ -1776,6 +2434,24 @@ class RLTrainer(BaseVLNCETrainer):
             nav_logits = nav_outs['global_logits']
             nav_probs = F.softmax(nav_logits, 1)
 
+            active_deltas = None
+            e24_joint_pack = None
+            if self._active_lookahead_enabled():
+                (
+                    active_deltas,
+                    _active_query_counts,
+                    e24_joint_pack,
+                    e24_future_diagnostics,
+                ) = build_e24_joint_step(
+                    self,
+                    nav_inputs=nav_inputs,
+                    nav_outs=nav_outs,
+                    txt_embeds=txt_embeds,
+                    txt_masks=txt_masks,
+                )
+                for name, value in e24_future_diagnostics.items():
+                    self._e24_future_diagnostic_totals[name] += float(value)
+
             if mode == 'train' or self.config.VIDEO_OPTION:
                 teacher_actions = self._teacher_action_new(
                     nav_inputs['gmap_vp_ids'],
@@ -1785,15 +2461,61 @@ class RLTrainer(BaseVLNCETrainer):
                 )
             if mode == 'train': 
                 loss += F.cross_entropy(nav_logits, teacher_actions, reduction='sum', ignore_index=-100)
+                if e24_joint_pack is not None:
+                    e24_joint_pack = attach_e24_joint_targets(
+                        e24_joint_pack, teacher_actions, no_vp_left
+                    )
+                    self._e24_joint_replay_packs.append(
+                        e24_joint_pack.to_cpu_fp16()
+                    )
 
             # determine action
             if feedback == 'sample':
-                c = torch.distributions.Categorical(nav_probs)
-                a_t = c.sample().detach()
+                if not self._active_lookahead_enabled():
+                    a_t = torch.distributions.Categorical(nav_probs).sample().detach()
+                elif active_deltas is None:
+                    a_t = nav_logits.argmax(dim=-1)
+                else:
+                    action_scale = joint_action_scale(
+                        self._e24_joint_iteration,
+                        self._e24_joint_start_iteration,
+                        int(
+                            self._active_lookahead_config().e24_action_warmup_iters
+                        ),
+                    )
+                    adjusted_actions = stop_isolated_e24_actions(
+                        nav_logits,
+                        active_deltas * action_scale,
+                        nav_inputs['gmap_vp_ids'],
+                    )
+                    base_actions = nav_logits.detach().argmax(dim=-1)
+                    self._e24_future_diagnostic_totals['action_rows'] += float(
+                        adjusted_actions.numel()
+                    )
+                    self._e24_future_diagnostic_totals['action_flips'] += float(
+                        (adjusted_actions != base_actions).sum()
+                    )
+                    a_t = adjusted_actions
                 a_t = torch.where(torch.rand_like(a_t, dtype=torch.float)<=sample_ratio, teacher_actions, a_t)
 
             elif feedback == 'argmax':
-                a_t = nav_logits.argmax(dim=-1)
+                a_t = (
+                    nav_logits.argmax(dim=-1)
+                    if active_deltas is None
+                    else stop_isolated_e24_actions(
+                        nav_logits,
+                        active_deltas,
+                        nav_inputs['gmap_vp_ids'],
+                    )
+                )
+                if active_deltas is not None:
+                    base_actions = nav_logits.detach().argmax(dim=-1)
+                    self._e24_future_diagnostic_totals['action_rows'] += float(
+                        a_t.numel()
+                    )
+                    self._e24_future_diagnostic_totals['action_flips'] += float(
+                        (a_t != base_actions).sum()
+                    )
             else:
                 raise NotImplementedError
             navigation_control = torch.stack(

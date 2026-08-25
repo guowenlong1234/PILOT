@@ -170,6 +170,50 @@ def _fusion_config(*, trainable=False, gpu_numbers=1):
     )
 
 
+def _joint_config():
+    return SimpleNamespace(
+        IL=SimpleNamespace(
+            sample_ratio_iteration_offset=14200,
+            sample_ratio_zero_threshold=0.0,
+        ),
+        MODEL=SimpleNamespace(
+            ACTIVE_LOOKAHEAD=SimpleNamespace(
+                enabled=True,
+                checkpoint_format_version="etpr1-e24-joint-v1",
+                base_checkpoint_sha256="1" * 64,
+                e24_joint_init_sha256="2" * 64,
+                e24_source_base_manifest_sha256="3" * 64,
+                dino_cwp_checkpoint_sha256="4" * 64,
+                base_iteration=14200,
+                e24_action_warmup_iters=400,
+                dino_cwp_none_threshold=0.3,
+                e24_train_delta_scale=1.0,
+            ),
+            RAENWM=SimpleNamespace(
+                checkpoint_sha256="5" * 64,
+                head_checkpoint_sha256="6" * 64,
+                stat_sha256="7" * 64,
+            ),
+        ),
+    )
+
+
+def test_joint_checkpoint_provenance_is_strict():
+    trainer = object.__new__(RLTrainer)
+    trainer.config = _joint_config()
+    provenance = trainer._e24_joint_provenance()
+    checkpoint = {
+        "e24_joint_format_version": "etpr1-e24-joint-v1",
+        "e24_joint_provenance": provenance,
+    }
+    assert trainer._validate_e24_joint_provenance(checkpoint) == provenance
+    checkpoint["e24_joint_provenance"] = dict(
+        provenance, context_strategy="rolling"
+    )
+    with pytest.raises(ValueError, match="provenance mismatch"):
+        trainer._validate_e24_joint_provenance(checkpoint)
+
+
 def test_sft_rgb_fusion_groups_preview_queries_once_per_ghost(monkeypatch):
     trainer = object.__new__(RLTrainer)
     trainer.config = _fusion_config()
@@ -225,13 +269,14 @@ def test_sft_rgb_fusion_checkpoint_loading_is_strict():
     ) is None
 
 
-def test_sft_trainable_rgb_fusion_rejects_multiple_gpus():
+def test_sft_trainable_rgb_fusion_supports_multiple_gpus_before_sync():
     trainer = object.__new__(RLTrainer)
     trainer.config = _fusion_config(trainable=True, gpu_numbers=2)
     trainer.device = torch.device("cpu")
     trainer.raenwm_rgb_fusion_adapter = None
-    with pytest.raises(RuntimeError, match="only GPU_NUMBERS=1"):
-        trainer._initialize_raenwm_rgb_fusion_adapter()
+    adapter = trainer._initialize_raenwm_rgb_fusion_adapter()
+    assert adapter.training
+    assert all(parameter.requires_grad for parameter in adapter.parameters())
 
 
 def test_graph_map_keeps_goal_distances_aligned_with_real_positions():

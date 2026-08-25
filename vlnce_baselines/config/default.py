@@ -97,6 +97,8 @@ _C.IL.keep_last_train_states = 3
 _C.IL.keep_train_state_every_n_iters = 0
 _C.IL.checkpoint_sync_enabled = False
 _C.IL.checkpoint_sync_destination = ""
+_C.IL.sample_ratio_iteration_offset = 0
+_C.IL.sample_ratio_zero_threshold = 0.15
 # it True, start training from the saved epoch
 # -----------------------------------------------------------------------------
 # IL: RXR TRAINER CONFIG
@@ -228,6 +230,34 @@ _C.MODEL.RAENWM.rgb_fusion_type = "residual_gate"
 _C.MODEL.RAENWM.rgb_fusion_alpha = 1.0
 _C.MODEL.RAENWM.rgb_fusion_zero_init = True
 _C.MODEL.RAENWM.rgb_fusion_trainable = False
+
+# Predicted Top-5 q1 lookahead with a jointly trained E24 residual scorer.
+# Every switch is off by default so legacy R1 behavior is unchanged.
+_C.MODEL.ACTIVE_LOOKAHEAD = CN()
+_C.MODEL.ACTIVE_LOOKAHEAD.enabled = False
+_C.MODEL.ACTIVE_LOOKAHEAD.source = "dino_cwp_nwm"
+_C.MODEL.ACTIVE_LOOKAHEAD.offline_topk = 5
+_C.MODEL.ACTIVE_LOOKAHEAD.base_checkpoint_path = ""
+_C.MODEL.ACTIVE_LOOKAHEAD.base_checkpoint_sha256 = ""
+_C.MODEL.ACTIVE_LOOKAHEAD.base_iteration = 14200
+_C.MODEL.ACTIVE_LOOKAHEAD.e24_joint_init_path = ""
+_C.MODEL.ACTIVE_LOOKAHEAD.e24_joint_init_sha256 = ""
+_C.MODEL.ACTIVE_LOOKAHEAD.e24_source_base_manifest_sha256 = ""
+_C.MODEL.ACTIVE_LOOKAHEAD.e24_head_lr = 5.0e-6
+_C.MODEL.ACTIVE_LOOKAHEAD.e24_loss_weight = 1.0
+_C.MODEL.ACTIVE_LOOKAHEAD.e24_train_delta_scale = 1.0
+_C.MODEL.ACTIVE_LOOKAHEAD.e24_action_warmup_iters = 400
+_C.MODEL.ACTIVE_LOOKAHEAD.e24_replay_micro_batch_size = 2
+_C.MODEL.ACTIVE_LOOKAHEAD.e24_replay_storage = "cpu_fp16"
+_C.MODEL.ACTIVE_LOOKAHEAD.e24_head_gradient_clip_norm = 10.0
+_C.MODEL.ACTIVE_LOOKAHEAD.dino_cwp_checkpoint_path = ""
+_C.MODEL.ACTIVE_LOOKAHEAD.dino_cwp_checkpoint_sha256 = ""
+_C.MODEL.ACTIVE_LOOKAHEAD.dino_cwp_none_threshold = 0.3
+_C.MODEL.ACTIVE_LOOKAHEAD.dino_cwp_context_strategy = "fixed_initial"
+_C.MODEL.ACTIVE_LOOKAHEAD.dino_cwp_heading_policy = "face_motion"
+_C.MODEL.ACTIVE_LOOKAHEAD.checkpoint_format_version = "etpr1-e24-joint-v1"
+_C.MODEL.ACTIVE_LOOKAHEAD.smoke_freeze_check = False
+_C.MODEL.ACTIVE_LOOKAHEAD.diagnostics_enabled = True
 
 _C.MODEL.DEPTH_ENCODER = CN()
 _C.MODEL.DEPTH_ENCODER.cnn_type = "VlnResnetDepthEncoder"
