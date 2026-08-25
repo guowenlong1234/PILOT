@@ -583,7 +583,11 @@ class VLNCEDaggerEnv(habitat.RLEnv):
                 trajectory = [init_position.copy()]
                 post_position = init_position.copy()
                 estimated_position = init_position.copy()
-                estimated_heading = heading_from_quaternion(init_rotation) + float(angle)
+                estimated_heading = (
+                    2.0
+                    * np.arctan2(init_rotation.imag[1], init_rotation.real)
+                    + float(angle)
+                )
                 estimated_position[0] -= float(forward) * np.sin(estimated_heading)
                 estimated_position[2] -= float(forward) * np.cos(estimated_heading)
                 try:

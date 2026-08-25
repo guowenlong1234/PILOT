@@ -1619,7 +1619,7 @@ class RLTrainer(BaseVLNCETrainer):
         return summarize_predicted_future_diagnostics(totals)
 
     def _backward_e24_joint_replay(self):
-        if not self._e24_joint_training:
+        if not getattr(self, "_e24_joint_training", False):
             return
         self._flush_e24_future_diagnostics()
         active_cfg = self._active_lookahead_config()
@@ -1801,7 +1801,8 @@ class RLTrainer(BaseVLNCETrainer):
 
     def _train_interval(self, interval, ml_weight, sample_ratio):
         self.policy.train()
-        if self._e24_joint_training:
+        joint_training = getattr(self, "_e24_joint_training", False)
+        if joint_training:
             self.e24_joint_head.train()
         if self.world_size > 1:
             self.policy.net.module.rgb_encoder.eval()
@@ -1852,9 +1853,10 @@ class RLTrainer(BaseVLNCETrainer):
                         self.loss / accumulation_steps
                     ).backward()
             self._backward_e24_joint_replay()
-            self.scaler.unscale_(self.optimizer)
+            if joint_training:
+                self.scaler.unscale_(self.optimizer)
             self._synchronize_raenwm_rgb_fusion_gradients()
-            if self._e24_joint_training:
+            if joint_training:
                 e24_grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.e24_joint_head.parameters(),
                     float(
@@ -1867,7 +1869,7 @@ class RLTrainer(BaseVLNCETrainer):
                 self.optimizer,
                 self.scheduler,
             )
-            if self._e24_joint_training:
+            if joint_training:
                 self._e24_joint_iteration += 1
             if (
                 self._active_lookahead_enabled()
