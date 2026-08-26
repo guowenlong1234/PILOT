@@ -70,6 +70,21 @@ def test_native_cls_smoke_and_single_episode_wrappers_are_isolated():
         assert contract in single
 
 
+def test_native_cls_parity_tool_pins_complete_sequence_comparison():
+    tool = (ROOT / "scripts/validate_native_cls_nwm_parity.py").read_text()
+    for contract in (
+        'CDiT_models["CDiT-B/2"]',
+        "num_steps=10",
+        'sampling_method="euler"',
+        '"tokens"',
+        '"cls_normalized"',
+        '"patch_tokens"',
+        '"max_abs"',
+        '"cosine"',
+    ):
+        assert contract in tool
+
+
 def test_joint_config_and_launchers_fix_the_formal_contract():
     config = (ROOT / "run_r2r/iter_train_rae_dino_e24_joint.yaml").read_text()
     assert "iters: 10000" in config
