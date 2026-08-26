@@ -66,6 +66,29 @@ bash scripts/manage_e24_joint_pilot_eval_host.sh status
 该入口固定使用本次 pilot 运行 `20260825T165434`。若重新运行 pilot，必须通过
 `ETPR1_E24_PILOT_RUN_ID` 显式指定新的运行 ID，避免误评旧 checkpoint。
 
+## Pilot 验收结果
+
+2026-08-25，训练机双 A6000 从原始 `iter14200` 与 E24 avg3 独立完成
+400 次更新，退出码为 0。`ckpt.iter400.pth` 的 SHA256 为
+`7b21a9296a79d797be02121a5a889fa313b8987160bd1ea5a2f62ff1c1c99201`；
+对应模型与训练状态 iteration 均为 400，三组优化器、scheduler、scaler 和双
+rank episode 队列完整，2,704 个模型/状态张量均为有限值。训练诊断中 q0/q1
+成功率均为 1.0、future-valid rate 为 0.437、q1 Oracle 调用为 0，所有
+CWP/NWM batch/row failure 均为 0。
+
+2026-08-26，iter400 经训练机到测评机 2.5 GbE 直连原子同步，两端 SHA256
+一致。测评机在 `gwl-etpr1-rae` 与 `etpr1_rae` 中完成固定 16 episode
+`val_unseen` 评测，耗时 45.02 秒：SR 为 0.375、SPL 为 0.317393；q0/q1
+成功率均为 1.0、future-valid rate 为 0.423547、action-flip rate 为
+0.006803、q1 Oracle 调用为 0，所有 CWP/NWM batch/row failure 均为 0。
+指标与诊断 JSON 均有效且没有非有限值。评测产物位于测评机：
+
+`data/logs/active_lookahead/e24_joint_pilot_eval/20260825T165434/`
+
+该结果只用于短链路和覆盖率验收；16 episode 的 SR/SPL 不作为正式 1,839
+episode 性能结论。pilot 验收完成后，正式 10,000 次训练仍须从原始基座与
+原始 E24 avg3 重新开始，禁止接续 pilot。
+
 ## 测评与最佳点
 
 测评机先按项目规则检查 RTX 4090、受保护的 ETPNav 容器和计算进程，再启动：
