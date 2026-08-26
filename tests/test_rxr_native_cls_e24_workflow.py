@@ -28,6 +28,12 @@ def test_rxr_baseline_and_joint_configs_preserve_task_contract():
         assert config["TASK_CONFIG"]["DATASET"]["LANGUAGES"] == [
             "en-US", "en-IN", "hi-IN", "te-IN"
         ]
+        assert config["EVAL"]["LANGUAGES"] == [
+            "en-US", "en-IN", "hi-IN", "te-IN"
+        ]
+        assert config["INFERENCE"]["LANGUAGES"] == [
+            "en-US", "en-IN", "hi-IN", "te-IN"
+        ]
         assert config["TASK_CONFIG"]["DATASET"]["SUFFIX"] == "_90"
         assert config["IL"]["resumable_checkpoints"] is True
         assert config["IL"]["strict_rng_resume"] is True

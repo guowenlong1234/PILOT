@@ -15,7 +15,7 @@ ONLY_LAST_SAVEALL: True
 
 INFERENCE:
   SPLIT: test_challenge
-  LANGUAGES: ['*']
+  LANGUAGES: [en-US, en-IN, hi-IN, te-IN]
   USE_CKPT_CONFIG: False
   SAMPLE: False
   CKPT_PATH: ''
@@ -27,7 +27,7 @@ EVAL:
   checkpoint_order: ascending
   USE_CKPT_CONFIG: False
   SPLIT: val_unseen
-  LANGUAGES: ['*']
+  LANGUAGES: [en-US, en-IN, hi-IN, te-IN]
   EPISODE_COUNT: -1
   EPISODE_ID: None
   CKPT_PATH_DIR: ''
