@@ -49,10 +49,10 @@
 - 修改 `tests/test_online_rae_projection.py`
 - 修改 `tests/test_raenwm_rgb_fusion.py`
 
-- [ ] 先测试 `raw_cls/nav_cls/raw_patch` 输出边界和 DINO 冻结。
-- [ ] policy 保留前向视图 raw CLS+patch，导航仍使用 nav CLS。
-- [ ] 新模式用反归一化 native CLS 和余弦 agreement；gate 末层零初始化。
-- [ ] 验证初始恒等、非零梯度、只修改 new/existing ghost。
+- [x] 先测试 `raw_cls/nav_cls/raw_patch` 输出边界和 DINO 冻结。
+- [x] policy 保留前向视图 raw CLS+patch，导航仍使用 nav CLS。
+- [x] 新模式用反归一化 native CLS 和余弦 agreement；gate 末层零初始化。
+- [x] 验证初始恒等、非零梯度、只修改 new/existing ghost。
 
 ## Task 4：增加 Top-5 CLS adapter 与原生 future
 
@@ -64,11 +64,11 @@
 - 修改 `tests/test_stage0_dino_cwp_future.py`
 - 修改 `tests/test_stage0_e24_joint.py`
 
-- [ ] 测试 5 维条件固定为 `[condition.dx, condition.dy, sin(dtheta), cos(dtheta), rel_t]`。
-- [ ] 实现零残差初始化的独立 Top-5 CLS adapter。
-- [ ] q0 只把 native patch 给 DINO-CWP；q1 直接使用 native 257 tokens。
-- [ ] 只替换 token 0，256 个 patch 逐值不变。
-- [ ] 联合 DDP wrapper 同时持有 Top-5 adapter 和 E24。
+- [x] 测试 5 维条件固定为 `[condition.dx, condition.dy, sin(dtheta), cos(dtheta), rel_t]`。
+- [x] 实现零残差初始化的独立 Top-5 CLS adapter。
+- [x] q0 只把 native patch 给 DINO-CWP；q1 直接使用 native 257 tokens。
+- [x] 只替换 token 0，256 个 patch 逐值不变。
+- [x] 联合 DDP wrapper 同时持有 Top-5 adapter 和 E24。
 
 ## Task 5：实现 adjusted full-logits replay 损失
 
@@ -78,11 +78,11 @@
 - 修改 `vlnce_baselines/ss_trainer_ETP_R1.py`
 - 修改 `tests/test_stage0_e24_joint.py`
 
-- [ ] replay 保存 raw q1 tokens、condition、完整基础 logits/mask、Top-5 映射和教师动作。
-- [ ] 实现 STOP、Top-5 内/外教师、padding 的完整交叉熵测试。
-- [ ] adjusted loss 只更新 Top-5 adapter/E24；base loss 更新导航和 RGB adapter。
-- [ ] 无有效 row 时建立覆盖所有联合参数的 DDP 零值 dummy graph。
-- [ ] 保留旧配置的 decision-aware loss，不做无关删除。
+- [x] replay 保存 raw q1 tokens、condition、完整基础 logits/mask、Top-5 映射和教师动作。
+- [x] 实现 STOP、Top-5 内/外教师、padding 的完整交叉熵测试。
+- [x] adjusted loss 只更新 Top-5 adapter/E24；base loss 更新导航和 RGB adapter。
+- [x] 无有效 row 时建立覆盖所有联合参数的 DDP 零值 dummy graph。
+- [x] 保留旧配置的 decision-aware loss，不做无关删除。
 
 ## Task 6：配置、资产和 checkpoint v2/v4
 
@@ -95,11 +95,11 @@
 - 修改 `tests/test_rae_checkpoint.py`
 - 新增/修改工作流测试
 
-- [ ] 新模式严格校验 75k EMA、推理配置 SHA 和全部外部资产身份。
-- [ ] 四个优化器参数组命名固定为 navigation decay/no-decay、Top-5 adapter、E24。
-- [ ] 模型 checkpoint 使用 `etpr1-native-cls-e24-joint-v2`。
-- [ ] training-state v4 保存/恢复 optimizer、scheduler、scaler、iteration、episode、全部 RNG 和每 rank NWM generator。
-- [ ] new-run 只允许 base 缺少新状态；评测/requeue 必须严格完整。
+- [x] 新模式严格校验 75k EMA、推理配置 SHA 和全部外部资产身份。
+- [x] 四个优化器参数组命名固定为 navigation decay/no-decay、Top-5 adapter、E24。
+- [x] 模型 checkpoint 使用 `etpr1-native-cls-e24-joint-v2`。
+- [x] training-state v4 保存/恢复 optimizer、scheduler、scaler、iteration、episode、全部 RNG 和每 rank NWM generator。
+- [x] new-run 只允许 base 缺少新状态；评测/requeue 必须严格完整。
 
 ## Task 7：真实数值一致性和启动脚本
 
@@ -109,18 +109,20 @@
 - 新增 native CLS SFT smoke/评测 wrapper
 - 新增对应脚本测试
 
-- [ ] 固定真实四帧、condition 和 `[1,257,768]` noise，对比上游与兼容层完整输出。
-- [ ] 新增独立 smoke 入口，不参数污染旧 70k+heads 实验。
-- [ ] 新增固定单 checkpoint、单 episode、独立输出目录的测评入口。
+- [x] 固定真实四帧、condition 和 `[1,257,768]` noise，对比上游与兼容层完整输出。
+- [x] 新增独立 smoke 入口，不参数污染旧 70k+heads 实验。
+- [x] 新增固定单 checkpoint、单 episode、独立输出目录的测评入口。
 
 ## Task 8：分层验收
 
-- [ ] 笔记本运行不依赖 GPU 的聚焦单测和静态检查。
-- [ ] 提交源码后推送中央仓库；确认训练机工作区干净后 ff-only 更新。
-- [ ] 训练机记录 Python/PyTorch/Transformers/CUDA/Habitat 版本并完成真实数值一致性。
-- [ ] 训练机单环境两次更新、保存；新进程恢复并再更新一次。
-- [ ] 训练机双卡短 smoke，审计 DINO/NWM/DINO-CWP/waypoint 冻结和 DDP 梯度。
-- [ ] 提交并推送；确认测评机工作区干净后 ff-only 更新。
-- [ ] 测评机先检查 GPU、容器和 ETPNav 任务，再完成固定单 episode。
-- [ ] 在实际目标环境运行相关回归与完整 `pytest -q tests`。
-- [ ] 最小更新 `research.md`，保留用户现有未提交内容，记录最终命令、版本和结果。
+- [x] 笔记本运行不依赖 GPU 的聚焦单测和静态检查。
+- [x] 提交源码后推送中央仓库；确认训练机工作区干净后 ff-only 更新。
+- [x] 训练机记录 Python/PyTorch/Transformers/CUDA/Habitat 版本并完成真实数值一致性。
+- [x] 训练机单环境两次更新、保存；新进程恢复并再更新一次。
+- [x] 训练机双卡短 smoke，审计 DINO/NWM/DINO-CWP/waypoint 冻结和 DDP 梯度。
+- [x] 提交并推送；确认测评机工作区干净后 ff-only 更新。
+- [x] 测评机先检查 GPU、容器和 ETPNav 任务，再完成固定单 episode。
+- [x] 在实际目标环境运行相关回归与完整 `pytest -q tests`。
+- [x] 最小更新 `research.md`，保留用户现有未提交内容，记录最终命令、版本和结果。
+
+验收说明：训练机完整测试为 478 passed，另有 3 项测评机专属运行时测试因主机路径不适用而失败、1 项 TensorBoard 追加读取偶发失败且单独复跑通过；测评机完整测试为 481 passed，唯一失败的旧 DINO parity 测试由受保护 ETPNav YAML 硬编码训练机路径导致，该真实 parity 测试已在训练机通过。本次原生 CLS 相关测试、真实数值一致性、单/双卡训练、严格恢复和测评机单 episode 均通过。
