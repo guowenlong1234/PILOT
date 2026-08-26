@@ -5,7 +5,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
 MODE=${1:?Usage: finalize_rxr_sft_selection_host.sh <baseline|joint>}
 CONTAINER=${ETPR1_RXR_EVAL_CONTAINER:-gwl-etpr1-rae}
-DATASET=${ETPR1_RXR_EVAL_DATASET:-${REPO_ROOT}/data/datasets/RxR_VLNCE_v0_enc_xlmr/val_unseen/val_unseen_guide_90.json.gz}
+DATASET=${ETPR1_RXR_EVAL_DATASET:-${REPO_ROOT}/data/datasets/RxR_VLNCE_v0_enc_xlmr/val_unseen/val_unseen_guide.json.gz}
 GT=${ETPR1_RXR_EVAL_GT:-${REPO_ROOT}/data/datasets/RxR_VLNCE_v0_enc_xlmr/val_unseen/val_unseen_guide_gt.json.gz}
 
 case "$MODE" in

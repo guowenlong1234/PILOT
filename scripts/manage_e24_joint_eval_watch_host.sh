@@ -201,6 +201,7 @@ PY
                     )
                     [ "${#provenance_fields[@]}" -eq 4 ]
                     extra_config_args=(
+                        TASK_CONFIG.DATASET.SUFFIX ""
                         MODEL.ACTIVE_LOOKAHEAD.base_checkpoint_sha256 "${provenance_fields[0]}"
                         MODEL.ACTIVE_LOOKAHEAD.base_iteration "${provenance_fields[1]}"
                         MODEL.ACTIVE_LOOKAHEAD.base_selection_manifest_sha256 "${provenance_fields[2]}"

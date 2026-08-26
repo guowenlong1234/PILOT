@@ -236,6 +236,7 @@ def test_rxr_eval_and_sync_wrappers_enforce_safe_defaults():
     assert "sha256sum '$incoming'" in sync
     assert "ready_marker" in sync
     assert "EVAL.EPISODE_COUNT 1" in single
+    assert 'TASK_CONFIG.DATASET.SUFFIX ""' in single
     assert "oracle_q1_calls" in single
 
 

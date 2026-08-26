@@ -94,6 +94,7 @@ set +e
     CHECKPOINT_FOLDER "$OUTPUT_ROOT/checkpoints/" \
     TENSORBOARD_DIR "$OUTPUT_ROOT/tensorboard/" \
     RESULTS_DIR "$OUTPUT_ROOT/results/" \
+    TASK_CONFIG.DATASET.SUFFIX "" \
     "${extra_config_args[@]}" \
     2>&1 | "$PYTHON_BIN" -u scripts/filter_habitat_startup_noise.py | tee -a "$LOG_FILE"
 exit_code=${PIPESTATUS[0]}

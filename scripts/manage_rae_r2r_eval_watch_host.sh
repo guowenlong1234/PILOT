@@ -144,6 +144,10 @@ evaluate_checkpoint() {
             export MPLCONFIGDIR=/tmp/matplotlib-etpr1-eval-watch
             export GLOG_minloglevel=2 MAGNUM_LOG=quiet HABITAT_SIM_LOG=quiet
             export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8
+            extra_config_args=()
+            case "$CONFIG_FILE" in
+                *run_rxr/*) extra_config_args=(TASK_CONFIG.DATASET.SUFFIX "") ;;
+            esac
             scripts/etpr1_rae_runtime_exec.sh python run.py \
                 --exp_name "$EXP_NAME" \
                 --run-type eval \
@@ -162,6 +166,7 @@ evaluate_checkpoint() {
                 RESULTS_DIR "$EVAL_ROOT/results/" \
                 MODEL.pretrained_path "$PRETRAIN_PATH" \
                 MODEL.RGB_ENCODER.precision ambient \
+                "${extra_config_args[@]}" \
                 2>&1 | python -u scripts/filter_habitat_startup_noise.py
             exit ${PIPESTATUS[0]}
         '
