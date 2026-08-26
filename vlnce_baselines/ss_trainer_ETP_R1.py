@@ -180,7 +180,11 @@ class RLTrainer(BaseVLNCETrainer):
         self._e24_joint_frozen_manifest = None
 
     def _active_lookahead_config(self):
-        return getattr(getattr(self.config, "MODEL", None), "ACTIVE_LOOKAHEAD", None)
+        return getattr(
+            getattr(getattr(self, "config", None), "MODEL", None),
+            "ACTIVE_LOOKAHEAD",
+            None,
+        )
 
     def _active_lookahead_enabled(self):
         cfg = self._active_lookahead_config()
