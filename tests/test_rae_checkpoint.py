@@ -1001,21 +1001,18 @@ def test_strict_baseline_sft_capture_and_save_include_per_rank_rng(
     trainer.local_rank = 0
     trainer.world_size = 1
     trainer.device = 0
-    trainer.config = SimpleNamespace(
-        CHECKPOINT_FOLDER=str(tmp_path),
-        ONLY_LAST_SAVEALL=True,
-        IL=SimpleNamespace(
-            iters=2,
-            resumable_checkpoints=True,
-            strict_rng_resume=True,
-            keep_last_train_states=3,
-            keep_train_state_every_n_iters=5000,
-        ),
-        MODEL=SimpleNamespace(
-            RAENWM=SimpleNamespace(predict_cls_token=False),
-            ACTIVE_LOOKAHEAD=SimpleNamespace(enabled=False),
-        ),
+    trainer.config, _ = _config(tmp_path)
+    trainer.config.CHECKPOINT_FOLDER = str(tmp_path)
+    trainer.config.ONLY_LAST_SAVEALL = True
+    trainer.config.IL = SimpleNamespace(
+        iters=2,
+        resumable_checkpoints=True,
+        strict_rng_resume=True,
+        keep_last_train_states=3,
+        keep_train_state_every_n_iters=5000,
     )
+    trainer.config.MODEL.RAENWM = SimpleNamespace(predict_cls_token=False)
+    trainer.config.MODEL.ACTIVE_LOOKAHEAD = SimpleNamespace(enabled=False)
     trainer.envs = _FakeVectorEnvs([{"worker": 0}])
     trainer.policy = _FakePolicy()
     trainer.optimizer = _StateHolder()
