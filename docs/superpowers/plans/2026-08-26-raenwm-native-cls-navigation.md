@@ -17,10 +17,10 @@
 - 修改 `vlnce_baselines/nwm/predictor.py`
 - 新增/修改 `tests/test_nwm_prediction_runtime.py`
 
-- [ ] 只读核对训练机指定 RAE-NWM 提交、配置、CDiT 原生序列结构、EMA 键和 10 步 Euler 采样。
-- [ ] 添加 257-token 噪声、上下文、采样输出和严格 EMA 加载失败测试。
-- [ ] 迁移最小原生序列能力，严格拒绝 missing/unexpected keys 和 patch-only 回退。
-- [ ] 保持旧 patch-only predictor 测试通过。
+- [x] 只读核对训练机指定 RAE-NWM 提交、配置、CDiT 原生序列结构、EMA 键和 10 步 Euler 采样。
+- [x] 添加 257-token 噪声、上下文、采样输出和严格 EMA 加载失败测试。
+- [x] 迁移最小原生序列能力，严格拒绝 missing/unexpected keys 和 patch-only 回退。
+- [x] 保持旧 patch-only predictor 测试通过。
 
 ## Task 2：建立 CLS/patch 数据契约
 
@@ -32,11 +32,11 @@
 - 修改 `vlnce_baselines/nwm/predictor.py`
 - 修改 `tests/test_nwm_prediction_runtime.py`
 
-- [ ] 添加 `[CLS+patch]` 打包/拆包往返测试。
-- [ ] 添加 CLS spatial-stat 归一化/反归一化测试。
-- [ ] 扩展 `NwmPrediction` 为 tokens、normalized/raw CLS 和 patch 的明确输出。
-- [ ] 新模式缓存/snapshot/batch 使用 `[4,257,768]`，不足四帧保持无效。
-- [ ] 新模式不创建也不调用旧外置 heads。
+- [x] 添加 `[CLS+patch]` 打包/拆包往返测试。
+- [x] 添加 CLS spatial-stat 归一化/反归一化测试。
+- [x] 扩展 `NwmPrediction` 为 tokens、normalized/raw CLS 和 patch 的明确输出。
+- [x] 新模式缓存/snapshot/batch 使用 `[4,257,768]`，不足四帧保持无效。
+- [x] 新模式不创建也不调用旧外置 heads。
 
 ## Task 3：接通在线 DINO 三类输出和 RGB 注入
 

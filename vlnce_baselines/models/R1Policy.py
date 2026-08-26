@@ -297,9 +297,12 @@ class ETP(Net):
             obs_view12['rgb'] = rgb_batch
             depth_embedding = self.depth_encoder(obs_view12)  # torch.Size([bs, 128, 4, 4])
             pano_rae_latents = None
+            pano_rae_raw_cls = None
             if self.raenwm_enabled:
-                rgb_embedding, packed_rae_latents = (
-                    self.rgb_encoder.forward_with_patch_latents(obs_view12)
+                packed_raw_cls, rgb_embedding, packed_rae_latents = (
+                    self.rgb_encoder.forward_with_raw_cls_and_patch_latents(
+                        obs_view12
+                    )
                 )
                 packed_rae_latents = packed_rae_latents.reshape(
                     batch_size,
@@ -312,6 +315,16 @@ class ETP(Net):
                     (
                         packed_rae_latents[:, 0:1],
                         torch.flip(packed_rae_latents[:, 1:], [1]),
+                    ),
+                    dim=1,
+                ).contiguous()
+                packed_raw_cls = packed_raw_cls.reshape(
+                    batch_size, NUM_IMGS, 768
+                )
+                pano_rae_raw_cls = torch.cat(
+                    (
+                        packed_raw_cls[:, 0:1],
+                        torch.flip(packed_raw_cls[:, 1:], [1]),
                     ),
                     dim=1,
                 ).contiguous()
@@ -518,6 +531,7 @@ class ETP(Net):
             }
             if pano_rae_latents is not None:
                 outputs['pano_rae_latents'] = pano_rae_latents
+                outputs['pano_rae_raw_cls'] = pano_rae_raw_cls
             
             return outputs
 

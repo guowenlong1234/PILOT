@@ -202,6 +202,7 @@ _C.MODEL.RGB_ENCODER.cls_residual_mlp_zero_init = True
 _C.MODEL.RAENWM = CN()
 _C.MODEL.RAENWM.enabled = False
 _C.MODEL.RAENWM.emit_patch_latents = False
+_C.MODEL.RAENWM.predict_cls_token = False
 _C.MODEL.RAENWM.config_path = "configs/nwm/raenwm_mp3d.yaml"
 _C.MODEL.RAENWM.checkpoint_path = ""
 _C.MODEL.RAENWM.checkpoint_sha256 = (
@@ -229,6 +230,7 @@ _C.MODEL.RAENWM.rgb_fusion_enabled = False
 _C.MODEL.RAENWM.rgb_fusion_type = "residual_gate"
 _C.MODEL.RAENWM.rgb_fusion_alpha = 1.0
 _C.MODEL.RAENWM.rgb_fusion_zero_init = True
+_C.MODEL.RAENWM.rgb_fusion_gate_bias_init = -8.0
 _C.MODEL.RAENWM.rgb_fusion_trainable = False
 
 # Predicted Top-5 q1 lookahead with a jointly trained E24 residual scorer.

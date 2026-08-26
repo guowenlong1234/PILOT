@@ -21,17 +21,24 @@ class _Preview:
 
 
 def test_zero_initialized_adapter_is_identity():
-    adapter = RaeNwmRgbFusionAdapter(4, 6, zero_init=True)
+    adapter = RaeNwmRgbFusionAdapter(
+        4, 6, zero_init=True, gate_bias_init=0.0
+    )
     raw = torch.randn(2, 4)
     fused, diagnostics = adapter(
         raw, torch.randn(2, 4), torch.tensor([0.2, 0.8]), [1.0, 2.0]
     )
     torch.testing.assert_close(fused, raw, rtol=0, atol=0)
     assert diagnostics["gate"].shape == (2, 1)
+    torch.testing.assert_close(
+        diagnostics["gate"], torch.full((2, 1), 0.5)
+    )
 
 
 def test_adapter_uses_nonzero_residual_confidence_and_distance_inputs():
-    adapter = RaeNwmRgbFusionAdapter(4, 6, zero_init=True, alpha=0.5)
+    adapter = RaeNwmRgbFusionAdapter(
+        4, 6, zero_init=True, alpha=0.5, gate_bias_init=0.0
+    )
     with torch.no_grad():
         for parameter in adapter.parameters():
             parameter.zero_()
@@ -43,7 +50,7 @@ def test_adapter_uses_nonzero_residual_confidence_and_distance_inputs():
     fused, _ = adapter(
         raw,
         torch.ones(2, 4),
-        confidence=torch.tensor([0.0, 1.0]),
+        agreement=torch.tensor([0.0, 1.0]),
         distance=torch.tensor([0.0, 2.0]),
     )
     assert torch.all(fused[1] > fused[0])
@@ -73,6 +80,49 @@ def _prediction(records):
         confidence=torch.tensor([0.5 for _ in records]),
         meta={"records": records},
     )
+
+
+def _native_prediction(records, value):
+    return SimpleNamespace(
+        pred_cls=None,
+        pred_cls_raw=torch.as_tensor(value, dtype=torch.float32),
+        confidence=None,
+        meta={"records": records},
+    )
+
+
+class _AgreementFusion(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.agreements = []
+
+    def forward(self, raw, wm, agreement, distance):
+        self.agreements.append(agreement.detach().clone())
+        return raw, {}
+
+
+def test_native_prediction_uses_cosine_agreement_in_zero_to_one_range():
+    raw = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    wp_outputs = {"cand_rgb": [raw.clone()]}
+    previews = [[
+        _Preview("0_0", "new_ghost", "g0"),
+        _Preview("0_1", "existing_ghost", "g1"),
+    ]]
+    records = [
+        SimpleNamespace(env_index=0, ghost_vp="g0", distance_m=1.0),
+        SimpleNamespace(env_index=0, ghost_vp="g1", distance_m=2.0),
+    ]
+    fusion = _AgreementFusion()
+
+    apply_rgb_fusion_to_current_candidates(
+        wp_outputs,
+        previews,
+        _native_prediction(records, [[1.0, 0.0], [0.0, -1.0]]),
+        fusion,
+    )
+
+    torch.testing.assert_close(fusion.agreements[0], torch.tensor([1.0]))
+    torch.testing.assert_close(fusion.agreements[1], torch.tensor([0.0]))
 
 
 def test_candidate_fusion_changes_only_ghosts_and_reuses_ghost_prediction():

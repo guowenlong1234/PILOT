@@ -33,11 +33,19 @@ class _ResidualMlp(nn.Module):
 class RaeNwmRgbFusionAdapter(nn.Module):
     """Fuse predicted and observed RGB CLS features with a gated residual."""
 
-    def __init__(self, input_dim=768, hidden_dim=768, zero_init=True, alpha=1.0):
+    def __init__(
+        self,
+        input_dim=768,
+        hidden_dim=768,
+        zero_init=True,
+        alpha=1.0,
+        gate_bias_init=-8.0,
+    ):
         super().__init__()
         self.input_dim = int(input_dim)
         self.hidden_dim = int(hidden_dim)
         self.alpha = float(alpha)
+        self.gate_bias_init = float(gate_bias_init)
         if self.input_dim <= 0:
             raise ValueError("input_dim must be > 0")
         if self.hidden_dim <= 0:
@@ -53,9 +61,9 @@ class RaeNwmRgbFusionAdapter(nn.Module):
         )
         if zero_init:
             nn.init.zeros_(self.gate[-1].weight)
-            nn.init.constant_(self.gate[-1].bias, -8.0)
+            nn.init.constant_(self.gate[-1].bias, self.gate_bias_init)
 
-    def forward(self, raw_rgb, wm_rgb, confidence, distance):
+    def forward(self, raw_rgb, wm_rgb, agreement, distance):
         if not torch.is_tensor(raw_rgb) or not torch.is_tensor(wm_rgb):
             raise TypeError("raw_rgb and wm_rgb must be torch.Tensor values")
         if raw_rgb.ndim != 2 or wm_rgb.ndim != 2:
@@ -71,16 +79,16 @@ class RaeNwmRgbFusionAdapter(nn.Module):
                 f"{raw_rgb.shape[-1]} vs {self.input_dim}"
             )
 
-        confidence = _as_tensor_like(confidence, raw_rgb).reshape(-1, 1)
+        agreement = _as_tensor_like(agreement, raw_rgb).reshape(-1, 1)
         distance = _as_tensor_like(distance, raw_rgb).reshape(-1, 1)
-        if confidence.shape[0] != raw_rgb.shape[0]:
-            raise ValueError("confidence batch size must match raw_rgb")
+        if agreement.shape[0] != raw_rgb.shape[0]:
+            raise ValueError("agreement batch size must match raw_rgb")
         if distance.shape[0] != raw_rgb.shape[0]:
             raise ValueError("distance batch size must match raw_rgb")
 
         delta = wm_rgb - raw_rgb
         gate_input = torch.cat(
-            [raw_rgb, wm_rgb, delta, confidence, distance], dim=-1
+            [raw_rgb, wm_rgb, delta, agreement, distance], dim=-1
         )
         gate = torch.sigmoid(self.gate(gate_input)) * self.alpha
         fused = raw_rgb + gate * self.residual(delta)
@@ -109,9 +117,13 @@ def _row_count(value):
 
 
 def _prediction_lookup(prediction):
-    pred_cls = getattr(prediction, "pred_cls", None)
+    pred_cls_raw = getattr(prediction, "pred_cls_raw", None)
+    native_cls = pred_cls_raw is not None
+    pred_cls = pred_cls_raw if native_cls else getattr(prediction, "pred_cls", None)
     confidence = getattr(prediction, "confidence", None)
-    if prediction is None or pred_cls is None or confidence is None:
+    if prediction is None or pred_cls is None:
+        return {}
+    if not native_cls and confidence is None:
         return {}
 
     records = list((getattr(prediction, "meta", None) or {}).get("records", []))
@@ -120,7 +132,7 @@ def _prediction_lookup(prediction):
             "RAE-NWM prediction row count does not match records: "
             f"{_row_count(pred_cls)} vs {len(records)}"
         )
-    if len(records) != _row_count(confidence):
+    if not native_cls and len(records) != _row_count(confidence):
         raise ValueError(
             "RAE-NWM confidence row count does not match records: "
             f"{_row_count(confidence)} vs {len(records)}"
@@ -133,8 +145,9 @@ def _prediction_lookup(prediction):
             raise ValueError(f"Duplicate RAE-NWM prediction record for {key}")
         lookup[key] = (
             pred_cls[row_index],
-            confidence[row_index],
+            None if native_cls else confidence[row_index],
             float(getattr(record, "distance_m", 0.0)),
+            native_cls,
         )
     return lookup
 
@@ -171,12 +184,17 @@ def apply_rgb_fusion_to_current_candidates(
             key = (env_index, str(preview.target_vp))
             if key not in lookup:
                 continue
-            wm_rgb, confidence, distance_m = lookup[key]
+            wm_rgb, signal, distance_m, native_cls = lookup[key]
             raw_rgb = cand_rgb[cand_index : cand_index + 1]
-            fused_rgb, _ = fusion_adapter(
+            wm_rgb = _as_tensor_like(wm_rgb, raw_rgb).reshape_as(raw_rgb)
+            if native_cls:
+                signal = (
+                    F.cosine_similarity(raw_rgb, wm_rgb, dim=-1) + 1.0
+                ) * 0.5
+            fused_rgb, fusion_diagnostics = fusion_adapter(
                 raw_rgb,
-                _as_tensor_like(wm_rgb, raw_rgb).reshape_as(raw_rgb),
-                _as_tensor_like(confidence, raw_rgb).reshape(1),
+                wm_rgb,
+                _as_tensor_like(signal, raw_rgb).reshape(1),
                 _as_tensor_like([distance_m], raw_rgb),
             )
             fused_cand_rgb[cand_index] = fused_rgb[0]

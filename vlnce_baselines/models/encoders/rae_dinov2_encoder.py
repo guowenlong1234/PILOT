@@ -387,10 +387,21 @@ class RaeDinov2RgbEncoder(nn.Module):
         self,
         observations: Mapping[str, torch.Tensor],
     ):
+        _raw_cls, nav_cls, patch_latents = (
+            self.forward_with_raw_cls_and_patch_latents(observations)
+        )
+        return nav_cls, patch_latents
+
+    def forward_with_raw_cls_and_patch_latents(
+        self,
+        observations: Mapping[str, torch.Tensor],
+    ):
+        """Return frozen raw CLS/patch plus the trainable navigation CLS."""
+
         if not isinstance(observations, Mapping):
             raise TypeError("RAE/DINOv2 observations must be a mapping")
         if "rgb_features" in observations:
-            features = observations["rgb_features"]
+            raw_features = observations["rgb_features"]
             patch_latents = observations.get("rgb_patch_latents")
             if patch_latents is None:
                 raise ValueError(
@@ -398,7 +409,7 @@ class RaeDinov2RgbEncoder(nn.Module):
                     "when RAE-NWM is enabled"
                 )
         elif "rgb" in observations:
-            features, patch_latents = self._encode_rgb_with_patch_latents(
+            raw_features, patch_latents = self._encode_rgb_with_patch_latents(
                 observations["rgb"]
             )
         else:
@@ -413,10 +424,18 @@ class RaeDinov2RgbEncoder(nn.Module):
             )
         if not torch.isfinite(patch_latents).all():
             raise FloatingPointError("RAE/DINOv2 patch latents contain NaN or infinity")
-        output = self._apply_cls_residual_mlp(features)
-        if not torch.isfinite(output).all():
+        raw_features = raw_features.float()
+        if tuple(raw_features.shape[-1:]) != (self.output_size,):
+            raise ValueError(
+                "RAE/DINOv2 raw CLS last dimension must be "
+                f"{self.output_size}, got {raw_features.shape[-1]}"
+            )
+        if not torch.isfinite(raw_features).all():
+            raise FloatingPointError("RAE/DINOv2 raw CLS contains NaN or infinity")
+        nav_features = self._apply_cls_residual_mlp(raw_features)
+        if not torch.isfinite(nav_features).all():
             raise FloatingPointError("RAE/DINOv2 CLS contains NaN or infinity")
-        return output, patch_latents.float()
+        return raw_features, nav_features, patch_latents.float()
 
 
 # Keep the old import name available for external callers while using the

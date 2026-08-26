@@ -403,6 +403,13 @@ class RLTrainer(BaseVLNCETrainer):
                 alpha=float(
                     getattr(raenwm_config, "rgb_fusion_alpha", 1.0)
                 ),
+                gate_bias_init=float(
+                    getattr(
+                        raenwm_config,
+                        "rgb_fusion_gate_bias_init",
+                        -8.0,
+                    )
+                ),
             ).to(self.device)
         trainable = self._raenwm_rgb_fusion_trainable()
         self.raenwm_rgb_fusion_adapter.train(trainable)
@@ -528,6 +535,7 @@ class RLTrainer(BaseVLNCETrainer):
         cur_ori,
         candidate_previews,
         wp_outputs,
+        front_cls=None,
     ):
         runtime = self.raenwm_runtime
         self.last_raenwm_rgb_fusion_diagnostics = None
@@ -538,7 +546,19 @@ class RLTrainer(BaseVLNCETrainer):
                 "RAE-NWM is enabled but waypoint output has no pano_rae_latents"
             )
         yaws = [heading_from_quaternion(value) for value in cur_ori]
-        runtime.update_contexts(front_latents, cur_pos, yaws)
+        if bool(getattr(runtime, "predict_cls_token", False)):
+            if front_cls is None:
+                raise RuntimeError(
+                    "native CLS NWM requires pano_rae_raw_cls"
+                )
+            runtime.update_contexts(
+                front_latents,
+                cur_pos,
+                yaws,
+                raw_front_cls=front_cls,
+            )
+        else:
+            runtime.update_contexts(front_latents, cur_pos, yaws)
         prediction = runtime.predict(
             self._build_raenwm_preview_queries(
                 cur_pos, cur_ori, candidate_previews
@@ -569,6 +589,7 @@ class RLTrainer(BaseVLNCETrainer):
         cur_ori,
         cand_vp,
         cand_pos,
+        front_cls=None,
     ):
         runtime = self.raenwm_runtime
         if runtime is None:
@@ -578,7 +599,19 @@ class RLTrainer(BaseVLNCETrainer):
                 "RAE-NWM is enabled but waypoint output has no pano_rae_latents"
             )
         yaws = [heading_from_quaternion(orientation) for orientation in cur_ori]
-        runtime.update_contexts(front_latents, cur_pos, yaws)
+        if bool(getattr(runtime, "predict_cls_token", False)):
+            if front_cls is None:
+                raise RuntimeError(
+                    "native CLS NWM requires pano_rae_raw_cls"
+                )
+            runtime.update_contexts(
+                front_latents,
+                cur_pos,
+                yaws,
+                raw_front_cls=front_cls,
+            )
+        else:
+            runtime.update_contexts(front_latents, cur_pos, yaws)
 
         from vlnce_baselines.nwm.runtime import NwmQuery
 
@@ -2280,6 +2313,7 @@ class RLTrainer(BaseVLNCETrainer):
                 in_train = (mode == 'train' and self.config.IL.waypoint_aug), 
             )
             raenwm_front_latents = None
+            raenwm_front_cls = None
             if self.raenwm_runtime is not None:
                 pano_latents = wp_outputs.pop("pano_rae_latents", None)
                 if pano_latents is None:
@@ -2288,6 +2322,16 @@ class RLTrainer(BaseVLNCETrainer):
                         "pano_rae_latents"
                     )
                 raenwm_front_latents = pano_latents[:, 0].detach()
+                pano_raw_cls = wp_outputs.pop("pano_rae_raw_cls", None)
+                if bool(
+                    getattr(self.raenwm_runtime, "predict_cls_token", False)
+                ):
+                    if pano_raw_cls is None:
+                        raise RuntimeError(
+                            "native CLS NWM is enabled but waypoint output has "
+                            "no pano_rae_raw_cls"
+                        )
+                    raenwm_front_cls = pano_raw_cls[:, 0].detach()
 
             fusion_enabled = self._raenwm_rgb_fusion_enabled()
             if not fusion_enabled:
@@ -2375,6 +2419,7 @@ class RLTrainer(BaseVLNCETrainer):
                     cur_ori,
                     candidate_previews,
                     wp_outputs,
+                    front_cls=raenwm_front_cls,
                 )
                 vp_inputs = self._vp_feature_variable(wp_outputs)
                 vp_inputs.update({'mode': 'panorama'})
@@ -2396,6 +2441,7 @@ class RLTrainer(BaseVLNCETrainer):
                     cur_ori,
                     cand_vp,
                     cand_pos,
+                    front_cls=raenwm_front_cls,
                 )
             for i in range(self.envs.num_envs):
                 cur_embeds = avg_pano_embeds[i]

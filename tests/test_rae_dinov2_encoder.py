@@ -142,6 +142,31 @@ def test_encoder_returns_register_free_patch_map_without_changing_cls(
     assert not hasattr(encoder, "latent_var")
 
 
+def test_encoder_exposes_raw_cls_nav_cls_and_raw_patch_separately(
+    encoder_factory,
+):
+    encoder = encoder_factory(
+        cls_residual_mlp_enabled=True,
+        cls_residual_mlp_hidden_dim=768,
+        cls_residual_mlp_zero_init=True,
+    )
+    with torch.no_grad():
+        encoder.cls_residual_mlp.layers[-1].bias.fill_(0.25)
+    observations = {
+        "rgb": torch.zeros(2, 224, 224, 3, dtype=torch.uint8),
+    }
+
+    raw_cls, nav_cls, raw_patch = (
+        encoder.forward_with_raw_cls_and_patch_latents(observations)
+    )
+
+    torch.testing.assert_close(raw_cls, torch.full((2, 768), 2.0))
+    torch.testing.assert_close(nav_cls, torch.full((2, 768), 2.25))
+    assert raw_patch.shape == (2, 768, 16, 16)
+    assert raw_cls.requires_grad is False
+    assert nav_cls.requires_grad is True
+
+
 def test_prepare_rgb_matches_etpnav_layout_range_and_resize_rules():
     bhwc = torch.full((2, 112, 112, 4), 255, dtype=torch.uint8)
     prepared = prepare_rae_rgb_tensor(bhwc, torch.device("cpu"), size=224)
