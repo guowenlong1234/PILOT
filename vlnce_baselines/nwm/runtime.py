@@ -12,7 +12,11 @@ from vlnce_baselines.nwm.etp_adapter import (
     RaeGhostInputRequest,
     RaeLatentTargetRequest,
 )
-from vlnce_baselines.nwm.predictor import RaeNwmHeadPredictor
+from vlnce_baselines.nwm.predictor import RaeNwmHeadPredictor, RaeNwmPredictor
+from vlnce_baselines.nwm.raenwm_core.models import (
+    pack_cls_patch,
+    unpack_cls_patch,
+)
 from vlnce_baselines.nwm.types import NwmPrediction
 
 
@@ -82,6 +86,9 @@ class RaeNwmLatentNormalizer(nn.Module):
         self.register_buffer("var", var, persistent=False)
 
     def forward(self, latent: torch.Tensor) -> torch.Tensor:
+        return self.normalize_patch(latent)
+
+    def normalize_patch(self, latent: torch.Tensor) -> torch.Tensor:
         if not torch.is_tensor(latent) or latent.ndim != 4:
             shape = tuple(latent.shape) if torch.is_tensor(latent) else None
             raise ValueError(f"RAE patch latent must have shape [N,768,16,16], got {shape}")
@@ -99,6 +106,85 @@ class RaeNwmLatentNormalizer(nn.Module):
             raise FloatingPointError("normalized RAE patch latent contains NaN or infinity")
         return output
 
+    def _cls_stats(self, reference: torch.Tensor):
+        mean = self.mean.to(device=reference.device)
+        var = self.var.to(device=reference.device)
+        if mean.ndim == 4:
+            mean = mean.mean(dim=(2, 3))
+        if var.ndim == 4:
+            var = var.mean(dim=(2, 3))
+        return mean, var
+
+    @staticmethod
+    def _validate_cls(cls: torch.Tensor) -> torch.Tensor:
+        if not torch.is_tensor(cls) or cls.ndim != 2:
+            shape = tuple(cls.shape) if torch.is_tensor(cls) else None
+            raise ValueError(
+                f"RAE CLS latent must have shape [N,768], got {shape}"
+            )
+        if int(cls.shape[1]) != 768:
+            raise ValueError(
+                f"RAE CLS latent must have shape [N,768], got {tuple(cls.shape)}"
+            )
+        cls = cls.float()
+        if not torch.isfinite(cls).all():
+            raise FloatingPointError("RAE CLS latent contains NaN or infinity")
+        return cls
+
+    def normalize_cls(self, cls: torch.Tensor) -> torch.Tensor:
+        cls = self._validate_cls(cls)
+        mean, var = self._cls_stats(cls)
+        output = (cls - mean) / torch.sqrt(var + self.eps)
+        if not torch.isfinite(output).all():
+            raise FloatingPointError("normalized RAE CLS contains NaN or infinity")
+        return output
+
+    def denormalize_cls(self, cls: torch.Tensor) -> torch.Tensor:
+        cls = self._validate_cls(cls)
+        mean, var = self._cls_stats(cls)
+        output = cls * torch.sqrt(var + self.eps) + mean
+        if not torch.isfinite(output).all():
+            raise FloatingPointError("denormalized RAE CLS contains NaN or infinity")
+        return output
+
+
+def build_native_cls_prediction(
+    pred_tokens: torch.Tensor,
+    *,
+    normalizer: RaeNwmLatentNormalizer,
+    pred_rgb=None,
+    meta=None,
+) -> NwmPrediction:
+    """Expose native sequence output without mixing normalized and raw spaces."""
+
+    if not torch.is_tensor(pred_tokens) or pred_tokens.ndim != 3:
+        shape = tuple(pred_tokens.shape) if torch.is_tensor(pred_tokens) else None
+        raise ValueError(
+            f"native NWM output must have shape [N,257,768], got {shape}"
+        )
+    if tuple(pred_tokens.shape[1:]) != (257, 768):
+        raise ValueError(
+            "native NWM output must have shape [N,257,768], got "
+            f"{tuple(pred_tokens.shape)}"
+        )
+    if not torch.isfinite(pred_tokens).all():
+        raise FloatingPointError("native NWM output contains NaN or infinity")
+    pred_cls_normalized, pred_patch = unpack_cls_patch(
+        pred_tokens, latent_size=16
+    )
+    pred_cls_raw = normalizer.denormalize_cls(pred_cls_normalized)
+    return NwmPrediction(
+        pred_latent=pred_patch,
+        pred_tokens=pred_tokens,
+        pred_cls_normalized=pred_cls_normalized,
+        pred_cls_raw=pred_cls_raw,
+        pred_cls=pred_cls_raw,
+        pred_rgb=pred_rgb,
+        confidence=None,
+        conf_logit=None,
+        meta=dict(meta or {}),
+    )
+
 
 @dataclass(frozen=True)
 class NwmQuery:
@@ -115,6 +201,9 @@ class NwmPredictionRuntime:
     def __init__(self, config, device, head_state_dict_override=None):
         self.config = config
         self.device = torch.device(device)
+        self.predict_cls_token = bool(
+            getattr(config, "predict_cls_token", False)
+        )
         if int(config.context_size) != 4:
             raise ValueError("Stage-0 RAE-NWM requires context_size=4")
         if int(config.num_steps) != 10:
@@ -126,11 +215,22 @@ class NwmPredictionRuntime:
             config.checkpoint_sha256,
             "RAE-NWM checkpoint",
         )
-        head_checkpoint_path = validate_external_asset(
-            config.head_checkpoint_path,
-            config.head_checkpoint_sha256,
-            "RAE-NWM head checkpoint",
-        )
+        head_checkpoint_path = None
+        if self.predict_cls_token:
+            if head_state_dict_override is not None:
+                raise ValueError(
+                    "native CLS NWM must not receive an external head state"
+                )
+            if str(getattr(config, "head_checkpoint_path", "")).strip():
+                raise ValueError(
+                    "native CLS NWM must not configure head_checkpoint_path"
+                )
+        else:
+            head_checkpoint_path = validate_external_asset(
+                config.head_checkpoint_path,
+                config.head_checkpoint_sha256,
+                "RAE-NWM head checkpoint",
+            )
         stat_path = validate_external_asset(
             config.stat_path,
             config.stat_sha256,
@@ -161,7 +261,7 @@ class NwmPredictionRuntime:
             ]
         with torch.random.fork_rng(devices=fork_devices):
             torch.manual_seed(int(config.noise_seed))
-            self.predictor = RaeNwmHeadPredictor(
+            predictor_kwargs = dict(
                 config_path=config.config_path,
                 checkpoint_path=checkpoint_path,
                 device=self.device,
@@ -170,13 +270,38 @@ class NwmPredictionRuntime:
                 num_steps=int(config.num_steps),
                 final_only_euler=bool(config.final_only_euler),
                 use_external_context_latents=True,
-                head_checkpoint_path=head_checkpoint_path,
-                strict_heads=True,
-                heads_trainable=False,
-                token_head_trainable=False,
-                confidence_head_trainable=False,
-                head_state_dict_override=head_state_dict_override,
             )
+            if self.predict_cls_token:
+                self.predictor = RaeNwmPredictor(**predictor_kwargs)
+            else:
+                self.predictor = RaeNwmHeadPredictor(
+                    **predictor_kwargs,
+                    head_checkpoint_path=head_checkpoint_path,
+                    strict_heads=True,
+                    heads_trainable=False,
+                    token_head_trainable=False,
+                    confidence_head_trainable=False,
+                    head_state_dict_override=head_state_dict_override,
+                )
+        loaded_native_mode = bool(
+            self.predictor.config.get("predict_cls_token", False)
+        )
+        if loaded_native_mode != self.predict_cls_token:
+            raise ValueError(
+                "MODEL.RAENWM.predict_cls_token does not match NWM config: "
+                f"{self.predict_cls_token} vs {loaded_native_mode}"
+            )
+        if self.predict_cls_token:
+            expected = {
+                "context_size": 4,
+                "image_size": 224,
+                "latent_dim": 768,
+            }
+            for name, value in expected.items():
+                if int(self.predictor.config.get(name, -1)) != value:
+                    raise ValueError(
+                        f"native CLS NWM requires {name}={value}"
+                    )
         generator_device = self.device if self.device.type == "cuda" else torch.device("cpu")
         self.generator = torch.Generator(device=generator_device)
         self.generator.manual_seed(int(config.noise_seed))
@@ -191,12 +316,29 @@ class NwmPredictionRuntime:
     def pause_at(self, env_index: int) -> None:
         self.adapter.pause_at(env_index)
 
-    def update_contexts(self, raw_front_latents, positions, yaws) -> None:
+    def update_contexts(
+        self,
+        raw_front_latents,
+        positions,
+        yaws,
+        raw_front_cls=None,
+    ) -> None:
         if len(raw_front_latents) != len(positions) or len(positions) != len(yaws):
             raise ValueError("front latent, position, and yaw counts must match")
         if len(self.adapter.buffers) != len(positions):
             raise RuntimeError("RAE-NWM buffer count does not match active environments")
-        normalized = self.normalizer(raw_front_latents)
+        normalized_patch = self.normalizer.normalize_patch(raw_front_latents)
+        if self.predict_cls_token:
+            if raw_front_cls is None:
+                raise ValueError("native CLS NWM requires raw front CLS features")
+            if len(raw_front_cls) != len(positions):
+                raise ValueError("front CLS and position counts must match")
+            normalized_cls = self.normalizer.normalize_cls(raw_front_cls)
+            normalized = pack_cls_patch(normalized_cls, normalized_patch)
+        else:
+            if raw_front_cls is not None:
+                raise ValueError("patch-only NWM does not accept raw front CLS")
+            normalized = normalized_patch
         for env_index in range(len(positions)):
             self.adapter.update_context(
                 env_index=env_index,
@@ -232,11 +374,8 @@ class NwmPredictionRuntime:
         self.last_batch = self.adapter.build_raenwm_latent_batch(
             requests, device=self.device
         )
-        self.last_prediction = self.predictor.predict_time_with_heads_from_etp_batch(
-            self.last_batch,
-            return_rgb=False,
-            generator=self.generator,
-            initial_noise=initial_noise,
+        self.last_prediction = self._predict_batch(
+            self.last_batch, initial_noise=initial_noise
         )
         return self.last_prediction
 
@@ -257,10 +396,30 @@ class NwmPredictionRuntime:
             for query in queries
         ]
         self.last_batch = self.adapter.build_raenwm_batch(requests, device=self.device)
-        self.last_prediction = self.predictor.predict_time_with_heads_from_etp_batch(
-            self.last_batch,
+        self.last_prediction = self._predict_batch(
+            self.last_batch, initial_noise=initial_noise
+        )
+        return self.last_prediction
+
+    def _predict_batch(self, batch, *, initial_noise=None) -> NwmPrediction:
+        if self.predict_cls_token:
+            prediction = self.predictor.predict_time_from_etp_batch(
+                batch,
+                return_rgb=False,
+                generator=self.generator,
+                initial_noise=initial_noise,
+            )
+            if prediction.pred_latent is None:
+                return prediction
+            return build_native_cls_prediction(
+                prediction.pred_latent,
+                normalizer=self.normalizer,
+                pred_rgb=prediction.pred_rgb,
+                meta=prediction.meta,
+            )
+        return self.predictor.predict_time_with_heads_from_etp_batch(
+            batch,
             return_rgb=False,
             generator=self.generator,
             initial_noise=initial_noise,
         )
-        return self.last_prediction

@@ -66,8 +66,23 @@ def _rgb_to_rae_tensor(rgb: np.ndarray) -> torch.Tensor:
 def _as_context_latent(latent) -> torch.Tensor:
     if not torch.is_tensor(latent):
         raise TypeError(f"latent must be a torch.Tensor, got {type(latent).__name__}")
-    if latent.ndim != 3:
-        raise ValueError(f"latent must have shape [C, H, W], got {tuple(latent.shape)}")
+    if latent.ndim == 3:
+        if tuple(latent.shape) != (768, 16, 16):
+            raise ValueError(
+                "patch latent must have shape [768,16,16], got "
+                f"{tuple(latent.shape)}"
+            )
+    elif latent.ndim == 2:
+        if tuple(latent.shape) != (257, 768):
+            raise ValueError(
+                "native latent must have shape [257,768], got "
+                f"{tuple(latent.shape)}"
+            )
+    else:
+        raise ValueError(
+            "latent must have shape [768,16,16] or [257,768], got "
+            f"{tuple(latent.shape)}"
+        )
     return latent.detach().clone().to(dtype=torch.float32)
 
 
@@ -384,9 +399,9 @@ class NwmEtpAdapter:
             [frame.latent.detach().to(device="cpu", dtype=torch.float32) for frame in frames],
             dim=0,
         ).contiguous()
-        if context.ndim != 4 or int(context.shape[0]) != self.config.context_size:
+        if context.ndim not in (3, 4) or int(context.shape[0]) != self.config.context_size:
             raise ValueError(
-                "source latent context must have shape [T,C,H,W], "
+                "source latent context must have shape [T,C,H,W] or [T,L,C], "
                 f"got {tuple(context.shape)}"
             )
         if not bool(torch.isfinite(context).all()):
@@ -525,8 +540,10 @@ class NwmEtpAdapter:
         for request in requests:
             snapshot = request.snapshot
             context = snapshot.context_latents
-            if not torch.is_tensor(context) or context.ndim != 4:
-                raise ValueError("latent target context must have shape [T,C,H,W]")
+            if not torch.is_tensor(context) or context.ndim not in (3, 4):
+                raise ValueError(
+                    "latent target context must have shape [T,C,H,W] or [T,L,C]"
+                )
             if int(context.shape[0]) != self.config.context_size:
                 raise ValueError(
                     "latent target context length differs from NWM context size: "

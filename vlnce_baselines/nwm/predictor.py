@@ -506,6 +506,64 @@ class RaeNwmPredictor:
         meta.update(condition.as_dict())
         return NwmPrediction(pred_latent=pred_latent, pred_rgb=pred_rgb, meta=meta)
 
+    def predict_time_from_etp_batch(
+        self,
+        batch,
+        return_rgb=False,
+        generator=None,
+        initial_noise=None,
+    ) -> NwmPrediction:
+        """Predict directly from navigation-owned latent contexts."""
+
+        self._validate_return_rgb(return_rgb)
+        if batch.is_empty:
+            return NwmPrediction(
+                pred_latent=None,
+                pred_rgb=None,
+                meta={
+                    "records": [],
+                    "skipped": dict(batch.skipped),
+                    "empty": True,
+                },
+            )
+        context_latent = getattr(batch, "context_latent", None)
+        if context_latent is None:
+            raise ValueError(
+                "ETP native prediction requires navigation-provided context latents"
+            )
+        pred_rgb, pred_latent = self._predict_time_from_latents(
+            context_latent=context_latent.to(self.device),
+            curr_delta=batch.curr_delta.to(self.device),
+            rel_t=batch.rel_t.to(self.device),
+            return_rgb=return_rgb,
+            generator=generator,
+            initial_noise=initial_noise,
+        )
+        rel_t_values = [
+            float(np.float32(record.condition.rel_t)) for record in batch.records
+        ]
+        meta = build_prediction_meta(
+            checkpoint_path=self.checkpoint_path,
+            return_rgb=return_rgb,
+            enable_decoder=self.enable_decoder,
+            num_steps=int(self.config.get("transport", {}).get("num_steps", 50)),
+            rel_t=float(rel_t_values[0]),
+        )
+        meta.update(
+            {
+                "rel_t_values": rel_t_values,
+                "records": list(batch.records),
+                "skipped": dict(batch.skipped),
+                "empty": False,
+                "context_source": "nav_latent",
+            }
+        )
+        return NwmPrediction(
+            pred_latent=pred_latent,
+            pred_rgb=pred_rgb,
+            meta=meta,
+        )
+
 
 class RaeNwmHeadPredictor(RaeNwmPredictor):
     def __init__(

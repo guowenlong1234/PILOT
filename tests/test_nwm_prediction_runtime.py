@@ -20,11 +20,15 @@ from vlnce_baselines.nwm.predictor import (
 )
 from vlnce_baselines.nwm.raenwm_core.infer_compat import _sample_time_latent
 from vlnce_baselines.nwm.raenwm_core.models import (
+    CDiT,
     make_latent_noise,
     pack_cls_patch,
     unpack_cls_patch,
 )
-from vlnce_baselines.nwm.runtime import RaeNwmLatentNormalizer
+from vlnce_baselines.nwm.runtime import (
+    RaeNwmLatentNormalizer,
+    build_native_cls_prediction,
+)
 from vlnce_baselines.nwm.active_lookahead import dino_cwp_future
 
 
@@ -106,6 +110,90 @@ def test_native_cls_noise_has_sequence_shape_and_dtype():
     assert noise.dtype is torch.float64
 
 
+def test_cdit_accepts_native_cls_sequence_without_rotating_cls_token():
+    model = CDiT(
+        input_size=2,
+        context_size=2,
+        patch_size=1,
+        in_channels=4,
+        hidden_size=12,
+        depth=1,
+        num_heads=3,
+        head_width=12,
+        head_depth=1,
+        head_num_heads=3,
+        learn_sigma=False,
+    ).eval()
+    current = pack_cls_patch(
+        torch.randn(2, 4), torch.randn(2, 4, 2, 2)
+    )
+    context = torch.stack(
+        [
+            pack_cls_patch(torch.randn(2, 4), torch.randn(2, 4, 2, 2)),
+            pack_cls_patch(torch.randn(2, 4), torch.randn(2, 4, 2, 2)),
+        ],
+        dim=1,
+    )
+
+    with torch.no_grad():
+        output = model(
+            current,
+            torch.rand(2),
+            y=torch.randn(2, 3),
+            x_cond=context,
+            rel_t=torch.rand(2),
+        )
+
+    assert output.shape == (2, 5, 4)
+
+
+def test_cls_spatial_stats_normalize_and_denormalize(tmp_path):
+    stat_path = tmp_path / "stat.pt"
+    spatial_mean = torch.arange(256, dtype=torch.float32).reshape(1, 16, 16)
+    torch.save(
+        {
+            "mean": spatial_mean.expand(768, -1, -1).clone(),
+            "var": torch.full((768, 16, 16), 4.0),
+        },
+        stat_path,
+    )
+    normalizer = RaeNwmLatentNormalizer(stat_path)
+    cls_mean = spatial_mean.mean()
+    raw_cls = torch.full((2, 768), float(cls_mean + 4.0))
+
+    normalized = normalizer.normalize_cls(raw_cls)
+    restored = normalizer.denormalize_cls(normalized)
+
+    expected = torch.full_like(normalized, 4.0 / (4.0 + 1.0e-5) ** 0.5)
+    torch.testing.assert_close(normalized, expected)
+    torch.testing.assert_close(restored, raw_cls)
+
+
+def test_native_prediction_exposes_consistent_tokens_cls_and_patch(tmp_path):
+    stat_path = tmp_path / "stat.pt"
+    _write_stats(stat_path)
+    normalizer = RaeNwmLatentNormalizer(stat_path)
+    normalized_cls = torch.full((2, 768), 3.0)
+    patch = torch.randn(2, 768, 16, 16)
+    tokens = pack_cls_patch(normalized_cls, patch)
+
+    prediction = build_native_cls_prediction(
+        tokens,
+        normalizer=normalizer,
+        meta={"records": ["a", "b"]},
+    )
+
+    assert prediction.pred_tokens is tokens
+    assert torch.equal(prediction.pred_cls_normalized, normalized_cls)
+    assert torch.equal(prediction.pred_latent, patch)
+    assert prediction.pred_cls is prediction.pred_cls_raw
+    torch.testing.assert_close(
+        prediction.pred_cls_raw,
+        normalizer.denormalize_cls(normalized_cls),
+    )
+    assert prediction.meta["records"] == ["a", "b"]
+
+
 def test_context_adapter_skips_until_four_frames_and_tracks_query_ids():
     adapter = NwmEtpAdapter(RaeEtpAdapterConfig(context_size=4))
     adapter.reset(1)
@@ -180,6 +268,38 @@ def test_historical_context_snapshot_and_latent_target_batch_are_detached_cpu_co
     batch = adapter.build_raenwm_latent_batch([request], device="cpu")
     assert tuple(batch.context_latent.shape) == (1, 4, 768, 16, 16)
     assert batch.records[0].ghost_vp == "g0"
+
+
+def test_native_sequence_context_snapshot_and_target_batch_keep_257_tokens():
+    adapter = NwmEtpAdapter(RaeEtpAdapterConfig(context_size=4))
+    adapter.reset(1)
+    for step in range(4):
+        tokens = torch.full((257, 768), float(step), requires_grad=True)
+        adapter.update_context(
+            0,
+            rgb=None,
+            position=np.asarray([0.0, 0.0, -step], dtype=np.float32),
+            yaw=0.0,
+            latent=tokens,
+        )
+    snapshot = adapter.source_context_snapshot(
+        0, source_front_vp="front3", source_high_level_step=3
+    )
+
+    assert snapshot is not None
+    assert snapshot.context_latents.shape == (4, 257, 768)
+    assert snapshot.context_latents.device.type == "cpu"
+    assert not snapshot.context_latents.requires_grad
+
+    request = RaeLatentTargetRequest(
+        env_index=0,
+        ghost_vp="g0",
+        snapshot=snapshot,
+        target_position=np.asarray([1.0, 0.0, -3.0], dtype=np.float32),
+    )
+    batch = adapter.build_raenwm_latent_batch([request], device="cpu")
+
+    assert batch.context_latent.shape == (1, 4, 257, 768)
 
 
 def test_predicted_future_can_only_invoke_nwm_through_runtime():

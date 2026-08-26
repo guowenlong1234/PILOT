@@ -21,6 +21,9 @@ class NwmCondition:     #定义输入条件
 @dataclass
 class NwmPrediction:        #定义输出
     pred_latent: Any        #patch特征输出
+    pred_tokens: Optional[Any] = None
+    pred_cls_normalized: Optional[Any] = None
+    pred_cls_raw: Optional[Any] = None
     pred_rgb: Optional[Any] = None      #解码后的rgb输出
     pred_cls: Optional[Any] = None      #双头预测出的cls / ghost token
     confidence: Optional[Any] = None    #sigmoid后的置信度，范围是0到1
