@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from .dino_cwp_future import (
@@ -49,6 +50,9 @@ class E24JointDecisionPack:
     topk_base_indices: torch.Tensor
     topk_global_indices: torch.Tensor
     q1_conditions: torch.Tensor | None = None
+    full_base_logits: torch.Tensor | None = None
+    full_valid_mask: torch.Tensor | None = None
+    teacher_actions: torch.Tensor | None = None
     teacher_rank_in_topk: torch.Tensor | None = None
     teacher_valid: torch.Tensor | None = None
     teacher_stop: torch.Tensor | None = None
@@ -298,6 +302,9 @@ def build_e24_joint_step(
     if source != "dino_cwp_nwm":
         raise ValueError("E24 joint SFT only supports predicted q1 source dino_cwp_nwm")
     base_logits = nav_outs["global_logits"]
+    native_cls = bool(
+        getattr(trainer.raenwm_runtime, "predict_cls_token", False)
+    )
     global_delta = torch.zeros_like(base_logits)
     active_envs: list[int] = []
     ranked_by_env: list[tuple[int, ...]] = []
@@ -306,7 +313,7 @@ def build_e24_joint_step(
 
     for env_index, ids in enumerate(nav_inputs["gmap_vp_ids"]):
         row_logits = base_logits[env_index, : len(ids)]
-        if int(row_logits.detach().argmax()) == 0:
+        if not native_cls and int(row_logits.detach().argmax()) == 0:
             continue
         ranked = stable_topk_ghost_indices(ids, row_logits.detach(), k=topk)
         ghosts = executable_ghost_indices(ids)
@@ -355,6 +362,13 @@ def build_e24_joint_step(
     )
     topk_local = torch.full((batch, topk), -1, dtype=torch.long, device=trainer.device)
     topk_global = torch.full((batch, topk), -1, dtype=torch.long, device=trainer.device)
+    full_base_logits = None
+    full_valid_mask = None
+    if native_cls:
+        full_base_logits = base_logits.index_select(
+            0, torch.tensor(active_envs, dtype=torch.long, device=trainer.device)
+        ).detach()
+        full_valid_mask = torch.zeros_like(full_base_logits, dtype=torch.bool)
 
     for row, (env_index, ranked, ghosts, records) in enumerate(
         zip(active_envs, ranked_by_env, ghost_globals_by_env, records_by_env)
@@ -370,6 +384,8 @@ def build_e24_joint_step(
         topk_global[row, :count] = torch.tensor(
             ranked, dtype=torch.long, device=trainer.device
         )
+        if full_valid_mask is not None:
+            full_valid_mask[row, : len(nav_inputs["gmap_vp_ids"][env_index])] = True
         local_lookup = {global_index: local for local, global_index in enumerate(ghosts)}
         topk_local[row, :count] = torch.tensor(
             [local_lookup[index] for index in ranked],
@@ -398,7 +414,9 @@ def build_e24_joint_step(
         ghost_global_indices=ghost_globals,
         topk_base_indices=topk_local,
         topk_global_indices=topk_global,
-        q1_conditions=q1_conditions.detach(),
+        q1_conditions=q1_conditions.detach() if native_cls else None,
+        full_base_logits=full_base_logits,
+        full_valid_mask=full_valid_mask,
     )
 
     train_module_getter = getattr(trainer, "_e24_joint_train_module", None)
@@ -439,9 +457,14 @@ def attach_e24_joint_targets(
         (batch,), -1, dtype=torch.long, device=pack.env_indices.device
     )
     base_stop = torch.zeros(batch, dtype=torch.bool, device=pack.env_indices.device)
+    full_teacher = torch.full(
+        (batch,), -100, dtype=torch.long, device=pack.env_indices.device
+    )
     for row, env_index_tensor in enumerate(pack.env_indices):
         env_index = int(env_index_tensor)
         teacher = int(teacher_actions[env_index])
+        if teacher >= 0 and not bool(no_vp_left[env_index]):
+            full_teacher[row] = teacher
         no_vp[row] = bool(no_vp_left[env_index]) or teacher == -100
         if teacher == 0:
             teacher_stop[row] = True
@@ -467,6 +490,7 @@ def attach_e24_joint_targets(
         no_vp_left=no_vp,
         base_stop=base_stop,
         teacher_base_index=teacher_base,
+        teacher_actions=full_teacher,
     )
 
 
@@ -528,6 +552,36 @@ def collate_e24_joint_packs(
             raise ValueError("cannot mix native and legacy E24 replay packs")
         batch["q1_conditions"] = torch.cat(
             [pack.q1_conditions for pack in packs]
+        )
+    if any(pack.full_base_logits is not None for pack in packs):
+        if not all(
+            pack.full_base_logits is not None
+            and pack.full_valid_mask is not None
+            and pack.teacher_actions is not None
+            for pack in packs
+        ):
+            raise ValueError("native replay pack is missing full-logit fields")
+        max_full = max(int(pack.full_base_logits.shape[1]) for pack in packs)
+
+        def pad_full(value: torch.Tensor, fill_value):
+            if int(value.shape[1]) == max_full:
+                return value
+            padding = value.new_full(
+                (value.shape[0], max_full - value.shape[1]), fill_value
+            )
+            return torch.cat((value, padding), dim=1)
+
+        batch["full_base_logits"] = torch.cat(
+            [pad_full(pack.full_base_logits, -torch.inf) for pack in packs]
+        )
+        batch["full_valid_mask"] = torch.cat(
+            [pad_full(pack.full_valid_mask, False) for pack in packs]
+        )
+        batch["topk_global_indices"] = torch.cat(
+            [pack.topk_global_indices for pack in packs]
+        )
+        batch["teacher_actions"] = torch.cat(
+            [pack.teacher_actions for pack in packs]
         )
     return batch
 
@@ -614,6 +668,137 @@ def forward_e24_joint_batch(
     return result, deltas
 
 
+@dataclass(frozen=True)
+class NativeAdjustedLossResult:
+    loss_sum: torch.Tensor
+    row_count: int
+    adjusted_logits: torch.Tensor
+    deltas: torch.Tensor
+
+
+def forward_native_adjusted_batch(
+    train_module,
+    batch: Mapping[str, torch.Tensor],
+    *,
+    delta_scale: float = 1.0,
+) -> NativeAdjustedLossResult:
+    """Recompute native adapter+E24 and score complete navigation logits."""
+
+    required = (
+        "full_base_logits",
+        "full_valid_mask",
+        "topk_global_indices",
+        "teacher_actions",
+        "q1_conditions",
+    )
+    missing = [name for name in required if name not in batch]
+    if missing:
+        raise ValueError(f"native adjusted replay is missing fields: {missing}")
+    full_valid = batch["full_valid_mask"].to(torch.bool)
+    topk_valid = batch["topk_valid_mask"].to(torch.bool)
+    base = batch["full_base_logits"].detach().masked_fill(
+        ~full_valid, -torch.inf
+    )
+    indices = batch["topk_global_indices"].to(torch.long)
+    index_in_range = (indices >= 0) & (indices < base.shape[1])
+    candidate_mask = topk_valid & index_in_range
+    safe_indices = indices.clamp(min=0, max=max(0, base.shape[1] - 1))
+    base_log_probs = torch.log_softmax(base, dim=1)
+    owner = batch["owner_embeddings"].detach()
+    selected_log_probs = owner.new_zeros(
+        candidate_mask.shape
+    )
+    rows, slots = candidate_mask.nonzero(as_tuple=True)
+    if rows.numel():
+        selected_log_probs[rows, slots] = base_log_probs[
+            rows, safe_indices[rows, slots]
+        ].to(selected_log_probs.dtype)
+    deltas = train_module(
+        owner,
+        batch["text_tokens"].detach(),
+        batch["future_tokens"].detach(),
+        selected_log_probs,
+        candidate_mask,
+        batch["text_token_mask"],
+        batch["candidate_q0_geometry"].detach(),
+        batch["q1_conditions"].detach(),
+    )
+    module = getattr(train_module, "module", train_module)
+    delta_max = float(module.delta_max)
+    scale = float(delta_scale)
+    if not math.isfinite(scale) or scale < 0:
+        raise ValueError("native adjusted delta scale must be finite and non-negative")
+    applied = (deltas * scale).clamp(-delta_max, delta_max)
+    additions = torch.zeros_like(base).scatter_add(
+        1,
+        safe_indices,
+        applied.masked_fill(~candidate_mask, 0.0).to(base.dtype),
+    )
+    adjusted = base + additions
+    teachers = batch["teacher_actions"].to(torch.long)
+    teacher_in_range = (teachers >= 0) & (teachers < adjusted.shape[1])
+    safe_teachers = teachers.clamp(min=0, max=max(0, adjusted.shape[1] - 1))
+    teacher_is_valid = full_valid.gather(1, safe_teachers[:, None]).squeeze(1)
+    eligible = candidate_mask.any(dim=1) & teacher_in_range & teacher_is_valid
+    if bool(eligible.any()):
+        loss_sum = F.cross_entropy(
+            adjusted[eligible],
+            teachers[eligible],
+            reduction="sum",
+        )
+    else:
+        loss_sum = deltas.sum() * 0.0
+    return NativeAdjustedLossResult(
+        loss_sum=loss_sum,
+        row_count=int(eligible.sum().detach().cpu()),
+        adjusted_logits=adjusted,
+        deltas=deltas,
+    )
+
+
+def native_adjusted_row_count(batch: Mapping[str, torch.Tensor]) -> int:
+    required = (
+        "full_valid_mask",
+        "topk_global_indices",
+        "topk_valid_mask",
+        "teacher_actions",
+    )
+    missing = [name for name in required if name not in batch]
+    if missing:
+        raise ValueError(f"native adjusted replay is missing fields: {missing}")
+    full_valid = batch["full_valid_mask"].to(torch.bool)
+    indices = batch["topk_global_indices"].to(torch.long)
+    topk_valid = batch["topk_valid_mask"].to(torch.bool)
+    candidate_mask = topk_valid & (indices >= 0) & (indices < full_valid.shape[1])
+    teachers = batch["teacher_actions"].to(torch.long)
+    teacher_in_range = (teachers >= 0) & (teachers < full_valid.shape[1])
+    safe_teachers = teachers.clamp(min=0, max=max(0, full_valid.shape[1] - 1))
+    teacher_is_valid = full_valid.gather(1, safe_teachers[:, None]).squeeze(1)
+    return int(
+        (candidate_mask.any(dim=1) & teacher_in_range & teacher_is_valid)
+        .sum()
+        .detach()
+        .cpu()
+    )
+
+
+def normalized_native_adjusted_loss(
+    result: NativeAdjustedLossResult,
+    *,
+    global_row_count: float,
+    world_size: int,
+    loss_weight: float,
+) -> torch.Tensor:
+    if global_row_count <= 0:
+        return result.loss_sum * 0.0
+    return (
+        result.loss_sum
+        * float(world_size)
+        * float(loss_weight)
+        / float(global_row_count)
+    )
+
+
 def make_e24_joint_dummy_batch(
     *,
     topk: int,
@@ -641,6 +826,14 @@ def make_e24_joint_dummy_batch(
     }
     if native_cls:
         batch["q1_conditions"] = torch.zeros(1, topk, 4)
+        batch["full_base_logits"] = torch.zeros(1, 1)
+        batch["full_valid_mask"] = torch.ones(1, 1, dtype=torch.bool)
+        batch["topk_global_indices"] = torch.full(
+            (1, topk), -1, dtype=torch.long
+        )
+        batch["teacher_actions"] = torch.full(
+            (1,), -100, dtype=torch.long
+        )
     return batch
 
 

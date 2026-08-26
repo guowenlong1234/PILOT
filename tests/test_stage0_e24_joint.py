@@ -16,10 +16,12 @@ from vlnce_baselines.nwm.active_lookahead.joint_e24 import (
     build_e24_joint_step,
     e24_joint_denominators,
     forward_e24_joint_batch,
+    forward_native_adjusted_batch,
     joint_action_scale,
     load_e24_joint_head,
     make_e24_joint_dummy_batch,
     normalized_e24_joint_loss,
+    normalized_native_adjusted_loss,
     slice_e24_joint_batch,
 )
 from vlnce_baselines.nwm.active_lookahead.offline_objective import (
@@ -323,6 +325,117 @@ def test_native_dummy_replay_covers_adapter_and_e24_parameters():
             condition_hidden_dim=4,
         ),
     )
+
+
+class _FixedNativeModule(torch.nn.Module):
+    delta_max = 1.0
+
+    def __init__(self):
+        super().__init__()
+        self.delta = torch.nn.Parameter(torch.tensor([0.5, -0.25]))
+
+    def forward(self, owner, *_args):
+        return self.delta.expand(owner.shape[0], -1)
+
+
+def test_native_adjusted_ce_covers_stop_top5_outside_and_padding():
+    module = _FixedNativeModule()
+    full_base = torch.tensor(
+        [
+            [3.0, 2.0, 1.0, 0.0],
+            [0.0, 2.0, 1.0, 0.0],
+            [0.0, 2.0, 1.0, 3.0],
+            [0.0, 2.0, 1.0, -torch.inf],
+        ],
+        requires_grad=True,
+    )
+    batch = {
+        "owner_embeddings": torch.zeros(4, 2, 8),
+        "text_tokens": torch.zeros(4, 1, 8),
+        "text_token_mask": torch.ones(4, 1, dtype=torch.bool),
+        "future_tokens": torch.zeros(4, 2, 257, 8),
+        "topk_valid_mask": torch.ones(4, 2, dtype=torch.bool),
+        "candidate_q0_geometry": torch.zeros(4, 2, 3),
+        "q1_conditions": torch.zeros(4, 2, 4),
+        "full_base_logits": full_base,
+        "full_valid_mask": torch.tensor(
+            [
+                [True, True, True, True],
+                [True, True, True, True],
+                [True, True, True, True],
+                [True, True, True, False],
+            ]
+        ),
+        "topk_global_indices": torch.tensor([[1, 2]] * 4),
+        "teacher_actions": torch.tensor([0, 1, 3, -100]),
+    }
+
+    result = forward_native_adjusted_batch(module, batch)
+    expected = full_base.detach().clone()
+    expected[:, 1] += 0.5
+    expected[:, 2] -= 0.25
+    expected[3, 3] = -torch.inf
+
+    assert result.row_count == 3
+    torch.testing.assert_close(result.adjusted_logits, expected)
+    torch.testing.assert_close(
+        result.loss_sum,
+        torch.nn.functional.cross_entropy(
+            expected[:3], torch.tensor([0, 1, 3]), reduction="sum"
+        ),
+    )
+    normalized = normalized_native_adjusted_loss(
+        result,
+        global_row_count=3,
+        world_size=1,
+        loss_weight=1.0,
+    )
+    normalized.backward()
+    assert module.delta.grad is not None
+    assert torch.count_nonzero(module.delta.grad) > 0
+    assert full_base.grad is None
+
+
+def test_native_adjusted_loss_only_updates_adapter_and_e24():
+    module = E24JointTrainModule(
+        _head(),
+        cls_adapter=Top5NativeClsAdapter(
+            feature_dim=8,
+            condition_hidden_dim=4,
+        ),
+    )
+    owner = torch.randn(2, 2, 8, requires_grad=True)
+    text = torch.randn(2, 3, 8, requires_grad=True)
+    future = torch.randn(2, 2, 257, 8, requires_grad=True)
+    geometry = torch.randn(2, 2, 3, requires_grad=True)
+    full_base = torch.randn(2, 4, requires_grad=True)
+    batch = {
+        "owner_embeddings": owner,
+        "text_tokens": text,
+        "text_token_mask": torch.ones(2, 3, dtype=torch.bool),
+        "future_tokens": future,
+        "topk_valid_mask": torch.ones(2, 2, dtype=torch.bool),
+        "candidate_q0_geometry": geometry,
+        "q1_conditions": torch.randn(2, 2, 4, requires_grad=True),
+        "full_base_logits": full_base,
+        "full_valid_mask": torch.ones(2, 4, dtype=torch.bool),
+        "topk_global_indices": torch.tensor([[1, 2], [1, 2]]),
+        "teacher_actions": torch.tensor([1, 3]),
+    }
+
+    result = forward_native_adjusted_batch(module, batch)
+    normalized_native_adjusted_loss(
+        result,
+        global_row_count=2,
+        world_size=1,
+        loss_weight=1.0,
+    ).backward()
+
+    assert any(parameter.grad is not None for parameter in module.head.parameters())
+    assert module.cls_adapter.fusion[-1].weight.grad is not None
+    assert torch.count_nonzero(module.cls_adapter.fusion[-1].weight.grad) > 0
+    for value in (owner, text, future, geometry, full_base, batch["q1_conditions"]):
+        assert value.grad is None
     dummy = make_e24_joint_dummy_batch(
         topk=3,
         feature_dim=8,

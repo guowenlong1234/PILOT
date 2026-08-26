@@ -66,10 +66,13 @@ from vlnce_baselines.nwm.active_lookahead.joint_e24 import (
     e24_joint_denominators,
     e24_joint_diagnostic_totals,
     forward_e24_joint_batch,
+    forward_native_adjusted_batch,
     joint_action_scale,
     load_e24_joint_head,
     make_e24_joint_dummy_batch,
+    native_adjusted_row_count,
     normalized_e24_joint_loss,
+    normalized_native_adjusted_loss,
     slice_e24_joint_batch,
 )
 from vlnce_baselines.nwm.active_lookahead.offline_objective import (
@@ -1688,6 +1691,10 @@ class RLTrainer(BaseVLNCETrainer):
         active_cfg = self._active_lookahead_config()
         batch = collate_e24_joint_packs(self._e24_joint_replay_packs)
         self._e24_joint_replay_packs = []
+        if bool(
+            getattr(self.config.MODEL.RAENWM, "predict_cls_token", False)
+        ):
+            return self._backward_native_adjusted_replay(batch, active_cfg)
         loss_config = self._e24_joint_loss_config()
         local_denominators = (
             {name: 0.0 for name in ("signed", "decision_weight", "regularization", "absent_noop")}
@@ -1855,6 +1862,102 @@ class RLTrainer(BaseVLNCETrainer):
             / max(1.0, global_metrics["delta_count"])
         )
         self.logs["E24_replay_seconds"].append(time.perf_counter() - replay_started)
+
+    def _backward_native_adjusted_replay(self, batch, active_cfg):
+        local_rows = 0 if batch is None else native_adjusted_row_count(batch)
+        row_count = torch.tensor(
+            float(local_rows), dtype=torch.float64, device=self.device
+        )
+        if self.world_size > 1:
+            distr.all_reduce(row_count, op=distr.ReduceOp.SUM)
+        global_rows = float(row_count.item())
+        micro_batch = int(active_cfg.e24_replay_micro_batch_size)
+        local_batch_rows = (
+            0 if batch is None else int(batch["owner_embeddings"].shape[0])
+        )
+        local_rounds = (
+            int(math.ceil(local_batch_rows / micro_batch))
+            if local_batch_rows
+            else 0
+        )
+        rounds = torch.tensor(local_rounds, dtype=torch.long, device=self.device)
+        if self.world_size > 1:
+            distr.all_reduce(rounds, op=distr.ReduceOp.MAX)
+        replay_rounds = int(rounds.item())
+        if replay_rounds == 0:
+            self.logs["E24_loss"].append(0.0)
+            self.logs["E24_adjusted_loss"].append(0.0)
+            self.logs["E24_valid_decisions"].append(0.0)
+            self.logs["E24_replay_seconds"].append(0.0)
+            return
+
+        started = time.perf_counter()
+        dummy = make_e24_joint_dummy_batch(
+            topk=int(active_cfg.offline_topk), native_cls=True
+        )
+        train_module = self._e24_joint_train_module()
+        head_dtype = next(train_module.parameters()).dtype
+        local_loss = 0.0
+        local_delta_abs = 0.0
+        local_delta_count = 0.0
+        for replay_index in range(replay_rounds):
+            start = replay_index * micro_batch
+            real_micro = batch is not None and start < local_batch_rows
+            micro = (
+                slice_e24_joint_batch(
+                    batch,
+                    start,
+                    min(start + micro_batch, local_batch_rows),
+                )
+                if real_micro
+                else dummy
+            )
+            micro = e24_joint_batch_to_device(
+                micro, self.device, dtype=head_dtype
+            )
+            sync_context = (
+                train_module.no_sync()
+                if isinstance(train_module, DDP)
+                and replay_index + 1 < replay_rounds
+                else nullcontext()
+            )
+            with sync_context:
+                with torch.autocast(device_type=self.device.type, enabled=False):
+                    result = forward_native_adjusted_batch(
+                        train_module,
+                        micro,
+                        delta_scale=float(active_cfg.e24_train_delta_scale),
+                    )
+                    replay_loss = normalized_native_adjusted_loss(
+                        result,
+                        global_row_count=global_rows,
+                        world_size=self.world_size,
+                        loss_weight=float(active_cfg.e24_loss_weight),
+                    )
+                self.scaler.scale(replay_loss).backward()
+            local_loss += float(replay_loss.detach().cpu())
+            if real_micro:
+                valid = micro["topk_valid_mask"].to(torch.bool)
+                valid_delta = result.deltas.detach()[valid].float()
+                local_delta_abs += float(valid_delta.abs().sum().cpu())
+                local_delta_count += float(valid_delta.numel())
+
+        metrics = torch.tensor(
+            [local_loss, local_delta_abs, local_delta_count],
+            dtype=torch.float64,
+            device=self.device,
+        )
+        if self.world_size > 1:
+            distr.all_reduce(metrics, op=distr.ReduceOp.SUM)
+        loss_value, delta_abs, delta_count = metrics.tolist()
+        mean_loss = loss_value / float(self.world_size)
+        self.logs["E24_loss"].append(mean_loss)
+        self.logs["E24_adjusted_loss"].append(mean_loss)
+        self.logs["E24_valid_decisions"].append(global_rows)
+        self.logs["E24_delta_abs_mean"].append(
+            delta_abs / max(1.0, delta_count)
+        )
+        self.logs["E24_replay_seconds"].append(time.perf_counter() - started)
 
     @staticmethod
     def _joint_parameter_grad_norm(parameters):
