@@ -151,6 +151,7 @@ evaluate_checkpoint() {
             export MPLCONFIGDIR=/tmp/matplotlib-etpr1-eval-watch
             export GLOG_minloglevel=2 MAGNUM_LOG=quiet HABITAT_SIM_LOG=quiet
             export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8
+            scripts/etpr1_rae_runtime_exec.sh python -c "import sys, torch, transformers, habitat, habitat_sim; print(\"versions=python:%s torch:%s cuda:%s transformers:%s habitat:%s habitat_sim:%s\" % (sys.version.split()[0], torch.__version__, torch.version.cuda, transformers.__version__, getattr(habitat, \"__version__\", \"unknown\"), getattr(habitat_sim, \"__version__\", \"unknown\")))"
             scripts/etpr1_rae_runtime_exec.sh python run.py \
                 --exp_name "$EXP_NAME" \
                 --run-type eval \
