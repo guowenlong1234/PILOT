@@ -331,9 +331,13 @@ def _add_latent_stats(diagnostics: dict[str, float], prefix: str, latent: torch.
     diagnostics[f"{prefix}_latent_norm_sum"] += float(flattened.norm(dim=1).sum().cpu())
 
 
-def _validated_prediction_rows(prediction: Any, expected: int) -> dict[int, tuple[torch.Tensor, torch.Tensor]]:
+def _validated_prediction_rows(
+    prediction: Any,
+    expected: int,
+) -> dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]]:
     latent = getattr(prediction, "pred_latent", None)
     pred_cls = getattr(prediction, "pred_cls", None)
+    pred_tokens = getattr(prediction, "pred_tokens", None)
     if not torch.is_tensor(latent) or not torch.is_tensor(pred_cls):
         return {}
     if tuple(latent.shape) != (expected, 768, 16, 16):
@@ -346,10 +350,28 @@ def _validated_prediction_rows(prediction: Any, expected: int) -> dict[int, tupl
             "NWM predicted CLS shape violates active-lookahead contract: "
             f"{tuple(pred_cls.shape)} vs {(expected, 768)}"
         )
+    if pred_tokens is not None and (
+        not torch.is_tensor(pred_tokens)
+        or tuple(pred_tokens.shape) != (expected, 257, 768)
+    ):
+        shape = tuple(pred_tokens.shape) if torch.is_tensor(pred_tokens) else None
+        raise ValueError(
+            "NWM predicted token shape violates active-lookahead contract: "
+            f"{shape} vs {(expected, 257, 768)}"
+        )
     rows = {}
     for row in range(expected):
-        if bool(torch.isfinite(latent[row]).all()) and bool(torch.isfinite(pred_cls[row]).all()):
-            rows[row] = (latent[row], pred_cls[row])
+        token_row = None if pred_tokens is None else pred_tokens[row]
+        finite = (
+            bool(torch.isfinite(latent[row]).all())
+            and bool(torch.isfinite(pred_cls[row]).all())
+            and (
+                token_row is None
+                or bool(torch.isfinite(token_row).all())
+            )
+        )
+        if finite:
+            rows[row] = (latent[row], pred_cls[row], token_row)
     return rows
 
 
@@ -359,7 +381,7 @@ def _predict_nwm_rows(
     *,
     stage: str,
     diagnostics: dict[str, float],
-) -> dict[int, tuple[torch.Tensor, torch.Tensor]]:
+) -> dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]]:
     if not requests:
         return {}
     started = time.perf_counter()
@@ -396,7 +418,7 @@ def build_dino_cwp_nwm_future_tokens(
     topk: int,
     feature_dim: int,
     reference: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float]]:
     """Build q1 future tokens without querying a q1 simulator observation."""
 
     diagnostics: dict[str, float] = {
@@ -406,6 +428,7 @@ def build_dino_cwp_nwm_future_tokens(
     valid = torch.zeros(
         (len(active_envs), int(topk)), dtype=torch.bool, device=reference.device
     )
+    q1_conditions = reference.new_zeros((len(active_envs), int(topk), 4))
     prepared = []
     q0_requests = []
     for row, (env_index, records) in enumerate(zip(active_envs, records_by_env)):
@@ -434,7 +457,7 @@ def build_dino_cwp_nwm_future_tokens(
     )
     diagnostics["q0_nwm_success"] = float(len(q0_rows))
     if not q0_rows:
-        return future, valid, diagnostics
+        return future, q1_conditions, valid, diagnostics
 
     ordered_q0 = sorted(q0_rows)
     patches = torch.stack(
@@ -510,6 +533,15 @@ def build_dino_cwp_nwm_future_tokens(
             target_position=q0_position,
         )
         cumulative_horizon = q0_record.horizon + prediction.distance_m / spacing
+        q1_record = adapter.build_target_record(
+            env_index=int(env_index),
+            ghost_vp=str(record.ghost_vp),
+            source_position=snapshot.source_position,
+            source_yaw=snapshot.source_yaw,
+            target_position=q1_position,
+            target_yaw=q1_yaw,
+            horizon_override=cumulative_horizon,
+        )
         q1_requests.append(
             RaeLatentTargetRequest(
                 env_index=int(env_index),
@@ -520,7 +552,18 @@ def build_dino_cwp_nwm_future_tokens(
                 horizon_override=cumulative_horizon,
             )
         )
-        q1_destinations.append((row, slot))
+        q1_destinations.append(
+            (
+                row,
+                slot,
+                (
+                    q1_record.condition.dx,
+                    q1_record.condition.dy,
+                    q1_record.condition.dtheta,
+                    q1_record.condition.rel_t,
+                ),
+            )
+        )
         diagnostics["cwp_top1"] += 1.0
 
     diagnostics["q1_requested"] = float(len(q1_requests))
@@ -529,13 +572,21 @@ def build_dino_cwp_nwm_future_tokens(
     )
     diagnostics["q1_nwm_success"] = float(len(q1_rows))
     if not q1_rows:
-        return future, valid, diagnostics
+        return future, q1_conditions, valid, diagnostics
 
     encoded_rows = []
     encoded_destinations = []
-    for request_index, (pred_latent, pred_cls) in sorted(q1_rows.items()):
+    for request_index, (pred_latent, pred_cls, pred_tokens) in sorted(q1_rows.items()):
         patch_tokens = latent_to_patch_tokens(pred_latent.unsqueeze(0))[0]
-        encoded_rows.append(torch.cat((pred_cls.reshape(1, 768), patch_tokens), dim=0))
+        if pred_tokens is None:
+            encoded = torch.cat((pred_cls.reshape(1, 768), patch_tokens), dim=0)
+        else:
+            if not torch.equal(pred_tokens[1:], patch_tokens):
+                raise ValueError(
+                    "native NWM token patch and pred_latent patch differ"
+                )
+            encoded = torch.cat((pred_cls.reshape(1, 768), pred_tokens[1:]), dim=0)
+        encoded_rows.append(encoded)
         encoded_destinations.append(q1_destinations[request_index])
     encoded = quantize_like_offline_cache(torch.stack(encoded_rows, dim=0)).to(
         device=reference.device, dtype=reference.dtype
@@ -545,8 +596,9 @@ def build_dino_cwp_nwm_future_tokens(
             "predicted q1 tokens violate E24 contract: "
             f"{tuple(encoded.shape[1:])} vs {(257, feature_dim)}"
         )
-    for encoded_row, (row, slot) in enumerate(encoded_destinations):
+    for encoded_row, (row, slot, condition) in enumerate(encoded_destinations):
         future[row, slot] = encoded[encoded_row]
+        q1_conditions[row, slot] = reference.new_tensor(condition)
         valid[row, slot] = True
     diagnostics["future_valid"] = float(len(encoded_destinations))
-    return future, valid, diagnostics
+    return future, q1_conditions, valid, diagnostics

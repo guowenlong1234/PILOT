@@ -76,6 +76,9 @@ from vlnce_baselines.nwm.active_lookahead.offline_objective import (
     OfflineDecisionLossConfig,
 )
 from vlnce_baselines.nwm.active_lookahead.offline_checkpoint import sha256_file
+from vlnce_baselines.nwm.active_lookahead.native_cls_adapter import (
+    Top5NativeClsAdapter,
+)
 from vlnce_baselines.nwm.active_lookahead.online_e24 import (
     stop_isolated_e24_actions,
 )
@@ -223,9 +226,13 @@ class RLTrainer(BaseVLNCETrainer):
         predictor = None if runtime is None else runtime.predictor
         bundle = None if predictor is None else predictor.bundle
         return {
-            "rae_dino_encoder": getattr(policy_net.rgb_encoder, "rae", None),
+            "rae_dino_encoder": getattr(
+                policy_net.rgb_encoder, "backbone", None
+            ),
             "nwm_body": None if bundle is None else bundle.model,
-            "nwm_heads": None if predictor is None else predictor.heads,
+            "nwm_heads": (
+                None if predictor is None else getattr(predictor, "heads", None)
+            ),
             "dino_cwp": self.dino_cwp_future_predictor,
             "waypoint_predictor": self.waypoint_predictor,
         }
@@ -315,6 +322,26 @@ class RLTrainer(BaseVLNCETrainer):
         joint_state = None if checkpoint is None else checkpoint.get(
             "e24_joint_state_dict"
         )
+        native_cls = bool(
+            getattr(self.config.MODEL.RAENWM, "predict_cls_token", False)
+        )
+
+        def build_wrapper(head):
+            cls_adapter = None
+            if native_cls:
+                cls_adapter = Top5NativeClsAdapter(
+                    feature_dim=768,
+                    condition_hidden_dim=int(
+                        getattr(cfg, "top5_cls_condition_hidden_dim", 128)
+                    ),
+                    zero_init=bool(
+                        getattr(cfg, "top5_cls_zero_init", True)
+                    ),
+                )
+            return E24JointTrainModule(head, cls_adapter=cls_adapter).to(
+                self.device
+            )
+
         if joint_state is not None:
             self._validate_e24_joint_provenance(checkpoint)
             metadata = checkpoint.get("e24_joint_metadata")
@@ -325,7 +352,7 @@ class RLTrainer(BaseVLNCETrainer):
             head = InterleavedCrossModalTopKFutureLogitResidualHead(
                 **metadata["model_kwargs"]
             ).to(self.device)
-            wrapper = E24JointTrainModule(head).to(self.device)
+            wrapper = build_wrapper(head)
             wrapper.load_state_dict(joint_state, strict=True)
             self.e24_joint_metadata = dict(metadata)
         else:
@@ -338,7 +365,7 @@ class RLTrainer(BaseVLNCETrainer):
                 ),
                 topk=int(cfg.offline_topk),
             )
-            wrapper = E24JointTrainModule(head).to(self.device)
+            wrapper = build_wrapper(head)
             self.e24_joint_metadata = metadata
         self._e24_joint_training = torch.is_grad_enabled()
         if self._e24_joint_training:
@@ -1698,7 +1725,12 @@ class RLTrainer(BaseVLNCETrainer):
             return
 
         replay_started = time.perf_counter()
-        dummy = make_e24_joint_dummy_batch(topk=int(active_cfg.offline_topk))
+        dummy = make_e24_joint_dummy_batch(
+            topk=int(active_cfg.offline_topk),
+            native_cls=bool(
+                getattr(self.config.MODEL.RAENWM, "predict_cls_token", False)
+            ),
+        )
         train_module = self._e24_joint_train_module()
         head_dtype = next(train_module.parameters()).dtype
         metric_totals = defaultdict(float)

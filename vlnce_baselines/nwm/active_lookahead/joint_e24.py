@@ -25,6 +25,7 @@ from .online_e24 import (
     E24_FACTORY,
     quantize_like_offline_cache,
 )
+from .native_cls_adapter import Top5NativeClsAdapter
 from .persistent_q0 import persistent_q0_to_dict
 from .residual_head import InterleavedCrossModalTopKFutureLogitResidualHead
 from .topk_query import executable_ghost_indices, stable_topk_ghost_indices
@@ -47,6 +48,7 @@ class E24JointDecisionPack:
     ghost_global_indices: torch.Tensor
     topk_base_indices: torch.Tensor
     topk_global_indices: torch.Tensor
+    q1_conditions: torch.Tensor | None = None
     teacher_rank_in_topk: torch.Tensor | None = None
     teacher_valid: torch.Tensor | None = None
     teacher_stop: torch.Tensor | None = None
@@ -78,9 +80,14 @@ class E24JointDecisionPack:
 class E24JointTrainModule(nn.Module):
     """Standard-forward wrapper so the custom E24 scorer can use DDP."""
 
-    def __init__(self, head: nn.Module) -> None:
+    def __init__(
+        self,
+        head: nn.Module,
+        cls_adapter: Top5NativeClsAdapter | None = None,
+    ) -> None:
         super().__init__()
         self.head = head
+        self.cls_adapter = cls_adapter
 
     @property
     def delta_max(self) -> float:
@@ -95,7 +102,15 @@ class E24JointTrainModule(nn.Module):
         candidate_mask: torch.Tensor,
         text_token_mask: torch.Tensor,
         candidate_geometry: torch.Tensor,
+        q1_conditions: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.cls_adapter is not None:
+            if q1_conditions is None:
+                raise ValueError("native CLS E24 forward requires q1 conditions")
+            future_tokens, _diagnostics = self.cls_adapter.adapt_tokens(
+                future_tokens,
+                q1_conditions,
+            )
         delta = self.head.forward_topk_from_log_probs(
             owner_embeddings,
             text_tokens,
@@ -110,7 +125,7 @@ class E24JointTrainModule(nn.Module):
         # graph so gradients accumulated under no_sync() are all reduced on
         # the final round instead of being classified as unused.
         parameter_zero = delta.new_zeros(())
-        for parameter in self.head.parameters():
+        for parameter in self.parameters():
             parameter_zero = parameter_zero + parameter.reshape(-1)[0] * 0.0
         return delta + parameter_zero
 
@@ -235,16 +250,30 @@ def _forward_head(head, pack: E24JointDecisionPack) -> torch.Tensor:
         selected_log_probs[rows, slots] = base_log_probs[rows, selected].to(
             dtype=head_dtype
         )
-    output = head.forward_topk_from_log_probs(
-        owner_embeddings,
-        pack.text_tokens.to(dtype=head_dtype),
-        pack.future_tokens.to(dtype=head_dtype),
-        selected_log_probs,
-        valid,
-        text_token_mask=pack.text_token_mask,
-        candidate_geometry=pack.candidate_geometry.to(dtype=head_dtype),
-    )
-    return output.delta.masked_fill(~valid, 0.0)
+    if hasattr(head, "forward_topk_from_log_probs"):
+        output = head.forward_topk_from_log_probs(
+            owner_embeddings,
+            pack.text_tokens.to(dtype=head_dtype),
+            pack.future_tokens.to(dtype=head_dtype),
+            selected_log_probs,
+            valid,
+            text_token_mask=pack.text_token_mask,
+            candidate_geometry=pack.candidate_geometry.to(dtype=head_dtype),
+        ).delta
+    else:
+        output = head(
+            owner_embeddings,
+            pack.text_tokens.to(dtype=head_dtype),
+            pack.future_tokens.to(dtype=head_dtype),
+            selected_log_probs,
+            valid,
+            pack.text_token_mask,
+            pack.candidate_geometry.to(dtype=head_dtype),
+            None
+            if pack.q1_conditions is None
+            else pack.q1_conditions.to(dtype=head_dtype),
+        )
+    return output.masked_fill(~valid, 0.0)
 
 
 def build_e24_joint_step(
@@ -304,13 +333,15 @@ def build_e24_joint_step(
     feature_dim = int(txt_embeds.shape[-1])
     future = base_logits.new_zeros((batch, topk, 257, feature_dim))
     future_valid = torch.zeros((batch, topk), dtype=torch.bool, device=trainer.device)
-    future, future_valid, source_diagnostics = build_dino_cwp_nwm_future_tokens(
+    future, q1_conditions, future_valid, source_diagnostics = (
+        build_dino_cwp_nwm_future_tokens(
         trainer,
         active_envs=active_envs,
         records_by_env=records_by_env,
         topk=topk,
         feature_dim=feature_dim,
         reference=base_logits,
+        )
     )
 
     owner = base_logits.new_zeros((batch, topk, feature_dim))
@@ -367,15 +398,20 @@ def build_e24_joint_step(
         ghost_global_indices=ghost_globals,
         topk_base_indices=topk_local,
         topk_global_indices=topk_global,
+        q1_conditions=q1_conditions.detach(),
     )
 
-    was_training = head.training
-    head.eval()
+    train_module_getter = getattr(trainer, "_e24_joint_train_module", None)
+    rollout_module = train_module_getter() if train_module_getter else None
+    if rollout_module is None:
+        rollout_module = head
+    was_training = rollout_module.training
+    rollout_module.eval()
     with torch.inference_mode(), torch.autocast(
         device_type=trainer.device.type, enabled=False
     ):
-        deltas = _forward_head(head, pack)
-    head.train(was_training)
+        deltas = _forward_head(rollout_module, pack)
+    rollout_module.train(was_training)
     scale = float(getattr(cfg, "e24_train_delta_scale", 1.0))
     if not math.isfinite(scale) or scale < 0:
         raise ValueError("E24 joint train delta scale must be finite and non-negative")
@@ -457,7 +493,7 @@ def collate_e24_joint_packs(
         shape = (value.shape[0], max_text - value.shape[1], *value.shape[2:])
         return torch.cat((value, value.new_full(shape, fill_value)), dim=1)
 
-    return {
+    batch = {
         "owner_embeddings": torch.cat([pack.owner_embeddings for pack in packs]),
         "text_tokens": torch.cat([pad_text(pack.text_tokens, 0.0) for pack in packs]),
         "text_token_mask": torch.cat(
@@ -487,6 +523,13 @@ def collate_e24_joint_packs(
             [pack.teacher_base_index for pack in packs]
         ),
     }
+    if any(pack.q1_conditions is not None for pack in packs):
+        if not all(pack.q1_conditions is not None for pack in packs):
+            raise ValueError("cannot mix native and legacy E24 replay packs")
+        batch["q1_conditions"] = torch.cat(
+            [pack.q1_conditions for pack in packs]
+        )
+    return batch
 
 
 def slice_e24_joint_batch(
@@ -539,6 +582,7 @@ def forward_e24_joint_batch(
             candidate_mask,
             batch["text_token_mask"],
             batch["candidate_q0_geometry"],
+            batch.get("q1_conditions"),
         )
     else:
         # Still call the DDP wrapper so ranks without eligible decisions join
@@ -551,6 +595,7 @@ def forward_e24_joint_batch(
             candidate_mask,
             batch["text_token_mask"],
             batch["candidate_q0_geometry"],
+            batch.get("q1_conditions"),
         )
     result = offline_decision_aware_loss(
         deltas,
@@ -574,8 +619,9 @@ def make_e24_joint_dummy_batch(
     topk: int,
     feature_dim: int = 768,
     token_count: int = 257,
+    native_cls: bool = False,
 ) -> dict[str, torch.Tensor]:
-    return {
+    batch = {
         "owner_embeddings": torch.zeros(1, topk, feature_dim),
         "text_tokens": torch.zeros(1, 1, feature_dim),
         "text_token_mask": torch.ones(1, 1, dtype=torch.bool),
@@ -593,6 +639,9 @@ def make_e24_joint_dummy_batch(
         "base_stop": torch.zeros(1, dtype=torch.bool),
         "teacher_base_index": torch.full((1,), -1, dtype=torch.long),
     }
+    if native_cls:
+        batch["q1_conditions"] = torch.zeros(1, topk, 4)
+    return batch
 
 
 def e24_joint_denominators(

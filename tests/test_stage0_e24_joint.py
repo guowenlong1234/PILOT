@@ -25,6 +25,10 @@ from vlnce_baselines.nwm.active_lookahead.joint_e24 import (
 from vlnce_baselines.nwm.active_lookahead.offline_objective import (
     OfflineDecisionLossConfig,
 )
+from vlnce_baselines.nwm.active_lookahead.native_cls_adapter import (
+    Top5NativeClsAdapter,
+    expand_native_cls_condition,
+)
 from vlnce_baselines.nwm.active_lookahead.online_e24 import (
     stop_isolated_e24_actions,
 )
@@ -88,6 +92,49 @@ def _batch():
     }
 
 
+def test_native_cls_condition_uses_normalized_xy_and_trigonometric_yaw():
+    condition = torch.tensor([[0.25, -0.5, torch.pi / 2.0, 0.125]])
+
+    expanded = expand_native_cls_condition(condition)
+
+    torch.testing.assert_close(
+        expanded,
+        torch.tensor([[0.25, -0.5, 1.0, 0.0, 0.125]]),
+        atol=1.0e-6,
+        rtol=0.0,
+    )
+
+
+def test_native_cls_adapter_starts_identity_and_only_changes_token_zero():
+    adapter = Top5NativeClsAdapter(feature_dim=8, condition_hidden_dim=4)
+    tokens = torch.randn(2, 3, 5, 8)
+    condition = torch.randn(2, 3, 4)
+
+    initial, diagnostics = adapter.adapt_tokens(tokens, condition)
+
+    assert torch.equal(initial, tokens)
+    assert diagnostics["cls_delta_norm"].shape == (2, 3)
+
+    with torch.no_grad():
+        adapter.fusion[-1].bias.fill_(0.5)
+    changed, _ = adapter.adapt_tokens(tokens, condition)
+
+    torch.testing.assert_close(changed[..., 0, :], tokens[..., 0, :] + 0.5)
+    assert torch.equal(changed[..., 1:, :], tokens[..., 1:, :])
+
+
+def test_native_cls_adapter_has_nonzero_gradient_after_identity_start():
+    adapter = Top5NativeClsAdapter(feature_dim=8, condition_hidden_dim=4)
+    cls = torch.randn(4, 8)
+    condition = torch.randn(4, 4)
+
+    output, _ = adapter(cls, condition)
+    output.square().mean().backward()
+
+    assert adapter.fusion[-1].weight.grad is not None
+    assert torch.count_nonzero(adapter.fusion[-1].weight.grad) > 0
+
+
 def test_joint_action_warmup_uses_checkpoint_iteration_boundaries():
     assert joint_action_scale(13800, 13800, 400) == 0.0
     assert joint_action_scale(14000, 13800, 400) == 0.5
@@ -148,6 +195,7 @@ def test_predicted_future_source_never_calls_oracle_environment(monkeypatch):
         "build_dino_cwp_nwm_future_tokens",
         lambda _trainer, **kwargs: (
             torch.ones(1, 5, 4, 8),
+            torch.zeros(1, 5, 4),
             torch.tensor([[True, False, False, False, False]]),
             {"topk_slots": 1.0, "future_valid": 1.0},
         ),
@@ -264,6 +312,34 @@ def test_dummy_replay_is_parameter_zero_but_backward_safe():
     assert all(
         parameter.grad is not None and torch.count_nonzero(parameter.grad) == 0
         for parameter in head.parameters()
+    )
+
+
+def test_native_dummy_replay_covers_adapter_and_e24_parameters():
+    module = E24JointTrainModule(
+        _head(),
+        cls_adapter=Top5NativeClsAdapter(
+            feature_dim=8,
+            condition_hidden_dim=4,
+        ),
+    )
+    dummy = make_e24_joint_dummy_batch(
+        topk=3,
+        feature_dim=8,
+        token_count=257,
+        native_cls=True,
+    )
+
+    result, _ = forward_e24_joint_batch(
+        module,
+        dummy,
+        loss_config=_loss_config(),
+    )
+    result.loss.backward()
+
+    assert all(
+        parameter.grad is not None and torch.count_nonzero(parameter.grad) == 0
+        for parameter in module.parameters()
     )
 
 

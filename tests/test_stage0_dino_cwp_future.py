@@ -20,8 +20,9 @@ from vlnce_baselines.nwm.etp_adapter import (
 )
 
 
-def _snapshot(marker, front, step):
-    context = torch.full((4, 768, 16, 16), float(marker))
+def _snapshot(marker, front, step, *, native=False):
+    shape = (4, 257, 768) if native else (4, 768, 16, 16)
+    context = torch.full(shape, float(marker))
     return RaeSourceContextSnapshot(
         source_front_vp=front,
         source_high_level_step=step,
@@ -49,23 +50,42 @@ class _Graph:
 
 
 class _FakeNwm:
-    def __init__(self):
+    def __init__(self, *, native=False):
         self.context_markers = []
+        self.native = native
 
     def predict_time_with_heads_from_etp_batch(self, batch, return_rgb=False):
         del return_rgb
-        markers = batch.context_latent[:, 0, 0, 0, 0].detach().cpu().tolist()
+        markers = (
+            batch.context_latent[:, 0]
+            .reshape(batch.context_latent.shape[0], -1)[:, 0]
+            .detach()
+            .cpu()
+            .tolist()
+        )
         self.context_markers.append(markers)
         values = torch.as_tensor(markers, device=batch.context_latent.device).float()
         latent = values[:, None, None, None].expand(-1, 768, 16, 16).clone()
         cls = (values + 100.0)[:, None].expand(-1, 768).clone()
-        return SimpleNamespace(pred_latent=latent, pred_cls=cls)
+        pred_tokens = None
+        if self.native:
+            patch_tokens = latent.permute(0, 2, 3, 1).reshape(-1, 256, 768)
+            normalized_cls = (values + 999.0)[:, None].expand(-1, 768)
+            pred_tokens = torch.cat(
+                (normalized_cls[:, None], patch_tokens), dim=1
+            )
+        return SimpleNamespace(
+            pred_latent=latent,
+            pred_cls=cls,
+            pred_tokens=pred_tokens,
+        )
 
 
 class _FakeRuntime:
-    def __init__(self, adapter):
+    def __init__(self, adapter, *, native=False):
         self.adapter = adapter
-        self.predictor = _FakeNwm()
+        self.predictor = _FakeNwm(native=native)
+        self.predict_cls_token = native
         self.requests = []
 
     def predict_latent_targets(self, requests):
@@ -88,10 +108,10 @@ class _FakeCwp:
         return {"heatmap_logits": heatmap, "none_logit": none}
 
 
-def _trainer(snapshots, *, none_rows=()):
+def _trainer(snapshots, *, none_rows=(), native=False):
     adapter = NwmEtpAdapter(RaeEtpAdapterConfig())
     adapter.reset(1)
-    runtime = _FakeRuntime(adapter)
+    runtime = _FakeRuntime(adapter, native=native)
     return SimpleNamespace(
         device=torch.device("cpu"),
         raenwm_runtime=runtime,
@@ -112,7 +132,7 @@ def test_predicted_future_batches_distinct_historical_contexts_and_reuses_them_f
         _record("g1", "front4", 4, 1.0),
     ]]
 
-    future, valid, diagnostics = build_dino_cwp_nwm_future_tokens(
+    future, q1_conditions, valid, diagnostics = build_dino_cwp_nwm_future_tokens(
         trainer,
         active_envs=[0],
         records_by_env=records,
@@ -123,6 +143,7 @@ def test_predicted_future_batches_distinct_historical_contexts_and_reuses_them_f
 
     assert valid.tolist() == [[True, True]]
     assert tuple(future.shape) == (1, 2, 257, 768)
+    assert tuple(q1_conditions.shape) == (1, 2, 4)
     assert trainer.raenwm_runtime.predictor.context_markers == [
         [1.0, 4.0], [1.0, 4.0]
     ]
@@ -147,7 +168,7 @@ def test_missing_context_and_cwp_none_invalidate_only_their_slots():
         _record("g1", "missing", 1, 1.0),
     ]]
 
-    future, valid, diagnostics = build_dino_cwp_nwm_future_tokens(
+    future, q1_conditions, valid, diagnostics = build_dino_cwp_nwm_future_tokens(
         trainer,
         active_envs=[0],
         records_by_env=records,
@@ -158,10 +179,36 @@ def test_missing_context_and_cwp_none_invalidate_only_their_slots():
 
     assert valid.tolist() == [[False, False]]
     assert torch.count_nonzero(future) == 0
+    assert torch.count_nonzero(q1_conditions) == 0
     assert diagnostics["q0_record_present"] == 2.0
     assert diagnostics["q0_context_present"] == 1.0
     assert diagnostics["cwp_none"] == 1.0
     assert diagnostics["q1_requested"] == 0.0
+
+
+def test_native_q1_uses_raw_cls_and_preserves_native_patch_tokens():
+    snapshots = {
+        ("front0", 0): _snapshot(3.0, "front0", 0, native=True),
+    }
+    trainer = _trainer(snapshots, native=True)
+
+    future, q1_conditions, valid, diagnostics = (
+        build_dino_cwp_nwm_future_tokens(
+            trainer,
+            active_envs=[0],
+            records_by_env=[[_record("g0", "front0", 0, 0.0)]],
+            topk=1,
+            feature_dim=768,
+            reference=torch.zeros(1),
+        )
+    )
+
+    assert valid.tolist() == [[True]]
+    assert future[0, 0, 0, 0].item() == pytest.approx(103.0)
+    assert future[0, 0, 1, 0].item() == pytest.approx(3.0)
+    assert q1_conditions.shape == (1, 1, 4)
+    assert torch.isfinite(q1_conditions).all()
+    assert diagnostics["future_valid"] == 1.0
 
 
 def test_cwp_top1_decode_and_geometry_match_fixed_contract():
