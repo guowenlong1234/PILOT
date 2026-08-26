@@ -54,6 +54,10 @@ def test_native_cls_smoke_and_single_episode_wrappers_are_isolated():
         "ETPR1_E24_JOINT_ITERS=2",
         "ETPR1_E24_JOINT_SYNC_ENABLED=False",
         "ETPR1_E24_JOINT_SMOKE_FREEZE_CHECK=True",
+        "smoke-single)",
+        "ETPR1_E24_JOINT_NPROC_PER_NODE=1",
+        "ETPR1_E24_JOINT_NUM_ENVIRONMENTS=1",
+        "ETPR1_E24_JOINT_BATCH_SIZE=1",
     ):
         assert contract in smoke
 
@@ -81,6 +85,9 @@ def test_native_cls_parity_tool_pins_complete_sequence_comparison():
         '"patch_tokens"',
         '"max_abs"',
         '"cosine"',
+        '"passed"',
+        'default=0.1',
+        'default=0.9999',
     ):
         assert contract in tool
 

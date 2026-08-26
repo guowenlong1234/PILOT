@@ -168,7 +168,14 @@ def sample(
     }, sort_keys=True))
 
 
-def compare(reference_path: Path, candidate_path: Path, report_path: Path) -> None:
+def compare(
+    reference_path: Path,
+    candidate_path: Path,
+    report_path: Path,
+    *,
+    max_abs_tolerance: float,
+    min_cosine: float,
+) -> None:
     reference = _load(reference_path)
     candidate = _load(candidate_path)
     report = {
@@ -196,9 +203,21 @@ def compare(reference_path: Path, candidate_path: Path, report_path: Path) -> No
             "cosine": float(cosine),
             "finite": bool(torch.isfinite(actual).all()),
         }
+    report["tolerance"] = {
+        "max_abs": float(max_abs_tolerance),
+        "min_cosine": float(min_cosine),
+    }
+    report["passed"] = all(
+        metric["finite"]
+        and metric["max_abs"] <= float(max_abs_tolerance)
+        and metric["cosine"] >= float(min_cosine)
+        for metric in report["metrics"].values()
+    )
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(json.dumps(report, sort_keys=True))
+    if not report["passed"]:
+        raise SystemExit(1)
 
 
 def main() -> None:
@@ -218,6 +237,8 @@ def main() -> None:
     comparison.add_argument("--reference", type=Path, required=True)
     comparison.add_argument("--candidate", type=Path, required=True)
     comparison.add_argument("--report", type=Path, required=True)
+    comparison.add_argument("--max-abs-tolerance", type=float, default=0.1)
+    comparison.add_argument("--min-cosine", type=float, default=0.9999)
     args = parser.parse_args()
     if args.command == "prepare":
         prepare_input(args.output, args.seed)
@@ -231,7 +252,13 @@ def main() -> None:
             device=args.device,
         )
     else:
-        compare(args.reference, args.candidate, args.report)
+        compare(
+            args.reference,
+            args.candidate,
+            args.report,
+            max_abs_tolerance=args.max_abs_tolerance,
+            min_cosine=args.min_cosine,
+        )
 
 
 if __name__ == "__main__":

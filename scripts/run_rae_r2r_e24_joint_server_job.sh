@@ -16,6 +16,10 @@ TRAIN_ITERS=${ETPR1_E24_JOINT_ITERS:-10000}
 LOG_EVERY=${ETPR1_E24_JOINT_LOG_EVERY:-200}
 TASK_SEED=${ETPR1_E24_JOINT_TASK_SEED:-}
 SMOKE_FREEZE_CHECK=${ETPR1_E24_JOINT_SMOKE_FREEZE_CHECK:-False}
+NPROC_PER_NODE=${ETPR1_E24_JOINT_NPROC_PER_NODE:-2}
+NUM_ENVIRONMENTS=${ETPR1_E24_JOINT_NUM_ENVIRONMENTS:-4}
+BATCH_SIZE=${ETPR1_E24_JOINT_BATCH_SIZE:-4}
+CUDA_DEVICES=${ETPR1_E24_JOINT_CUDA_VISIBLE_DEVICES:-0,1}
 RUNTIME_ROOT=${ETPR1_SERVER_RUNTIME_ROOT:-${REPO_ROOT}/.runtime/server_sft}
 PYTHON_BIN=${ETPR1_SERVER_PYTHON:-/home/gwl/miniconda3/envs/etpnav_unified/bin/python}
 TORCHRUN_BIN=${ETPR1_SERVER_TORCHRUN:-/home/gwl/miniconda3/envs/etpnav_unified/bin/torchrun}
@@ -49,6 +53,17 @@ for integer_setting in "$TRAIN_ITERS" "$LOG_EVERY"; do
         exit 2
     }
 done
+for integer_setting in "$NPROC_PER_NODE" "$NUM_ENVIRONMENTS" "$BATCH_SIZE"; do
+    [[ "$integer_setting" =~ ^[1-9][0-9]*$ ]] || {
+        echo "Distributed and batch settings must be positive integers: $integer_setting" >&2
+        exit 2
+    }
+done
+case "$NPROC_PER_NODE" in
+    1) CONFIG_GPU_IDS='[0]' ;;
+    2) CONFIG_GPU_IDS='[0,1]' ;;
+    *) echo "Native E24 workflow supports one or two ranks, got $NPROC_PER_NODE" >&2; exit 2 ;;
+esac
 if [ -n "$TASK_SEED" ] && ! [[ "$TASK_SEED" =~ ^[0-9]+$ ]]; then
     echo "TASK_CONFIG.SEED must be a non-negative integer: $TASK_SEED" >&2
     exit 2
@@ -100,7 +115,7 @@ export HABITAT_SIM_LOG=${HABITAT_SIM_LOG:-quiet}
 export PYTHONPATH="${REPO_ROOT}/scripts/benchmark_shims:${REPO_ROOT}:${REPO_ROOT}/vendor/legacy_clip:${HABITAT_LAB_ROOT}:${RUNTIME_PYTHON}"
 export LD_PRELOAD=/lib/x86_64-linux-gnu/libGLdispatch.so.0
 export ETPR1_BENCH_HABITAT_BASELINES_ROOT="$HABITAT_BASELINES_ROOT"
-export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES="$CUDA_DEVICES"
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,garbage_collection_threshold:0.8}
 
 resume_args=(IL.load_from_ckpt True IL.is_requeue False IL.ckpt_to_load "$START_CKPT")
@@ -121,6 +136,9 @@ fi
     echo "checkpoint_sync_enabled=$CHECKPOINT_SYNC_ENABLED"
     echo "train_iters=$TRAIN_ITERS"
     echo "log_every=$LOG_EVERY"
+    echo "nproc_per_node=$NPROC_PER_NODE"
+    echo "num_environments=$NUM_ENVIRONMENTS"
+    echo "batch_size=$BATCH_SIZE"
     echo "task_seed=${TASK_SEED:-config_default}"
     "$PYTHON_BIN" -c 'import sys, torch, transformers, habitat, habitat_sim; habitat_version=getattr(habitat, "__version__", "unknown"); habitat_sim_version=getattr(habitat_sim, "__version__", "unknown"); print(f"versions=python:{sys.version.split()[0]} torch:{torch.__version__} cuda:{torch.version.cuda} transformers:{transformers.__version__} habitat:{habitat_version} habitat_sim:{habitat_sim_version}")'
     nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu --format=csv,noheader
@@ -132,7 +150,7 @@ if [ -n "$TASK_SEED" ]; then
     seed_args=(TASK_CONFIG.SEED "$TASK_SEED")
 fi
 "$TORCHRUN_BIN" \
-    --nproc_per_node=2 \
+    --nproc_per_node="$NPROC_PER_NODE" \
     --master_port="${ETPR1_E24_JOINT_MASTER_PORT:-24724}" \
     run.py \
     --exp_name "$EXP_NAME" \
@@ -140,6 +158,11 @@ fi
     --exp-config "$CONFIG_FILE" \
     IL.iters "$TRAIN_ITERS" \
     IL.log_every "$LOG_EVERY" \
+    SIMULATOR_GPU_IDS "$CONFIG_GPU_IDS" \
+    TORCH_GPU_IDS "$CONFIG_GPU_IDS" \
+    GPU_NUMBERS "$NPROC_PER_NODE" \
+    NUM_ENVIRONMENTS "$NUM_ENVIRONMENTS" \
+    IL.batch_size "$BATCH_SIZE" \
     IL.checkpoint_sync_enabled "$CHECKPOINT_SYNC_ENABLED" \
     IL.checkpoint_sync_destination "$CHECKPOINT_SYNC_DESTINATION" \
     "${seed_args[@]}" \
