@@ -107,7 +107,7 @@ def test_native_cls_condition_uses_normalized_xy_and_trigonometric_yaw():
 
 def test_native_cls_adapter_starts_identity_and_only_changes_token_zero():
     adapter = Top5NativeClsAdapter(feature_dim=8, condition_hidden_dim=4)
-    tokens = torch.randn(2, 3, 5, 8)
+    tokens = torch.randn(2, 3, 257, 8)
     condition = torch.randn(2, 3, 4)
 
     initial, diagnostics = adapter.adapt_tokens(tokens, condition)
