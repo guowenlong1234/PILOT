@@ -47,10 +47,12 @@ RUNTIME_ROOT=${ETPR1_SERVER_RUNTIME_ROOT:-${REPO_ROOT}/.runtime/server_sft}
 PYTHON_BIN=${ETPR1_SERVER_PYTHON:-/home/gwl/miniconda3/envs/etpnav_unified/bin/python}
 TORCHRUN_BIN=${ETPR1_SERVER_TORCHRUN:-/home/gwl/miniconda3/envs/etpnav_unified/bin/torchrun}
 HABITAT_LAB_ROOT=${RUNTIME_ROOT}/habitat-lab
+HABITAT_BASELINES_ROOT=${RUNTIME_ROOT}/habitat-baselines/habitat_baselines
 RUNTIME_PYTHON=${RUNTIME_ROOT}/python
 
 cd "$REPO_ROOT"
 for path in "$PYTHON_BIN" "$TORCHRUN_BIN" "$SOURCE_CHECKPOINT" \
+    "$HABITAT_BASELINES_ROOT/common/baseline_registry.py" \
     "$JOINT_CONFIG" "$GRPO_CONFIG" "$CWP_PATH"; do
     [ -e "$path" ] || { echo "Missing active GRPO resource: $path" >&2; exit 1; }
 done
@@ -67,6 +69,7 @@ export GLOG_minloglevel=${GLOG_minloglevel:-2}
 export MAGNUM_LOG=${MAGNUM_LOG:-quiet}
 export HABITAT_SIM_LOG=${HABITAT_SIM_LOG:-quiet}
 export PYTHONPATH="${REPO_ROOT}/scripts/benchmark_shims:${REPO_ROOT}:${REPO_ROOT}/vendor/legacy_clip:${HABITAT_LAB_ROOT}:${RUNTIME_PYTHON}"
+export ETPR1_BENCH_HABITAT_BASELINES_ROOT="$HABITAT_BASELINES_ROOT"
 export LD_PRELOAD=/lib/x86_64-linux-gnu/libGLdispatch.so.0
 export CUDA_VISIBLE_DEVICES=0,1
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,garbage_collection_threshold:0.8}
