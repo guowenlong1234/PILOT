@@ -194,6 +194,7 @@ class InterleavedCrossModalTopKFutureLogitResidualHead(nn.Module):
         text_token_mask: Optional[torch.Tensor] = None,
         future_token_mask: Optional[torch.Tensor] = None,
         candidate_geometry: Optional[torch.Tensor] = None,
+        detach_future_tokens: bool = True,
     ) -> FutureHeadOutput:
         if owner_embeddings.ndim != 3 or future_tokens.ndim != 4:
             raise ValueError("E17 owner/future inputs must have shape [B,K,D]/[B,K,T,D]")
@@ -254,7 +255,10 @@ class InterleavedCrossModalTopKFutureLogitResidualHead(nn.Module):
                 if text_token_mask.ndim == 3
                 else text_token_mask[rows]
             )
-        future_h = self.future_proj(future_tokens.detach())
+        future_input = (
+            future_tokens.detach() if detach_future_tokens else future_tokens
+        )
+        future_h = self.future_proj(future_input)
         selected_future = future_h[rows, slots]
         selected_cls = selected_future[:, 0]
         selected_patches = selected_future[:, 1:]

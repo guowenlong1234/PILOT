@@ -404,6 +404,8 @@ def test_native_adjusted_loss_only_updates_adapter_and_e24():
             condition_hidden_dim=4,
         ),
     )
+    with torch.no_grad():
+        module.head.score_mlp[-1].weight.normal_(mean=0.0, std=0.1)
     owner = torch.randn(2, 2, 8, requires_grad=True)
     text = torch.randn(2, 3, 8, requires_grad=True)
     future = torch.randn(2, 2, 257, 8, requires_grad=True)

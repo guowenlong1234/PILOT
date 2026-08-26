@@ -123,6 +123,7 @@ class E24JointTrainModule(nn.Module):
             candidate_mask,
             text_token_mask=text_token_mask,
             candidate_geometry=candidate_geometry,
+            detach_future_tokens=self.cls_adapter is None,
         ).delta
         # A sparse rank can reach the final synchronized DDP replay round with
         # only a dummy row.  Keep every head parameter in that zero-valued
@@ -303,7 +304,11 @@ def build_e24_joint_step(
         raise ValueError("E24 joint SFT only supports predicted q1 source dino_cwp_nwm")
     base_logits = nav_outs["global_logits"]
     native_cls = bool(
-        getattr(trainer.raenwm_runtime, "predict_cls_token", False)
+        getattr(
+            getattr(trainer, "raenwm_runtime", None),
+            "predict_cls_token",
+            False,
+        )
     )
     global_delta = torch.zeros_like(base_logits)
     active_envs: list[int] = []
