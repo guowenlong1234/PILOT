@@ -39,6 +39,37 @@ def test_native_cls_config_is_isolated_and_uses_v2_contract():
     assert inference["transport"]["final_only_euler"] is False
 
 
+def test_native_cls_smoke_and_single_episode_wrappers_are_isolated():
+    launcher = (ROOT / "scripts/run_rae_r2r_e24_joint_server_job.sh").read_text()
+    assert "*native_cls*)" in launcher
+    assert "pretrained/raenwm_native_cls/checkpoint_step_75000.pth.tar" in launcher
+    assert "38b24af13b76ba8faef367559244c3a0401e0557e7c299870c273cbee8a07064" in launcher
+
+    smoke = (
+        ROOT / "scripts/manage_rae_r2r_native_cls_e24_joint_server.sh"
+    ).read_text()
+    for contract in (
+        "iter_train_rae_dino_native_cls_e24_joint.yaml",
+        "native_cls_e24_joint_smoke",
+        "ETPR1_E24_JOINT_ITERS=2",
+        "ETPR1_E24_JOINT_SYNC_ENABLED=False",
+        "ETPR1_E24_JOINT_SMOKE_FREEZE_CHECK=True",
+    ):
+        assert contract in smoke
+
+    single = (
+        ROOT / "scripts/manage_native_cls_e24_single_episode_eval_host.sh"
+    ).read_text()
+    for contract in (
+        "ETPR1_E24_EVAL_EXPECTED_CHECKPOINTS=1",
+        "ETPR1_E24_EVAL_EPISODE_COUNT=1",
+        "ETPR1_E24_EVAL_RESULT_EPISODE_COUNT=1",
+        "ETPR1_E24_EVAL_SELECTION_ENABLED=False",
+        "ETPR1_E24_EVAL_NUM_ENVIRONMENTS=1",
+    ):
+        assert contract in single
+
+
 def test_joint_config_and_launchers_fix_the_formal_contract():
     config = (ROOT / "run_r2r/iter_train_rae_dino_e24_joint.yaml").read_text()
     assert "iters: 10000" in config

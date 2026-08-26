@@ -23,6 +23,21 @@ HABITAT_LAB_ROOT=${RUNTIME_ROOT}/habitat-lab
 HABITAT_BASELINES_ROOT=${RUNTIME_ROOT}/habitat-baselines/habitat_baselines
 RUNTIME_PYTHON=${RUNTIME_ROOT}/python
 
+case "$CONFIG_FILE" in
+    *native_cls*)
+        NWM_CHECKPOINT=${REPO_ROOT}/pretrained/raenwm_native_cls/checkpoint_step_75000.pth.tar
+        NWM_CHECKPOINT_SHA=38b24af13b76ba8faef367559244c3a0401e0557e7c299870c273cbee8a07064
+        NWM_HEAD_CHECKPOINT=
+        NWM_HEAD_SHA=
+        ;;
+    *)
+        NWM_CHECKPOINT=${REPO_ROOT}/pretrained/raenwm_stage0/checkpoint_step_70000.pth.tar
+        NWM_CHECKPOINT_SHA=392fe02045f7c11f006e1efb822914eee5826b8c6fdb2553c87e7de7c1c4df36
+        NWM_HEAD_CHECKPOINT=${REPO_ROOT}/pretrained/raenwm_stage0/nwm_heads.pt
+        NWM_HEAD_SHA=a4d396021b8bf670c44565c383db1c9288c3bd8988624fa0a59064b6a81dc6e2
+        ;;
+esac
+
 case "$MODE" in
     start|resume) ;;
     *) echo "Unknown mode: $MODE" >&2; exit 2 ;;
@@ -48,13 +63,16 @@ for path in \
     "$REPO_ROOT/$CONFIG_FILE" \
     "$START_CKPT" \
     "$PRETRAIN_PATH" \
-    "$REPO_ROOT/pretrained/raenwm_stage0/checkpoint_step_70000.pth.tar" \
-    "$REPO_ROOT/pretrained/raenwm_stage0/nwm_heads.pt" \
+    "$NWM_CHECKPOINT" \
     "$REPO_ROOT/pretrained/raenwm_stage0/stat.pt" \
     "$REPO_ROOT/pretrained/active_lookahead/e24_avg3.pth" \
     "$REPO_ROOT/pretrained/active_lookahead/dino_cwp_best.pt"; do
     [ -e "$path" ] || { echo "Missing E24 joint SFT dependency: $path" >&2; exit 1; }
 done
+[ -z "$NWM_HEAD_CHECKPOINT" ] || [ -e "$NWM_HEAD_CHECKPOINT" ] || {
+    echo "Missing E24 joint SFT dependency: $NWM_HEAD_CHECKPOINT" >&2
+    exit 1
+}
 
 verify_sha256() {
     local path=$1 expected=$2 label=$3 actual
@@ -67,8 +85,10 @@ verify_sha256() {
 verify_sha256 "$START_CKPT" 1694b175d913404bfef8a53519d6f405db5de7f8b051e8343700125e43f05c61 "base iter14200"
 verify_sha256 "$REPO_ROOT/pretrained/active_lookahead/e24_avg3.pth" bae7a9664000235dfc6fb66b43a8a0a38e7645b876e6a6369f732eb7bf404ed8 "E24 avg3"
 verify_sha256 "$REPO_ROOT/pretrained/active_lookahead/dino_cwp_best.pt" 6a45291219907dd027203d224f3f8400631651a83bd01c45b1dea55d93ec0979 "DINO-CWP"
-verify_sha256 "$REPO_ROOT/pretrained/raenwm_stage0/checkpoint_step_70000.pth.tar" 392fe02045f7c11f006e1efb822914eee5826b8c6fdb2553c87e7de7c1c4df36 "NWM body"
-verify_sha256 "$REPO_ROOT/pretrained/raenwm_stage0/nwm_heads.pt" a4d396021b8bf670c44565c383db1c9288c3bd8988624fa0a59064b6a81dc6e2 "NWM heads"
+verify_sha256 "$NWM_CHECKPOINT" "$NWM_CHECKPOINT_SHA" "NWM body"
+if [ -n "$NWM_HEAD_CHECKPOINT" ]; then
+    verify_sha256 "$NWM_HEAD_CHECKPOINT" "$NWM_HEAD_SHA" "NWM heads"
+fi
 verify_sha256 "$REPO_ROOT/pretrained/raenwm_stage0/stat.pt" 84ede66def5e6e3f25679334dc89cf63b12aacb99cbf0f5ae7ed4ad3187f7e59 "NWM stat"
 
 mkdir -p "$(dirname -- "$LOG_FILE")"
