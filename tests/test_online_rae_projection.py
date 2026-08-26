@@ -264,6 +264,7 @@ def _waypoint_policy(output_size):
     torch.nn.Module.__init__(policy)
     policy.device = torch.device("cpu")
     policy.rgb_output_size = output_size
+    policy.raenwm_enabled = False
     policy.rgb_encoder = _WaypointRgbEncoder(output_size)
     policy.depth_encoder = _WaypointDepthEncoder()
     policy.space_pool_rgb = torch.nn.Sequential(
@@ -444,6 +445,14 @@ def test_rae_yaml_selects_etpnav_768_pipeline(
         ("MODEL", "RGB_ENCODER", "cls_residual_mlp_hidden_dim"),
         ("MODEL", "RGB_ENCODER", "cls_residual_mlp_zero_init"),
     }
+    if task_name == "r2r":
+        allowed.update(
+            {
+                ("IL", "checkpoint_sync_enabled"),
+                ("IL", "checkpoint_sync_destination"),
+                ("EVAL", "checkpoint_order"),
+            }
+        )
     assert changed == allowed
     assert rae["MODEL"]["RGB_ENCODER"] == {
         "type": "rae_dinov2",
