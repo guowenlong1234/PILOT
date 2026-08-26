@@ -31,6 +31,8 @@ def test_joint_config_and_launchers_fix_the_formal_contract():
         assert digest in launcher
     manager = (ROOT / "scripts/manage_rae_r2r_e24_joint_server.sh").read_text()
     assert "smoke)" in manager and "pilot)" in manager and "resume)" in manager
+    status_body = manager.split("show_status() {", 1)[1].split("\n}", 1)[0]
+    assert "return 0" in status_body
     assert 'habitat_version=getattr(habitat, "__version__", "unknown")' in launcher
 
 

@@ -74,6 +74,7 @@ show_status() {
     echo "model_checkpoints=$(find "$CHECKPOINT_DIR" -maxdepth 1 -type f -name 'ckpt.iter*.pth' 2>/dev/null | wc -l)"
     echo "training_states=$(find "$TRAIN_STATE_DIR" -maxdepth 1 -type f -name 'train_state.iter*.pth' 2>/dev/null | wc -l)"
     [ -e "$LATEST_LOG" ] && { echo "latest_log=$(readlink -f -- "$LATEST_LOG")"; tail -n 30 "$LATEST_LOG"; }
+    return 0
 }
 
 case "$ACTION" in
