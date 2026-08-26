@@ -111,7 +111,8 @@ class RLTrainer(BaseVLNCETrainer):
               enable_amp {self.enable_amp}, need_ref_policy {self.need_ref_policy}, enable_all_dropouts {self.enable_all_dropouts}, dropout_rate {self.dropout_rate}, dropout_in_sampling {self.dropout_in_sampling}")
 
     def _frozen_lookahead_enabled(self):
-        active = getattr(self.config.MODEL, "ACTIVE_LOOKAHEAD", None)
+        model = getattr(getattr(self, "config", None), "MODEL", None)
+        active = getattr(model, "ACTIVE_LOOKAHEAD", None)
         return bool(active is not None and getattr(active, "enabled", False))
     def _make_dirs(self):
         if self.config.local_rank == 0:
