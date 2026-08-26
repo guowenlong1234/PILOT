@@ -26,6 +26,33 @@ LOG_FILE=${EVAL_ROOT}/watch.log
 SPACE_CHECK_FILE=${EVAL_ROOT}/space_check.ok
 EXPECTED_CHECKPOINTS=${ETPR1_E24_EVAL_EXPECTED_CHECKPOINTS:-50}
 MIN_RESERVE_GIB=${ETPR1_E24_EVAL_MIN_RESERVE_GIB:-40}
+EPISODE_COUNT=${ETPR1_E24_EVAL_EPISODE_COUNT:--1}
+SELECTION_ENABLED=${ETPR1_E24_EVAL_SELECTION_ENABLED:-True}
+RESULT_EPISODE_COUNT=${ETPR1_E24_EVAL_RESULT_EPISODE_COUNT:-}
+
+if [ "$EPISODE_COUNT" != -1 ] \
+    && ! [[ "$EPISODE_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Episode count must be -1 or a positive integer: $EPISODE_COUNT" >&2
+    exit 2
+fi
+case "$SELECTION_ENABLED" in
+    True|False) ;;
+    *)
+        echo "Selection enabled must be True or False: $SELECTION_ENABLED" >&2
+        exit 2
+        ;;
+esac
+if [ -z "$RESULT_EPISODE_COUNT" ]; then
+    if [ "$EPISODE_COUNT" = -1 ]; then
+        RESULT_EPISODE_COUNT=1839
+    else
+        RESULT_EPISODE_COUNT=$EPISODE_COUNT
+    fi
+fi
+if ! [[ "$RESULT_EPISODE_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Result episode count must be a positive integer: $RESULT_EPISODE_COUNT" >&2
+    exit 2
+fi
 
 read_pid() {
     [ -s "$PID_FILE" ] || return 1
@@ -116,6 +143,7 @@ evaluate_checkpoint() {
         -e PRETRAIN_PATH="$PRETRAIN_PATH" \
         -e NUM_ENVIRONMENTS="$NUM_ENVIRONMENTS" \
         -e CONFIG_FILE="$CONFIG_FILE" \
+        -e EPISODE_COUNT="$EPISODE_COUNT" \
         "$CONTAINER" bash -lc '
             source /home/a6000/gwl/miniconda3/etc/profile.d/conda.sh
             conda activate etpr1_rae
@@ -133,7 +161,7 @@ evaluate_checkpoint() {
                 GPU_NUMBERS 1 \
                 NUM_ENVIRONMENTS "$NUM_ENVIRONMENTS" \
                 EVAL.CKPT_PATH_DIR "$CKPT_PATH" \
-                EVAL.EPISODE_COUNT -1 \
+                EVAL.EPISODE_COUNT "$EPISODE_COUNT" \
                 EVAL.SAVE_RESULTS True \
                 TASK_CONFIG.SIMULATOR.HABITAT_SIM_V0.ALLOW_SLIDING True \
                 CHECKPOINT_FOLDER "$EVAL_ROOT/checkpoints/" \
@@ -201,21 +229,25 @@ run_worker() {
         if [ "$checkpoint_count" -eq "$EXPECTED_CHECKPOINTS" ] \
             && [ "$result_count" -eq "$EXPECTED_CHECKPOINTS" ] \
             && [ "$diagnostic_count" -eq "$EXPECTED_CHECKPOINTS" ]; then
-            docker exec \
-                -e CKPT_DIR="$CKPT_DIR" \
-                -e RESULT_DIR="$RESULT_DIR" \
-                -e EVAL_ROOT="$EVAL_ROOT" \
-                -e EXPECTED_CHECKPOINTS="$EXPECTED_CHECKPOINTS" \
-                "$CONTAINER" bash -lc '
-                    source /home/a6000/gwl/miniconda3/etc/profile.d/conda.sh
-                    conda activate etpr1_rae
-                    cd /home/a6000/gwl/ETP-R1
-                    python scripts/select_best_e24_joint_checkpoint.py \
-                        --checkpoint-dir "$CKPT_DIR" \
-                        --result-dir "$RESULT_DIR" \
-                        --output-dir "$EVAL_ROOT/selection" \
-                        --expected "$EXPECTED_CHECKPOINTS"
-                '
+            if [ "$SELECTION_ENABLED" = True ]; then
+                docker exec \
+                    -e CKPT_DIR="$CKPT_DIR" \
+                    -e RESULT_DIR="$RESULT_DIR" \
+                    -e EVAL_ROOT="$EVAL_ROOT" \
+                    -e EXPECTED_CHECKPOINTS="$EXPECTED_CHECKPOINTS" \
+                    -e RESULT_EPISODE_COUNT="$RESULT_EPISODE_COUNT" \
+                    "$CONTAINER" bash -lc '
+                        source /home/a6000/gwl/miniconda3/etc/profile.d/conda.sh
+                        conda activate etpr1_rae
+                        cd /home/a6000/gwl/ETP-R1
+                        python scripts/select_best_e24_joint_checkpoint.py \
+                            --checkpoint-dir "$CKPT_DIR" \
+                            --result-dir "$RESULT_DIR" \
+                            --output-dir "$EVAL_ROOT/selection" \
+                            --expected "$EXPECTED_CHECKPOINTS" \
+                            --episodes "$RESULT_EPISODE_COUNT"
+                    '
+            fi
             echo "worker_completed_at=$(date --iso-8601=seconds) checkpoints=$checkpoint_count results=$result_count diagnostics=$diagnostic_count"
             return 0
         fi
@@ -255,6 +287,7 @@ show_status() {
     echo "results=$(find "$RESULT_DIR" -maxdepth 1 -type f -name 'stats_ckpt_*_val_unseen.json' 2>/dev/null | wc -l)"
     echo "diagnostics=$(find "$RESULT_DIR" -maxdepth 1 -type f -name 'lookahead_ckpt_*_val_unseen.json' 2>/dev/null | wc -l)"
     echo "checkpoint_order=$CHECKPOINT_ORDER config=$CONFIG_FILE"
+    echo "episode_count=$EPISODE_COUNT result_episode_count=$RESULT_EPISODE_COUNT selection_enabled=$SELECTION_ENABLED"
     echo "blocking_process_pattern=${BLOCKING_PROCESS_PATTERN:-none}"
     nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu \
         --format=csv,noheader

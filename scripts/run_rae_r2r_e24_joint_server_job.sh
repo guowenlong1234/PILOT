@@ -102,7 +102,7 @@ fi
     echo "train_iters=$TRAIN_ITERS"
     echo "log_every=$LOG_EVERY"
     echo "task_seed=${TASK_SEED:-config_default}"
-    "$PYTHON_BIN" -c 'import sys, torch, transformers, habitat, habitat_sim; print(f"versions=python:{sys.version.split()[0]} torch:{torch.__version__} cuda:{torch.version.cuda} transformers:{transformers.__version__} habitat:{getattr(habitat, "__version__", "unknown")} habitat_sim:{getattr(habitat_sim, "__version__", "unknown")}")'
+    "$PYTHON_BIN" -c 'import sys, torch, transformers, habitat, habitat_sim; habitat_version=getattr(habitat, "__version__", "unknown"); habitat_sim_version=getattr(habitat_sim, "__version__", "unknown"); print(f"versions=python:{sys.version.split()[0]} torch:{torch.__version__} cuda:{torch.version.cuda} transformers:{transformers.__version__} habitat:{habitat_version} habitat_sim:{habitat_sim_version}")'
     nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu --format=csv,noheader
 } >>"$LOG_FILE"
 

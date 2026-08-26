@@ -55,6 +55,17 @@ bash scripts/manage_rae_r2r_e24_joint_server.sh status
 `smoke` 和 `pilot` 使用各自带时间戳的新目录，不覆盖正式实验。正式恢复必须
 找到成对的模型与 training-state，并严格恢复三组 optimizer 和 E24 状态。
 
+pilot 的 `iter400` 同步到测评机并核对 SHA256 后，使用独立入口运行固定
+16 episode 验收；它不做正式 checkpoint 选优，也不写入正式评测目录：
+
+```bash
+bash scripts/manage_e24_joint_pilot_eval_host.sh start
+bash scripts/manage_e24_joint_pilot_eval_host.sh status
+```
+
+该入口固定使用本次 pilot 运行 `20260825T165434`。若重新运行 pilot，必须通过
+`ETPR1_E24_PILOT_RUN_ID` 显式指定新的运行 ID，避免误评旧 checkpoint。
+
 ## 测评与最佳点
 
 测评机先按项目规则检查 RTX 4090、受保护的 ETPNav 容器和计算进程，再启动：

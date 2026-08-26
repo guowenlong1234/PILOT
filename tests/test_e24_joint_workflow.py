@@ -31,6 +31,7 @@ def test_joint_config_and_launchers_fix_the_formal_contract():
         assert digest in launcher
     manager = (ROOT / "scripts/manage_rae_r2r_e24_joint_server.sh").read_text()
     assert "smoke)" in manager and "pilot)" in manager and "resume)" in manager
+    assert 'habitat_version=getattr(habitat, "__version__", "unknown")' in launcher
 
 
 def test_eval_watcher_requires_metrics_diagnostics_space_and_protected_gpu():
@@ -41,9 +42,28 @@ def test_eval_watcher_requires_metrics_diagnostics_space_and_protected_gpu():
         "lookahead_ckpt_",
         "EXPECTED_CHECKPOINTS:-50",
         "MIN_RESERVE_GIB:-40",
+        "ETPR1_E24_EVAL_EPISODE_COUNT:--1",
+        'EVAL.EPISODE_COUNT "$EPISODE_COUNT"',
+        "ETPR1_E24_EVAL_SELECTION_ENABLED:-True",
+        "RESULT_EPISODE_COUNT=1839",
+        '--episodes "$RESULT_EPISODE_COUNT"',
         "select_best_e24_joint_checkpoint.py",
     ):
         assert contract in watcher
+
+
+def test_pilot_eval_wrapper_pins_one_checkpoint_and_sixteen_episodes():
+    wrapper = (ROOT / "scripts/manage_e24_joint_pilot_eval_host.sh").read_text()
+    for contract in (
+        "20260825T165434",
+        "etpr1_e24_joint_pilot",
+        "etpr1_e24_joint_pilot_eval",
+        "ETPR1_E24_EVAL_EXPECTED_CHECKPOINTS=1",
+        "ETPR1_E24_EVAL_EPISODE_COUNT=16",
+        "ETPR1_E24_EVAL_SELECTION_ENABLED=False",
+        'manage_e24_joint_eval_watch_host.sh" "$ACTION"',
+    ):
+        assert contract in wrapper
 
 
 def test_selection_tool_uses_sr_spl_tie_break_and_atomic_outputs(tmp_path):
