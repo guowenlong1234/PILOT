@@ -119,7 +119,6 @@ def sample(
         atol=1.0e-6,
         rtol=1.0e-3,
         reverse=False,
-        final_only=False,
     )
     inputs = _load(input_path)
     context = inputs["context"].to(torch_device)
