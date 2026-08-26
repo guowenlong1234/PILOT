@@ -13,8 +13,17 @@ from vlnce_baselines.nwm.etp_adapter import (
     RaeGhostInputRequest,
     RaeLatentTargetRequest,
 )
-from vlnce_baselines.nwm.predictor import _extract_ema_state, _freeze_for_inference
+from vlnce_baselines.nwm.predictor import (
+    _extract_ema_state,
+    _freeze_for_inference,
+    _validate_loaded_state,
+)
 from vlnce_baselines.nwm.raenwm_core.infer_compat import _sample_time_latent
+from vlnce_baselines.nwm.raenwm_core.models import (
+    make_latent_noise,
+    pack_cls_patch,
+    unpack_cls_patch,
+)
 from vlnce_baselines.nwm.runtime import RaeNwmLatentNormalizer
 from vlnce_baselines.nwm.active_lookahead import dino_cwp_future
 
@@ -69,6 +78,32 @@ def test_latent_normalizer_accepts_official_none_mean(tmp_path):
 
     expected = torch.full_like(output, 6.0 / (4.0 + 1.0e-5) ** 0.5)
     torch.testing.assert_close(output, expected)
+
+
+def test_native_cls_patch_pack_unpack_round_trip():
+    cls = torch.randn(2, 768)
+    patch = torch.randn(2, 768, 16, 16)
+
+    tokens = pack_cls_patch(cls, patch)
+    restored_cls, restored_patch = unpack_cls_patch(tokens, latent_size=16)
+
+    assert tokens.shape == (2, 257, 768)
+    assert torch.equal(restored_cls, cls)
+    assert torch.equal(restored_patch, patch)
+
+
+def test_native_cls_noise_has_sequence_shape_and_dtype():
+    noise = make_latent_noise(
+        batch_size=2,
+        latent_dim=768,
+        latent_size=16,
+        device=torch.device("cpu"),
+        dtype=torch.float64,
+        predict_cls_token=True,
+    )
+
+    assert noise.shape == (2, 257, 768)
+    assert noise.dtype is torch.float64
 
 
 def test_context_adapter_skips_until_four_frames_and_tracks_query_ids():
@@ -179,6 +214,16 @@ def test_checkpoint_requires_nonempty_ema_and_strips_compile_prefix():
     assert state == {"weight": tensor}
 
 
+def test_checkpoint_state_rejects_unexpected_ema_keys():
+    model = torch.nn.Linear(2, 2)
+    state = dict(model.state_dict())
+    state["unexpected.weight"] = torch.ones(1)
+    incompatible = model.load_state_dict(state, strict=False)
+
+    with pytest.raises(ValueError, match="unexpected=1"):
+        _validate_loaded_state(model, state, incompatible)
+
+
 def test_world_model_is_explicitly_frozen_for_inference():
     model = torch.nn.Sequential(
         torch.nn.Linear(3, 4),
@@ -227,3 +272,33 @@ def test_explicit_initial_noise_controls_prediction_and_preserves_rng():
     assert pred_rgb is None
     torch.testing.assert_close(pred_latent, torch.full_like(noise, 3.0))
     assert torch.equal(torch.random.get_rng_state(), rng_before)
+
+
+def test_native_cls_sequence_sampling_preserves_257_token_contract():
+    model = torch.nn.Linear(1, 1)
+    bundle = SimpleNamespace(
+        model=model,
+        sampler=_FakeSampler(),
+        num_cond=4,
+        latent_size=16,
+        config={
+            "predict_cls_token": True,
+            "transport": {"final_only_euler": False},
+        },
+        rae=SimpleNamespace(),
+    )
+    context = torch.zeros(1, 4, 257, 768)
+    noise = torch.full((1, 257, 768), 2.0)
+
+    pred_rgb, pred_tokens = _sample_time_latent(
+        bundle=bundle,
+        x_latent=context,
+        curr_delta=torch.zeros(1, 1, 3),
+        rel_t=torch.zeros(1),
+        return_rgb=False,
+        initial_noise=noise,
+    )
+
+    assert pred_rgb is None
+    assert pred_tokens.shape == (1, 257, 768)
+    torch.testing.assert_close(pred_tokens, torch.full_like(noise, 3.0))

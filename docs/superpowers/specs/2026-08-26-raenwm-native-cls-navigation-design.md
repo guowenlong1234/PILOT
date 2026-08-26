@@ -1,6 +1,6 @@
 ---
 title: ETP-R1 原生 CLS RAE-NWM 导航前瞻替换设计
-status: written-review-pending
+status: approved
 owner: codex
 scope: R2R SFT 与评测中的 RGB 注入和 Top-5 前瞻
 last_reviewed_date: 2026-08-26
@@ -305,6 +305,10 @@ q1 的 `pred_cls_raw` 经独立 adapter 调整。该 adapter 不与 RGB adapter 
 ```text
 [dx, dy, sin(dtheta), cos(dtheta), rel_t]  # 5 维
 ```
+
+其中 `dx`、`dy` 固定使用 NWM 实际接收的归一化局部动作坐标，
+即 `record.condition.dx/dy`，不使用米制局部位移。这样 adapter
+看到的位姿条件与生成对应 q1 CLS 时的 NWM 条件完全一致。
 
 结构固定为：
 
@@ -732,6 +736,7 @@ gwl-etpnav 中的 torchrun/run.py/train.py
 - 4 帧历史不足时安全回退。
 - base 使用当前 `iter14200`。
 - 只要求改好代码并通过技术测试，不设置性能提升条件。
+- Top-5 CLS adapter 的 `dx/dy` 使用 NWM 的归一化局部动作坐标。
 
 ## 16. 最后复查
 

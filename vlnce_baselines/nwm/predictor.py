@@ -82,7 +82,11 @@ def _extract_ema_state(checkpoint):
 def _validate_loaded_state(model, state, incompatible):
     model_keys = set(model.state_dict())
     loaded_keys = set(state) & model_keys
-    if not loaded_keys or incompatible.missing_keys:
+    if (
+        not loaded_keys
+        or incompatible.missing_keys
+        or incompatible.unexpected_keys
+    ):
         missing_preview = list(incompatible.missing_keys[:5])
         unexpected_preview = list(incompatible.unexpected_keys[:5])
         raise ValueError(
@@ -344,7 +348,10 @@ class RaeNwmPredictor:
             model = torch.compile(model)
 
         transport_config = config.get("transport", {})
-        shift_dim = int(rae.latent_dim) * int(latent_size) * int(latent_size)
+        token_count = int(latent_size) * int(latent_size)
+        if bool(config.get("predict_cls_token", False)):
+            token_count += 1
+        shift_dim = int(rae.latent_dim) * token_count
         shift_base = float(transport_config.get("time_dist_shift_base", 4096))
         time_dist_shift = math.sqrt(float(shift_dim) / float(shift_base))
         if transport_config.get("time_dist_shift") is not None:

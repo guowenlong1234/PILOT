@@ -21,6 +21,92 @@ def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
+def pack_cls_patch(cls: torch.Tensor, patch: torch.Tensor) -> torch.Tensor:
+    """Pack one CLS token and a spatial patch map into a token sequence."""
+
+    if cls.dim() != 2:
+        raise ValueError(f"cls must have shape [B, C], got {tuple(cls.shape)}")
+    if patch.dim() != 4:
+        raise ValueError(
+            f"patch must have shape [B, C, H, W], got {tuple(patch.shape)}"
+        )
+    batch, channels, _height, _width = patch.shape
+    if tuple(cls.shape) != (batch, channels):
+        raise ValueError(
+            f"cls shape {tuple(cls.shape)} must match patch batch/channels "
+            f"{(batch, channels)}"
+        )
+    patch_tokens = patch.flatten(2).transpose(1, 2)
+    return torch.cat([cls.unsqueeze(1), patch_tokens], dim=1)
+
+
+def unpack_cls_patch(
+    sequence: torch.Tensor,
+    latent_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split a native CLS+patch sequence back into CLS and patch tensors."""
+
+    if sequence.dim() != 3:
+        raise ValueError(
+            "sequence must have shape [B, 1+H*W, C], got "
+            f"{tuple(sequence.shape)}"
+        )
+    latent_size = int(latent_size)
+    expected_tokens = latent_size * latent_size + 1
+    if int(sequence.shape[1]) != expected_tokens:
+        raise ValueError(
+            f"expected {expected_tokens} tokens for latent_size={latent_size}, "
+            f"got {int(sequence.shape[1])}"
+        )
+    cls = sequence[:, 0]
+    patch = sequence[:, 1:].transpose(1, 2).contiguous()
+    patch = patch.reshape(
+        sequence.shape[0], sequence.shape[2], latent_size, latent_size
+    )
+    return cls, patch
+
+
+def latent_to_patch_map(latent: torch.Tensor, latent_size: int) -> torch.Tensor:
+    if latent.dim() == 4:
+        return latent
+    if latent.dim() == 3:
+        return unpack_cls_patch(latent, latent_size)[1]
+    raise ValueError(
+        f"latent must be 3D sequence or 4D patch map, got {tuple(latent.shape)}"
+    )
+
+
+def make_latent_noise(
+    batch_size: int,
+    latent_dim: int,
+    latent_size: int,
+    device: torch.device,
+    *,
+    dtype: torch.dtype | None = None,
+    predict_cls_token: bool = False,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    kwargs = {"device": device}
+    if dtype is not None:
+        kwargs["dtype"] = dtype
+    if generator is not None:
+        kwargs["generator"] = generator
+    if bool(predict_cls_token):
+        return torch.randn(
+            int(batch_size),
+            int(latent_size) * int(latent_size) + 1,
+            int(latent_dim),
+            **kwargs,
+        )
+    return torch.randn(
+        int(batch_size),
+        int(latent_dim),
+        int(latent_size),
+        int(latent_size),
+        **kwargs,
+    )
+
+
 def DDTModulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     B, Lx, D = x.shape
     _, L, _ = shift.shape
@@ -434,6 +520,78 @@ class CDiT(nn.Module):
             return imgs_mu
         return imgs
 
+    def _is_sequence_latent(self, value: torch.Tensor) -> bool:
+        return value.dim() == 3
+
+    def _embed_latent(
+        self,
+        value: torch.Tensor,
+        embedder: PatchEmbed,
+    ) -> torch.Tensor:
+        if value.dim() == 4:
+            return embedder(value)
+        if value.dim() != 3:
+            raise ValueError(
+                "latent must be 3D sequence or 4D patch map, got "
+                f"{tuple(value.shape)}"
+            )
+        if self.patch_size != 1:
+            raise ValueError("3D CLS+patch latent sequence requires patch_size=1")
+        expected_tokens = int(self.x_embedder.num_patches) + 1
+        if int(value.shape[1]) != expected_tokens:
+            raise ValueError(
+                f"expected {expected_tokens} tokens, got {int(value.shape[1])}"
+            )
+        if int(value.shape[2]) != int(self.in_channels):
+            raise ValueError(
+                f"expected token dim {self.in_channels}, got {int(value.shape[2])}"
+            )
+        weight = embedder.proj.weight.flatten(1)
+        return F.linear(value, weight, embedder.proj.bias)
+
+    @staticmethod
+    def _pos_embed_for(
+        pos_embed: torch.Tensor,
+        include_cls: bool,
+    ) -> torch.Tensor:
+        if not include_cls:
+            return pos_embed
+        cls_pos = torch.zeros(
+            pos_embed.shape[0],
+            1,
+            pos_embed.shape[2],
+            device=pos_embed.device,
+            dtype=pos_embed.dtype,
+        )
+        return torch.cat([cls_pos, pos_embed], dim=1)
+
+    def _apply_rope_with_optional_cls(self, value: torch.Tensor, rope):
+        patch_tokens = int(self.x_embedder.num_patches)
+        token_count = int(value.shape[-2])
+        if token_count == patch_tokens:
+            return rope(value)
+        if token_count == patch_tokens + 1:
+            cls = value[:, :, :1, :]
+            patch = rope(value[:, :, 1:, :])
+            return torch.cat([cls, patch], dim=-2)
+        raise ValueError(
+            f"RoPE expected {patch_tokens} or {patch_tokens + 1} tokens, "
+            f"got {token_count}"
+        )
+
+    def _rope_for_tokens(self, rope, token_count: int):
+        patch_tokens = int(self.x_embedder.num_patches)
+        if int(token_count) not in (patch_tokens, patch_tokens + 1):
+            raise ValueError(
+                f"expected {patch_tokens} or {patch_tokens + 1} tokens, "
+                f"got {int(token_count)}"
+            )
+
+        def wrapped(value: torch.Tensor) -> torch.Tensor:
+            return self._apply_rope_with_optional_cls(value, rope)
+
+        return wrapped
+
     def forward(self,
                 x,
                 t,
@@ -441,6 +599,7 @@ class CDiT(nn.Module):
                 x_cond,
                 rel_t
                 ):
+        sequence_output = self._is_sequence_latent(x)
         # Keep raw x_t for DDT head (RAE-style: head re-embeds raw x_t)
         x_raw = x   #混合过噪声的图像数据
 
@@ -466,12 +625,15 @@ class CDiT(nn.Module):
         #   Query stream: re-embed raw x_t -> x_head
         #   Key/Value stream: z_head (token-wise condition)
         # -------------------------
-        x_head = self.x_embedder_head(x_raw)  # (B, L, head_width)  (no APE in head; RoPE inside attention)
+        x_head = self._embed_latent(x_raw, self.x_embedder_head)  # (B, L, head_width)  (no APE in head; RoPE inside attention)
+        head_rope = self._rope_for_tokens(self.head_feat_rope, x_head.shape[1])
 
         for blk in self.head_blocks:    #经过头
-            x_head = blk(x_head, z_head, rope=self.head_feat_rope)
+            x_head = blk(x_head, z_head, rope=head_rope)
 
         x_out = self.final_layer(x_head, z_head)    #最终层mlp
+        if sequence_output:
+            return x_out
 
         num_patches = self.x_embedder.num_patches
         N = x_out.shape[0]
@@ -481,12 +643,33 @@ class CDiT(nn.Module):
         return x_out    #把返回的token序列重新拼回二维特征图，[N, 768, 16, 16]
 
     def _prepare_inputs(self, x, t, y, x_cond, rel_t):
+        is_sequence = self._is_sequence_latent(x)
+        if is_sequence:
+            if x_cond.dim() != 4:
+                raise ValueError(
+                    "sequence latent x_cond must have shape [B,T,L,C], got "
+                    f"{tuple(x_cond.shape)}"
+                )
+        elif x_cond.dim() != 5:
+            raise ValueError(
+                "patch latent x_cond must have shape [B,T,C,H,W], got "
+                f"{tuple(x_cond.shape)}"
+            )
+
         #x_cond是多帧上下文信息
         #[N, 768, 16, 16] -> [N, 256, 768]再加上位置编码，x_embedder其实就是一个卷积和一个展平
-        x = self.x_embedder(x) + self.pos_embed[self.context_size:]
+        x_pos = self._pos_embed_for(
+            self.pos_embed[self.context_size:], is_sequence
+        )
+        x = self._embed_latent(x, self.x_embedder) + x_pos
 
         #4 张上下文 latent 图”变成“4 组上下文 token”，并标明它们各自是第几帧
-        x_cond = self.x_embedder(x_cond.flatten(0, 1)).unflatten(0, (x_cond.shape[0], x_cond.shape[1])) + self.pos_embed[:self.context_size]
+        cond_pos = self._pos_embed_for(
+            self.pos_embed[:self.context_size], is_sequence
+        )
+        x_cond = self._embed_latent(
+            x_cond.flatten(0, 1), self.x_embedder
+        ).unflatten(0, (x_cond.shape[0], x_cond.shape[1])) + cond_pos
         x_cond = x_cond.flatten(1, 2)
 
         t_emb = self.t_embedder(t[..., None])   #把时间步进行编码，经过正余弦编码之后，再通过一个mlp
@@ -500,8 +683,9 @@ class CDiT(nn.Module):
         return x, x_cond, c, t_emb  #最终输出的是带噪声的x、上下文序列、条件向量、时间编码
 
     def _process_blocks(self, x, c, x_cond):
+        rope = self._rope_for_tokens(self.feat_rope, x.shape[1])
         for block in self.blocks:
-            x = block(x, c, x_cond, rope=self.feat_rope)    #rope=self.feat_rope是二维旋转位置编码
+            x = block(x, c, x_cond, rope=rope)    #rope=self.feat_rope是二维旋转位置编码
         return x
 
 
