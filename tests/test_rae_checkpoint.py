@@ -994,6 +994,90 @@ def test_native_sft_capture_includes_rng_and_nwm_generator(monkeypatch):
     assert torch.equal(local["nwm_generator_state"], generator.get_state())
 
 
+def test_strict_baseline_sft_capture_and_save_include_per_rank_rng(
+    tmp_path, monkeypatch
+):
+    trainer = object.__new__(SftTrainer)
+    trainer.local_rank = 0
+    trainer.world_size = 1
+    trainer.device = 0
+    trainer.config = SimpleNamespace(
+        CHECKPOINT_FOLDER=str(tmp_path),
+        ONLY_LAST_SAVEALL=True,
+        IL=SimpleNamespace(
+            iters=2,
+            resumable_checkpoints=True,
+            strict_rng_resume=True,
+            keep_last_train_states=3,
+            keep_train_state_every_n_iters=5000,
+        ),
+        MODEL=SimpleNamespace(
+            RAENWM=SimpleNamespace(predict_cls_token=False),
+            ACTIVE_LOOKAHEAD=SimpleNamespace(enabled=False),
+        ),
+    )
+    trainer.envs = _FakeVectorEnvs([{"worker": 0}])
+    trainer.policy = _FakePolicy()
+    trainer.optimizer = _StateHolder()
+    trainer.scheduler = _StateHolder()
+    trainer.scaler = _StateHolder()
+    cuda_state = torch.tensor([9], dtype=torch.uint8)
+    monkeypatch.setattr(
+        torch.cuda, "get_rng_state", lambda _device: cuda_state
+    )
+    captured = trainer._capture_episode_iterator_state()
+    saved = []
+    monkeypatch.setattr(
+        sft_trainer_module,
+        "atomic_torch_save",
+        lambda obj, path: saved.append((obj, path)),
+    )
+    monkeypatch.setattr(
+        sft_trainer_module, "prune_training_states", lambda *args: []
+    )
+
+    trainer.save_checkpoint(1, episode_iterator_state=captured)
+
+    training_state = saved[1][0]
+    assert training_state["format_version"] == 5
+    assert len(training_state["rng_states"]) == 1
+    assert torch.equal(training_state["rng_states"][0]["cuda"], cuda_state)
+
+
+def test_rxr_native_joint_provenance_records_task_and_base_selection():
+    trainer = object.__new__(SftTrainer)
+    trainer.config = SimpleNamespace(
+        IL=SimpleNamespace(
+            expert_policy="ndtw", max_text_len=250, max_traj_len=25
+        ),
+        MODEL=SimpleNamespace(
+            ACTIVE_LOOKAHEAD=SimpleNamespace(
+                base_selection_manifest_sha256="manifest-sha"
+            )
+        ),
+        TASK_CONFIG=SimpleNamespace(
+            DATASET=SimpleNamespace(
+                ROLES=["guide"],
+                LANGUAGES=["en-US", "en-IN", "hi-IN", "te-IN"],
+            ),
+            SIMULATOR=SimpleNamespace(RGB_SENSOR=SimpleNamespace(HFOV=63)),
+        ),
+    )
+
+    provenance = trainer._rxr_native_cls_provenance_fields()
+
+    assert provenance == {
+        "task_type": "rxr",
+        "base_selection_manifest_sha256": "manifest-sha",
+        "dataset_roles": ["guide"],
+        "dataset_languages": ["en-US", "en-IN", "hi-IN", "te-IN"],
+        "rgb_hfov": 63,
+        "expert_policy": "ndtw",
+        "max_text_len": 250,
+        "max_traj_len": 25,
+    }
+
+
 def test_sft_episode_restore_rejects_changed_parallelism():
     trainer = object.__new__(SftTrainer)
     trainer.local_rank = 0

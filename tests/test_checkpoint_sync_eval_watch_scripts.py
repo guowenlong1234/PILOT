@@ -20,11 +20,13 @@ def test_server_sync_does_not_let_remote_commands_consume_checkpoint_list():
         "scripts/manage_r2r_sft_checkpoint_sync_server.sh"
     ).read_text(encoding="utf-8")
 
-    assert source.count("ssh -n ") == 4
+    assert source.count("ssh -n ") >= 4
     assert '"${DEST_HOST}:${incoming}" </dev/null' in source
     assert "mapfile -t checkpoints" in source
     assert 'for checkpoint in "${checkpoints[@]}"' in source
     assert "done < <(find" not in source
+    assert "sha256sum '$incoming'" in source
+    assert "ready_marker" in source
 
 
 def test_eval_watch_uses_isolated_container_and_skips_valid_results():
@@ -37,7 +39,7 @@ def test_eval_watch_uses_isolated_container_and_skips_valid_results():
         "gwl-etpnav",
         "conda activate etpr1_rae",
         "scripts/etpr1_rae_runtime_exec.sh python run.py",
-        "EVAL.EPISODE_COUNT -1",
+        'EVAL.EPISODE_COUNT "$EPISODE_COUNT"',
         "EVAL.SAVE_RESULTS True",
         "rae_dinov2_etpnav_cls_768_raw_cls_20260810/best/model_best_step_220000.pt",
         "NUM_ENVIRONMENTS=${ETPR1_R2R_EVAL_NUM_ENVIRONMENTS:-8}",

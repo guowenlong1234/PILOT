@@ -95,6 +95,8 @@ def test_legacy_config_can_merge_yaml_defrost_and_freeze():
     (
         ("run_r2r/iter_train.yaml", "instruction_sensor", "VLN-CE-v2", 1.5),
         ("run_rxr/iter_train.yaml", "rxr_instruction_sensor", "RxR-VLN-CE-v2", 0.88),
+        ("run_rxr/iter_train_rae_dino_sft.yaml", "rxr_instruction_sensor", "RxR-VLN-CE-v2", 0.88),
+        ("run_rxr/iter_train_rae_dino_native_cls_e24_joint.yaml", "rxr_instruction_sensor", "RxR-VLN-CE-v2", 0.88),
     ),
 )
 def test_real_task_config_converts_to_modern_habitat_shape(

@@ -16,7 +16,7 @@ TRAIN_STATE_DIR=${CHECKPOINT_DIR}/train_states
 SUPERVISOR_DIR=${OUTPUT_PATH}/supervisor_server
 LATEST_LOG=${SUPERVISOR_DIR}/latest.log
 PID_FILE=${SUPERVISOR_DIR}/trainer.pid
-JOB_SCRIPT=${REPO_ROOT}/scripts/run_rae_r2r_sft_server_job.sh
+JOB_SCRIPT=${ETPR1_R2R_SFT_JOB_SCRIPT:-${REPO_ROOT}/scripts/run_rae_r2r_sft_server_job.sh}
 
 read_pid() {
     [ -f "$PID_FILE" ] || return 1

@@ -9,6 +9,12 @@ CONFIG_FILE=${ETPR1_E24_JOINT_CONFIG_FILE:-run_r2r/iter_train_rae_dino_e24_joint
 EXP_NAME=${ETPR1_E24_JOINT_EXP_NAME:-etpr1_e24_joint_sft}
 OUTPUT_ROOT=${ETPR1_E24_JOINT_OUTPUT_ROOT:-data/logs/active_lookahead/e24_joint_sft}
 START_CKPT=${ETPR1_E24_JOINT_START_CKPT:-${REPO_ROOT}/pretrained/active_lookahead/base_iter14200.pth}
+START_CKPT_SHA=${ETPR1_E24_JOINT_START_CKPT_SHA:-1694b175d913404bfef8a53519d6f405db5de7f8b051e8343700125e43f05c61}
+BASE_ITERATION=${ETPR1_E24_JOINT_BASE_ITERATION:-14200}
+BASE_SELECTION_MANIFEST_SHA=${ETPR1_E24_JOINT_BASE_SELECTION_MANIFEST_SHA:-}
+RXR_BASE_SELECTION=${ETPR1_RXR_BASE_SELECTION:-}
+RXR_BASE_CHECKPOINT=${ETPR1_RXR_BASE_CHECKPOINT:-}
+RXR_ALLOW_SMOKE_BASE=${ETPR1_RXR_ALLOW_SMOKE_BASE:-False}
 PRETRAIN_PATH=${ETPR1_E24_JOINT_PRETRAIN_PATH:-${REPO_ROOT}/pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768_eval_final_best/model_best_step_465000.pt}
 CHECKPOINT_SYNC_DESTINATION=${ETPR1_E24_JOINT_SYNC_DESTINATION:-a6000@10.10.10.2:/home/a6000/gwl/ETP-R1/data/logs/active_lookahead/e24_joint_sft/checkpoints/etpr1_e24_joint_sft}
 CHECKPOINT_SYNC_ENABLED=${ETPR1_E24_JOINT_SYNC_ENABLED:-True}
@@ -26,6 +32,35 @@ TORCHRUN_BIN=${ETPR1_SERVER_TORCHRUN:-/home/gwl/miniconda3/envs/etpnav_unified/b
 HABITAT_LAB_ROOT=${RUNTIME_ROOT}/habitat-lab
 HABITAT_BASELINES_ROOT=${RUNTIME_ROOT}/habitat-baselines/habitat_baselines
 RUNTIME_PYTHON=${RUNTIME_ROOT}/python
+
+case "$CONFIG_FILE" in
+    run_rxr/*native_cls*)
+        [ -n "$RXR_BASE_SELECTION" ] || {
+            echo "ETPR1_RXR_BASE_SELECTION is required for RxR joint training" >&2
+            exit 2
+        }
+        selection_args=()
+        [ -z "$RXR_BASE_CHECKPOINT" ] || selection_args+=(--checkpoint "$RXR_BASE_CHECKPOINT")
+        if [ "$RXR_ALLOW_SMOKE_BASE" = True ]; then
+            selection_args+=(--allow-smoke)
+        elif [ "$RXR_ALLOW_SMOKE_BASE" != False ]; then
+            echo "ETPR1_RXR_ALLOW_SMOKE_BASE must be True or False" >&2
+            exit 2
+        fi
+        mapfile -t selection_fields < <(
+            "$PYTHON_BIN" "$REPO_ROOT/scripts/resolve_rxr_base_selection.py" \
+                "$RXR_BASE_SELECTION" "${selection_args[@]}"
+        )
+        [ "${#selection_fields[@]}" -eq 4 ] || {
+            echo "RxR base-selection resolver returned an invalid result" >&2
+            exit 1
+        }
+        START_CKPT=${selection_fields[0]}
+        START_CKPT_SHA=${selection_fields[1]}
+        BASE_ITERATION=${selection_fields[2]}
+        BASE_SELECTION_MANIFEST_SHA=${selection_fields[3]}
+        ;;
+esac
 
 case "$CONFIG_FILE" in
     *native_cls*)
@@ -97,7 +132,7 @@ verify_sha256() {
         exit 1
     }
 }
-verify_sha256 "$START_CKPT" 1694b175d913404bfef8a53519d6f405db5de7f8b051e8343700125e43f05c61 "base iter14200"
+verify_sha256 "$START_CKPT" "$START_CKPT_SHA" "navigation base"
 verify_sha256 "$REPO_ROOT/pretrained/active_lookahead/e24_avg3.pth" bae7a9664000235dfc6fb66b43a8a0a38e7645b876e6a6369f732eb7bf404ed8 "E24 avg3"
 verify_sha256 "$REPO_ROOT/pretrained/active_lookahead/dino_cwp_best.pt" 6a45291219907dd027203d224f3f8400631651a83bd01c45b1dea55d93ec0979 "DINO-CWP"
 verify_sha256 "$NWM_CHECKPOINT" "$NWM_CHECKPOINT_SHA" "NWM body"
@@ -131,6 +166,9 @@ fi
     echo "exp_name=$EXP_NAME"
     echo "output_root=$OUTPUT_ROOT"
     echo "start_checkpoint=$START_CKPT"
+    echo "start_checkpoint_sha256=$START_CKPT_SHA"
+    echo "base_iteration=$BASE_ITERATION"
+    echo "base_selection_manifest_sha256=${BASE_SELECTION_MANIFEST_SHA:-none}"
     echo "pretrain_path=$PRETRAIN_PATH"
     echo "checkpoint_sync_destination=$CHECKPOINT_SYNC_DESTINATION"
     echo "checkpoint_sync_enabled=$CHECKPOINT_SYNC_ENABLED"
@@ -171,6 +209,11 @@ fi
     TENSORBOARD_DIR "$OUTPUT_ROOT/tensorboard/" \
     RESULTS_DIR "$OUTPUT_ROOT/results/" \
     MODEL.pretrained_path "$PRETRAIN_PATH" \
+    MODEL.ACTIVE_LOOKAHEAD.base_checkpoint_path "$START_CKPT" \
+    MODEL.ACTIVE_LOOKAHEAD.base_checkpoint_sha256 "$START_CKPT_SHA" \
+    MODEL.ACTIVE_LOOKAHEAD.base_iteration "$BASE_ITERATION" \
+    MODEL.ACTIVE_LOOKAHEAD.base_selection_manifest_sha256 "$BASE_SELECTION_MANIFEST_SHA" \
+    IL.sample_ratio_iteration_offset "$BASE_ITERATION" \
     MODEL.ACTIVE_LOOKAHEAD.smoke_freeze_check "$SMOKE_FREEZE_CHECK" \
     2>&1 \
     | "$PYTHON_BIN" -u scripts/filter_habitat_startup_noise.py \

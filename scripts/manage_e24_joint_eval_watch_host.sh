@@ -19,7 +19,9 @@ NUM_ENVIRONMENTS=${ETPR1_E24_EVAL_NUM_ENVIRONMENTS:-8}
 POLL_SECONDS=${ETPR1_E24_EVAL_POLL_SECONDS:-30}
 RETRY_SECONDS=${ETPR1_E24_EVAL_RETRY_SECONDS:-60}
 GPU_IDLE_LIMIT_MIB=${ETPR1_E24_EVAL_GPU_IDLE_LIMIT_MIB:-1024}
+GPU_LOCK_FILE=${ETPR1_EVAL_GPU_LOCK_FILE:-/tmp/etpr1-eval-gpu.lock}
 BLOCKING_PROCESS_PATTERN=${ETPR1_E24_EVAL_BLOCKING_PROCESS_PATTERN:-}
+READY_SHA_REQUIRED=${ETPR1_E24_EVAL_READY_SHA_REQUIRED:-False}
 CHECKPOINT_ORDER=${ETPR1_E24_EVAL_CHECKPOINT_ORDER:-$(checkpoint_order_from_config "$CONFIG_FILE")}
 PID_FILE=${EVAL_ROOT}/watch.pid
 LOG_FILE=${EVAL_ROOT}/watch.log
@@ -115,6 +117,19 @@ evaluate_checkpoint() {
     result=${RESULT_DIR}/stats_ckpt_${iteration}_val_unseen.json
     diagnostic=${RESULT_DIR}/lookahead_ckpt_${iteration}_val_unseen.json
     valid_result "$result" && valid_result "$diagnostic" && return 0
+    if [ "$READY_SHA_REQUIRED" = True ]; then
+        ready=${checkpoint}.sha256
+        [ -s "$ready" ] || {
+            echo "checkpoint_waiting_at=$(date --iso-8601=seconds) iter=$iteration reason=missing_sha_ready_marker"
+            return 2
+        }
+        expected_sha=$(awk 'NR==1 {print $1}' "$ready")
+        actual_sha=$(sha256sum -- "$checkpoint" | awk '{print $1}')
+        [ "$actual_sha" = "$expected_sha" ] || {
+            echo "checkpoint_failed_at=$(date --iso-8601=seconds) iter=$iteration reason=sha256_mismatch expected=$expected_sha actual=$actual_sha"
+            return 1
+        }
+    fi
 
     if [ ! -s "$SPACE_CHECK_FILE" ]; then
         check_checkpoint_space || return 1
@@ -131,6 +146,19 @@ evaluate_checkpoint() {
     fi
     if ! gpu_is_idle; then
         echo "checkpoint_waiting_at=$(date --iso-8601=seconds) iter=$iteration reason=gpu_busy"
+        return 2
+    fi
+
+    exec {gpu_lock_fd}>"$GPU_LOCK_FILE"
+    if ! flock -n "$gpu_lock_fd"; then
+        echo "checkpoint_waiting_at=$(date --iso-8601=seconds) iter=$iteration reason=eval_gpu_lock_busy"
+        exec {gpu_lock_fd}>&-
+        return 2
+    fi
+    if protected_task_running || blocking_project_task_running || ! gpu_is_idle; then
+        echo "checkpoint_waiting_at=$(date --iso-8601=seconds) iter=$iteration reason=resource_changed_after_lock"
+        flock -u "$gpu_lock_fd"
+        exec {gpu_lock_fd}>&-
         return 2
     fi
 
@@ -151,6 +179,35 @@ evaluate_checkpoint() {
             export MPLCONFIGDIR=/tmp/matplotlib-etpr1-eval-watch
             export GLOG_minloglevel=2 MAGNUM_LOG=quiet HABITAT_SIM_LOG=quiet
             export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8
+            extra_config_args=()
+            case "$CONFIG_FILE" in
+                *run_rxr/*)
+                    mapfile -t provenance_fields < <(
+                        python - "$CKPT_PATH" <<'PY'
+import sys
+import torch
+checkpoint = torch.load(sys.argv[1], map_location="cpu")
+provenance = checkpoint.get("e24_joint_provenance") or {}
+for name in (
+    "base_checkpoint_sha256",
+    "base_iteration",
+    "base_selection_manifest_sha256",
+    "sample_ratio_iteration_offset",
+):
+    if name not in provenance:
+        raise ValueError(f"RxR joint checkpoint lacks provenance field {name}")
+    print(provenance[name])
+PY
+                    )
+                    [ "${#provenance_fields[@]}" -eq 4 ]
+                    extra_config_args=(
+                        MODEL.ACTIVE_LOOKAHEAD.base_checkpoint_sha256 "${provenance_fields[0]}"
+                        MODEL.ACTIVE_LOOKAHEAD.base_iteration "${provenance_fields[1]}"
+                        MODEL.ACTIVE_LOOKAHEAD.base_selection_manifest_sha256 "${provenance_fields[2]}"
+                        IL.sample_ratio_iteration_offset "${provenance_fields[3]}"
+                    )
+                    ;;
+            esac
             scripts/etpr1_rae_runtime_exec.sh python -c "import sys, torch, transformers, habitat, habitat_sim; print(\"versions=python:%s torch:%s cuda:%s transformers:%s habitat:%s habitat_sim:%s\" % (sys.version.split()[0], torch.__version__, torch.version.cuda, transformers.__version__, getattr(habitat, \"__version__\", \"unknown\"), getattr(habitat_sim, \"__version__\", \"unknown\")))"
             scripts/etpr1_rae_runtime_exec.sh python run.py \
                 --exp_name "$EXP_NAME" \
@@ -170,11 +227,14 @@ evaluate_checkpoint() {
                 RESULTS_DIR "$EVAL_ROOT/results/" \
                 MODEL.pretrained_path "$PRETRAIN_PATH" \
                 MODEL.RGB_ENCODER.precision ambient \
+                "${extra_config_args[@]}" \
                 2>&1 | python -u scripts/filter_habitat_startup_noise.py
             exit ${PIPESTATUS[0]}
         '
     exit_code=$?
     set -e
+    flock -u "$gpu_lock_fd"
+    exec {gpu_lock_fd}>&-
     if [ "$exit_code" -ne 0 ]; then
         echo "checkpoint_failed_at=$(date --iso-8601=seconds) iter=$iteration exit_code=$exit_code"
         return 1

@@ -199,6 +199,21 @@ class RLTrainer(BaseVLNCETrainer):
             )
         )
 
+    def _strict_rng_resume_enabled(self):
+        return bool(
+            getattr(
+                getattr(getattr(self, "config", None), "IL", None),
+                "strict_rng_resume",
+                False,
+            )
+        )
+
+    def _rxr_native_cls_joint_enabled(self):
+        cfg = self._active_lookahead_config()
+        return self._native_cls_joint_enabled() and str(
+            getattr(cfg, "checkpoint_format_version", "")
+        ) == "etpr1-rxr-native-cls-e24-joint-v1"
+
     def _e24_joint_head_state_module(self):
         module = self.e24_joint_head
         if module is None:
@@ -288,6 +303,8 @@ class RLTrainer(BaseVLNCETrainer):
         }
         if self._native_cls_joint_enabled():
             expected.update(self._native_cls_provenance_fields())
+            if self._rxr_native_cls_joint_enabled():
+                expected.update(self._rxr_native_cls_provenance_fields())
         else:
             expected["nwm_heads_sha256"] = str(
                 self.config.MODEL.RAENWM.head_checkpoint_sha256
@@ -331,6 +348,8 @@ class RLTrainer(BaseVLNCETrainer):
         }
         if self._native_cls_joint_enabled():
             provenance.update(self._native_cls_provenance_fields())
+            if self._rxr_native_cls_joint_enabled():
+                provenance.update(self._rxr_native_cls_provenance_fields())
         else:
             provenance["nwm_heads_sha256"] = str(
                 self.config.MODEL.RAENWM.head_checkpoint_sha256
@@ -362,6 +381,33 @@ class RLTrainer(BaseVLNCETrainer):
             "base_loss_weight": 1.0,
             "adjusted_loss_weight": float(cfg.e24_loss_weight),
         }
+
+    def _rxr_native_cls_provenance_fields(self):
+        dataset = self.config.TASK_CONFIG.DATASET
+        simulator = self.config.TASK_CONFIG.SIMULATOR
+        return {
+            "task_type": "rxr",
+            "base_selection_manifest_sha256": str(
+                self._active_lookahead_config().base_selection_manifest_sha256
+            ),
+            "dataset_roles": [str(value) for value in dataset.ROLES],
+            "dataset_languages": [str(value) for value in dataset.LANGUAGES],
+            "rgb_hfov": int(simulator.RGB_SENSOR.HFOV),
+            "expert_policy": str(self.config.IL.expert_policy),
+            "max_text_len": int(self.config.IL.max_text_len),
+            "max_traj_len": int(self.config.IL.max_traj_len),
+        }
+
+    def _validate_rxr_base_checkpoint(self, checkpoint):
+        saved_config = checkpoint.get("config")
+        saved_model = getattr(saved_config, "MODEL", None)
+        if str(getattr(saved_model, "task_type", "")).lower() != "rxr":
+            raise ValueError("RxR joint new-run requires an ordinary RxR checkpoint")
+        saved_active = getattr(saved_model, "ACTIVE_LOOKAHEAD", None)
+        if bool(getattr(saved_active, "enabled", False)):
+            raise ValueError("RxR joint new-run base must not contain active lookahead")
+        if checkpoint.get("e24_joint_state_dict") is not None:
+            raise ValueError("RxR joint new-run base unexpectedly contains E24 state")
 
     def _initialize_e24_joint_head(self, checkpoint=None):
         if not self._active_lookahead_enabled():
@@ -839,7 +885,11 @@ class RLTrainer(BaseVLNCETrainer):
                 "format_version": (
                     4
                     if self._native_cls_joint_enabled()
-                    else (3 if self._active_lookahead_enabled() else 2)
+                    else (
+                        3
+                        if self._active_lookahead_enabled()
+                        else (5 if self._strict_rng_resume_enabled() else 2)
+                    )
                 ),
                 "iteration": iteration,
                 "model_checkpoint": os.path.basename(checkpoint_path),
@@ -860,6 +910,16 @@ class RLTrainer(BaseVLNCETrainer):
                 ]
                 training_state["nwm_generator_states"] = [
                     rank_state["nwm_generator_state"] for rank_state in ranks
+                ]
+            elif self._strict_rng_resume_enabled():
+                ranks = episode_iterator_state.get("ranks")
+                if not isinstance(ranks, list) or len(ranks) != self.world_size:
+                    raise ValueError(
+                        "strict resumable checkpoint requires one rank state "
+                        "per training rank"
+                    )
+                training_state["rng_states"] = [
+                    rank_state["rng_state"] for rank_state in ranks
                 ]
             training_state_path = os.path.join(
                 self.config.CHECKPOINT_FOLDER,
@@ -914,17 +974,18 @@ class RLTrainer(BaseVLNCETrainer):
             "num_envs": int(self.envs.num_envs),
             "environments": environment_states,
         }
-        if self._native_cls_joint_enabled():
-            if self.raenwm_runtime is None:
-                raise RuntimeError(
-                    "native CLS checkpoint capture requires initialized NWM runtime"
-                )
+        if self._native_cls_joint_enabled() or self._strict_rng_resume_enabled():
             local_state["rng_state"] = {
                 "python": random.getstate(),
                 "numpy": np.random.get_state(),
                 "torch": torch.get_rng_state(),
                 "cuda": torch.cuda.get_rng_state(self.device),
             }
+        if self._native_cls_joint_enabled():
+            if self.raenwm_runtime is None:
+                raise RuntimeError(
+                    "native CLS checkpoint capture requires initialized NWM runtime"
+                )
             local_state["nwm_generator_state"] = (
                 self.raenwm_runtime.generator.get_state()
             )
@@ -1197,6 +1258,8 @@ class RLTrainer(BaseVLNCETrainer):
                             f"expected={self._active_lookahead_config().base_checkpoint_sha256} "
                             f"actual={actual_base_sha}"
                         )
+                    if self._rxr_native_cls_joint_enabled():
+                        self._validate_rxr_base_checkpoint(ckpt_dict)
                 else:
                     self._validate_e24_joint_provenance(ckpt_dict)
             if self._raenwm_enabled() and not self._active_lookahead_enabled():
@@ -1385,7 +1448,7 @@ class RLTrainer(BaseVLNCETrainer):
                 training_state_format = training_state.get(
                     "format_version", 1
                 )
-                if training_state_format not in (1, 2, 3, 4):
+                if training_state_format not in (1, 2, 3, 4, 5):
                     raise ValueError(
                         "Unsupported SFT training-state format: "
                         f"{training_state_format!r}"
@@ -1448,6 +1511,26 @@ class RLTrainer(BaseVLNCETrainer):
                         self._pending_nwm_generator_state = (
                             generator_states[self.local_rank]
                         )
+                elif self._strict_rng_resume_enabled():
+                    if training_state_format != 5:
+                        raise ValueError(
+                            "strict SFT requeue requires training-state format 5"
+                        )
+                    rng_states = training_state.get("rng_states")
+                    if (
+                        not isinstance(rng_states, list)
+                        or len(rng_states) != self.world_size
+                    ):
+                        raise ValueError(
+                            "strict SFT training state is missing per-rank RNG state"
+                        )
+                    rng_state = rng_states[self.local_rank]
+                    random.setstate(rng_state["python"])
+                    np.random.set_state(rng_state["numpy"])
+                    torch.set_rng_state(rng_state["torch"])
+                    torch.cuda.set_rng_state(
+                        rng_state["cuda"], device=self.device
+                    )
                 episode_iterator_state = training_state.get(
                     "episode_iterator_state"
                 )

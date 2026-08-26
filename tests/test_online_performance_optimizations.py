@@ -349,6 +349,59 @@ def test_r2r_teacher_action_uses_cached_goal_distance():
     assert action.tolist() == [2]
 
 
+class _RxrTeacherEnv:
+    num_envs = 3
+
+    def __init__(self):
+        self.calls = []
+
+    def current_episodes(self):
+        return [
+            SimpleNamespace(episode_id="stop"),
+            SimpleNamespace(episode_id="empty"),
+            SimpleNamespace(episode_id="move"),
+        ]
+
+    def call_at(self, index, name, arguments):
+        self.calls.append((index, name, arguments))
+        assert index == 2
+        assert name == "ghost_dist_to_ref"
+        assert arguments["ref_path"] == [[0, 0, 0], [1, 0, 0]]
+        return "g1"
+
+
+def test_rxr_teacher_action_uses_ndtw_reference_path_and_candidate_index():
+    trainer = object.__new__(RLTrainer)
+    trainer.config = SimpleNamespace(IL=SimpleNamespace(expert_policy="ndtw"))
+    trainer.device = torch.device("cpu")
+    trainer.envs = _RxrTeacherEnv()
+    trainer.gt_data = {
+        "stop": {"locations": []},
+        "empty": {"locations": []},
+        "move": {"locations": [[0, 0, 0], [1, 0, 0]]},
+    }
+    trainer.gmaps = [
+        SimpleNamespace(ghost_real_pos={}),
+        SimpleNamespace(ghost_real_pos={}),
+        SimpleNamespace(
+            ghost_real_pos={
+                "g0": [np.asarray([1.0, 0.0, 0.0])],
+                "g1": [np.asarray([2.0, 0.0, 0.0])],
+            }
+        ),
+    ]
+
+    action = trainer._teacher_action_new(
+        [[None], [None], [None, "g0", "g1"]],
+        [False, True, False],
+        is_train=True,
+        current_goal_distances=[1.0, 10.0, 10.0],
+    )
+
+    assert action.tolist() == [0, -100, 2]
+    assert len(trainer.envs.calls) == 1
+
+
 class _EvalOnlyModule:
     def eval(self):
         return self

@@ -42,7 +42,7 @@ validate_settings() {
 
 sync_checkpoint() {
     local checkpoint=$1 base iteration training_state source_size remote_size
-    local incoming remote_checkpoint
+    local source_sha remote_sha incoming remote_checkpoint ready_marker
     base=${checkpoint##*/}
     iteration=${base#ckpt.iter}
     iteration=${iteration%.pth}
@@ -50,12 +50,22 @@ sync_checkpoint() {
     [ -s "$training_state" ] || return 0
 
     remote_checkpoint=${DEST_DIR}/${base}
+    ready_marker=${remote_checkpoint}.sha256
+    source_sha=$(sha256sum -- "$checkpoint" | awk '{print $1}')
     if remote_size=$(ssh -n -o BatchMode=yes "$DEST_HOST" \
         "test -s '$remote_checkpoint' && stat -c %s '$remote_checkpoint'" \
         2>/dev/null); then
         source_size=$(stat -c %s "$checkpoint")
         if [ "$remote_size" = "$source_size" ]; then
-            return 0
+            remote_sha=$(ssh -n -o BatchMode=yes "$DEST_HOST" \
+                "sha256sum '$remote_checkpoint' | awk '{print \$1}'")
+            if [ "$remote_sha" = "$source_sha" ]; then
+                ssh -n -o BatchMode=yes "$DEST_HOST" \
+                    "printf '%s  %s\n' '$source_sha' '$base' >'$ready_marker.tmp.$$' && mv '$ready_marker.tmp.$$' '$ready_marker'"
+                return 0
+            fi
+            echo "remote_sha_mismatch_at=$(date --iso-8601=seconds) iter=$iteration local=$source_sha remote=$remote_sha"
+            return 1
         fi
         echo "remote_size_mismatch_at=$(date --iso-8601=seconds) iter=$iteration local=$source_size remote=$remote_size"
         return 1
@@ -71,9 +81,15 @@ sync_checkpoint() {
         echo "sync_failed_at=$(date --iso-8601=seconds) iter=$iteration reason=size_mismatch local=$source_size remote=$remote_size"
         return 1
     fi
+    remote_sha=$(ssh -n -o BatchMode=yes "$DEST_HOST" \
+        "sha256sum '$incoming' | awk '{print \$1}'")
+    if [ "$remote_sha" != "$source_sha" ]; then
+        echo "sync_failed_at=$(date --iso-8601=seconds) iter=$iteration reason=sha256_mismatch local=$source_sha remote=$remote_sha"
+        return 1
+    fi
     ssh -n -o BatchMode=yes "$DEST_HOST" \
-        "chmod 0644 '$incoming' && mv '$incoming' '$remote_checkpoint'"
-    echo "sync_finished_at=$(date --iso-8601=seconds) iter=$iteration bytes=$source_size destination=$remote_checkpoint"
+        "chmod 0644 '$incoming' && mv '$incoming' '$remote_checkpoint' && printf '%s  %s\n' '$source_sha' '$base' >'$ready_marker.tmp.$$' && mv '$ready_marker.tmp.$$' '$ready_marker'"
+    echo "sync_finished_at=$(date --iso-8601=seconds) iter=$iteration bytes=$source_size sha256=$source_sha destination=$remote_checkpoint"
 }
 
 run_worker() {

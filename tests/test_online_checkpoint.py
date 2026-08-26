@@ -113,16 +113,18 @@ def test_server_r2r_sft_job_uses_requested_batch_and_schedule_defaults():
     required_tokens = (
         "SFT_ITERS=${ETPR1_R2R_SFT_ITERS:-2000}",
         "GRADIENT_ACCUMULATION_STEPS=${ETPR1_R2R_SFT_GRADIENT_ACCUMULATION_STEPS:-1}",
-        "--nproc_per_node=2",
-        "GPU_NUMBERS 2",
-        "NUM_ENVIRONMENTS 8",
-        "IL.batch_size 8",
+        "NPROC_PER_NODE=${ETPR1_R2R_SFT_NPROC_PER_NODE:-2}",
+        "NUM_ENVIRONMENTS=${ETPR1_R2R_SFT_NUM_ENVIRONMENTS:-8}",
+        "BATCH_SIZE=${ETPR1_R2R_SFT_BATCH_SIZE:-8}",
+        'GPU_NUMBERS "$NPROC_PER_NODE"',
+        'NUM_ENVIRONMENTS "$NUM_ENVIRONMENTS"',
+        'IL.batch_size "$BATCH_SIZE"',
         'IL.gradient_accumulation_steps "$GRADIENT_ACCUMULATION_STEPS"',
         'IL.iters "$SFT_ITERS"',
         'IL.checkpoint_sync_enabled "$CHECKPOINT_SYNC_ENABLED"',
         'IL.checkpoint_sync_destination "$CHECKPOINT_SYNC_DESTINATION"',
-        "IL.sample_ratio 0.75",
-        "IL.decay_interval 3000",
+        "SAMPLE_RATIO=${ETPR1_R2R_SFT_SAMPLE_RATIO:-0.75}",
+        "DECAY_INTERVAL=${ETPR1_R2R_SFT_DECAY_INTERVAL:-3000}",
     )
     for token in required_tokens:
         assert token in source

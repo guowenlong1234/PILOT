@@ -16,10 +16,13 @@ EXP_NAME=${ETPR1_R2R_EVAL_EXP_NAME:-$(basename -- "$CKPT_DIR")_eval_watch}
 RESULT_DIR=${EVAL_ROOT}/results/${EXP_NAME}/eval_results
 PRETRAIN_PATH=${ETPR1_R2R_EVAL_PRETRAIN_PATH:-pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768_raw_cls_20260810/best/model_best_step_220000.pt}
 NUM_ENVIRONMENTS=${ETPR1_R2R_EVAL_NUM_ENVIRONMENTS:-8}
+EPISODE_COUNT=${ETPR1_R2R_EVAL_EPISODE_COUNT:--1}
 POLL_SECONDS=${ETPR1_R2R_EVAL_POLL_SECONDS:-30}
 RETRY_SECONDS=${ETPR1_R2R_EVAL_RETRY_SECONDS:-60}
 GPU_IDLE_LIMIT_MIB=${ETPR1_R2R_EVAL_GPU_IDLE_LIMIT_MIB:-1024}
+GPU_LOCK_FILE=${ETPR1_EVAL_GPU_LOCK_FILE:-/tmp/etpr1-eval-gpu.lock}
 BLOCKING_PROCESS_PATTERN=${ETPR1_R2R_EVAL_BLOCKING_PROCESS_PATTERN:-}
+READY_SHA_REQUIRED=${ETPR1_R2R_EVAL_READY_SHA_REQUIRED:-False}
 CHECKPOINT_ORDER=${ETPR1_R2R_EVAL_CHECKPOINT_ORDER:-$(checkpoint_order_from_config "$CONFIG_FILE")}
 PID_FILE=${EVAL_ROOT}/watch.pid
 LOG_FILE=${EVAL_ROOT}/watch.log
@@ -84,6 +87,19 @@ evaluate_checkpoint() {
     iteration=${iteration%.pth}
     result=${RESULT_DIR}/stats_ckpt_${iteration}_val_unseen.json
     valid_result "$result" && return 0
+    if [ "$READY_SHA_REQUIRED" = True ]; then
+        ready=${checkpoint}.sha256
+        [ -s "$ready" ] || {
+            echo "checkpoint_waiting_at=$(date --iso-8601=seconds) iter=$iteration reason=missing_sha_ready_marker"
+            return 2
+        }
+        expected_sha=$(awk 'NR==1 {print $1}' "$ready")
+        actual_sha=$(sha256sum -- "$checkpoint" | awk '{print $1}')
+        [ "$actual_sha" = "$expected_sha" ] || {
+            echo "checkpoint_failed_at=$(date --iso-8601=seconds) iter=$iteration reason=sha256_mismatch expected=$expected_sha actual=$actual_sha"
+            return 1
+        }
+    fi
 
     if protected_task_running; then
         echo "checkpoint_waiting_at=$(date --iso-8601=seconds) iter=$iteration reason=protected_etpnav_task"
@@ -98,6 +114,19 @@ evaluate_checkpoint() {
         return 2
     fi
 
+    exec {gpu_lock_fd}>"$GPU_LOCK_FILE"
+    if ! flock -n "$gpu_lock_fd"; then
+        echo "checkpoint_waiting_at=$(date --iso-8601=seconds) iter=$iteration reason=eval_gpu_lock_busy"
+        exec {gpu_lock_fd}>&-
+        return 2
+    fi
+    if protected_task_running || blocking_project_task_running || ! gpu_is_idle; then
+        echo "checkpoint_waiting_at=$(date --iso-8601=seconds) iter=$iteration reason=resource_changed_after_lock"
+        flock -u "$gpu_lock_fd"
+        exec {gpu_lock_fd}>&-
+        return 2
+    fi
+
     echo "checkpoint_started_at=$(date --iso-8601=seconds) iter=$iteration path=$checkpoint"
     set +e
     docker exec \
@@ -106,6 +135,8 @@ evaluate_checkpoint() {
         -e EXP_NAME="$EXP_NAME" \
         -e PRETRAIN_PATH="$PRETRAIN_PATH" \
         -e NUM_ENVIRONMENTS="$NUM_ENVIRONMENTS" \
+        -e CONFIG_FILE="$CONFIG_FILE" \
+        -e EPISODE_COUNT="$EPISODE_COUNT" \
         "$CONTAINER" bash -lc '
             source /home/a6000/gwl/miniconda3/etc/profile.d/conda.sh
             conda activate etpr1_rae
@@ -116,14 +147,14 @@ evaluate_checkpoint() {
             scripts/etpr1_rae_runtime_exec.sh python run.py \
                 --exp_name "$EXP_NAME" \
                 --run-type eval \
-                --exp-config run_r2r/iter_train_rae_dino.yaml \
+                --exp-config "$CONFIG_FILE" \
                 SIMULATOR_GPU_IDS "[0]" \
                 TORCH_GPU_IDS "[0]" \
                 TORCH_GPU_ID 0 \
                 GPU_NUMBERS 1 \
                 NUM_ENVIRONMENTS "$NUM_ENVIRONMENTS" \
                 EVAL.CKPT_PATH_DIR "$CKPT_PATH" \
-                EVAL.EPISODE_COUNT -1 \
+                EVAL.EPISODE_COUNT "$EPISODE_COUNT" \
                 EVAL.SAVE_RESULTS True \
                 TASK_CONFIG.SIMULATOR.HABITAT_SIM_V0.ALLOW_SLIDING True \
                 CHECKPOINT_FOLDER "$EVAL_ROOT/checkpoints/" \
@@ -136,6 +167,8 @@ evaluate_checkpoint() {
         '
     exit_code=$?
     set -e
+    flock -u "$gpu_lock_fd"
+    exec {gpu_lock_fd}>&-
     if [ "$exit_code" -ne 0 ]; then
         echo "checkpoint_failed_at=$(date --iso-8601=seconds) iter=$iteration exit_code=$exit_code"
         return 1
@@ -201,6 +234,7 @@ show_status() {
     echo "results=$(find "$RESULT_DIR" -maxdepth 1 -type f -name 'stats_ckpt_*_val_unseen.json' 2>/dev/null | wc -l)"
     echo "checkpoint_order=$CHECKPOINT_ORDER config=$CONFIG_FILE"
     echo "blocking_process_pattern=${BLOCKING_PROCESS_PATTERN:-none}"
+    echo "episode_count=$EPISODE_COUNT config=$CONFIG_FILE"
     nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu \
         --format=csv,noheader
     [ -f "$LOG_FILE" ] && tail -n 25 "$LOG_FILE"
