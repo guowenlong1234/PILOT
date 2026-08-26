@@ -37,6 +37,18 @@ from vlnce_baselines.common.runtime_compat import (
 from vlnce_baselines.common.amp_utils import step_amp_optimizer
 from vlnce_baselines.common.utils import extract_instruction_tokens
 from vlnce_baselines.models.graph_utils import GraphMap, MAX_DIST
+from vlnce_baselines.nwm.active_lookahead.grpo_policy import (
+    FROZEN_LOOKAHEAD_DISTRIBUTION_VERSION,
+    frozen_lookahead_probs,
+    resolve_executed_actions,
+)
+from vlnce_baselines.nwm.frozen_grpo import FrozenLookaheadController
+from vlnce_baselines.nwm.rgb_fusion import clone_wp_outputs_candidate_rgb
+from vlnce_baselines.nwm.active_lookahead.offline_checkpoint import sha256_file
+from vlnce_baselines.nwm.active_lookahead.dino_cwp_future import (
+    PREDICTED_FUTURE_DIAGNOSTIC_NAMES,
+    summarize_predicted_future_diagnostics,
+)
 from vlnce_baselines.models.checkpoint_utils import (
     navigation_state_dict,
     report_navigation_incompatible_keys,
@@ -92,9 +104,15 @@ class RLTrainer(BaseVLNCETrainer):
         self.dropout_in_sampling = config.GRPO.dropout_in_sampling
         self.dropout_rate = config.GRPO.dropout_rate
         self.scaler = GradScaler(enabled=self.enable_amp)
+        self.frozen_lookahead = None
+        self._lookahead_diagnostic_totals = defaultdict(float)
         print("config.GRPO:\n", config.GRPO)
         print(f"GRPO params: grpo_epsilon {self.grpo_epsilon}, grpo_beta {self.grpo_beta}, max_grad_norm {self.max_grad_norm}, grpo_update_epochs {self.grpo_update_epochs} \
               enable_amp {self.enable_amp}, need_ref_policy {self.need_ref_policy}, enable_all_dropouts {self.enable_all_dropouts}, dropout_rate {self.dropout_rate}, dropout_in_sampling {self.dropout_in_sampling}")
+
+    def _frozen_lookahead_enabled(self):
+        active = getattr(self.config.MODEL, "ACTIVE_LOOKAHEAD", None)
+        return bool(active is not None and getattr(active, "enabled", False))
     def _make_dirs(self):
         if self.config.local_rank == 0:
             self._make_ckpt_dir()
@@ -103,7 +121,7 @@ class RLTrainer(BaseVLNCETrainer):
 
     def _resume_contract(self):
         grpo = self.config.GRPO
-        return {
+        contract = {
             "world_size": int(self.config.GPU_NUMBERS),
             "num_environments_per_rank": int(self.config.NUM_ENVIRONMENTS),
             "batch_size": int(grpo.batch_size),
@@ -135,6 +153,21 @@ class RLTrainer(BaseVLNCETrainer):
                 self.config.TASK_CONFIG.SIMULATOR.HABITAT_SIM_V0.ALLOW_SLIDING
             ),
         }
+        if self._frozen_lookahead_enabled():
+            contract.update({
+                "lookahead_distribution_version": str(
+                    grpo.lookahead_distribution_version
+                ),
+                "reference_checkpoint_sha256": str(
+                    grpo.reference_checkpoint_sha256
+                ),
+                "active_checkpoint_format": str(
+                    self.config.MODEL.ACTIVE_LOOKAHEAD.checkpoint_format_version
+                ),
+                "train_rgb_fusion": bool(grpo.train_rgb_fusion),
+                "train_top5_e24": bool(grpo.train_top5_e24),
+            })
+        return contract
 
     def _launch_checkpoint_sync(self, checkpoint_path):
         enabled = bool(
@@ -179,6 +212,17 @@ class RLTrainer(BaseVLNCETrainer):
             "config": self.config,
             "iteration": iteration,
         }
+        if self._frozen_lookahead_enabled():
+            if self.frozen_lookahead is None:
+                raise RuntimeError("active GRPO has no frozen lookahead controller")
+            self.frozen_lookahead.assert_frozen()
+            checkpoint.update(self.frozen_lookahead.checkpoint_payload())
+            checkpoint["grpo_lookahead_distribution_version"] = (
+                FROZEN_LOOKAHEAD_DISTRIBUTION_VERSION
+            )
+            checkpoint["grpo_reference_checkpoint_sha256"] = str(
+                self.config.GRPO.reference_checkpoint_sha256
+            )
         checkpoint_path = os.path.join(
             self.config.CHECKPOINT_FOLDER, f"ckpt.iter{iteration}.pth"
         )
@@ -188,7 +232,9 @@ class RLTrainer(BaseVLNCETrainer):
                     "Resumable GRPO checkpoints require runtime state"
                 )
             training_state = {
-                "format_version": 1,
+                "format_version": (
+                    2 if self._frozen_lookahead_enabled() else 1
+                ),
                 "iteration": iteration,
                 "model_checkpoint": os.path.basename(checkpoint_path),
                 "resume_contract": self._resume_contract(),
@@ -251,19 +297,32 @@ class RLTrainer(BaseVLNCETrainer):
             "torch_rng_state": torch.get_rng_state(),
             "cuda_rng_state": torch.cuda.get_rng_state(self.device),
         }
+        if self._frozen_lookahead_enabled():
+            generator_state = self.frozen_lookahead.generator_state()
+            if generator_state is None:
+                raise ValueError(
+                    "active GRPO runtime state requires an NWM generator state"
+                )
+            local_state["nwm_generator_state"] = generator_state
         if self.world_size > 1:
             rank_states = [None for _ in range(self.world_size)]
             distr.all_gather_object(rank_states, local_state)
         else:
             rank_states = [local_state]
         return {
-            "format_version": 1,
+            "format_version": (
+                2 if self._frozen_lookahead_enabled() else 1
+            ),
             "world_size": int(self.world_size),
             "ranks": rank_states,
         }
 
     def _restore_runtime_state(self, state):
-        if not isinstance(state, dict) or state.get("format_version") != 1:
+        expected_format = 2 if self._frozen_lookahead_enabled() else 1
+        if (
+            not isinstance(state, dict)
+            or state.get("format_version") != expected_format
+        ):
             raise ValueError("Unsupported or missing GRPO runtime state")
         if state.get("world_size") != self.world_size:
             raise ValueError(
@@ -301,6 +360,11 @@ class RLTrainer(BaseVLNCETrainer):
         torch.cuda.set_rng_state(
             local_state["cuda_rng_state"], device=self.device
         )
+        if self._frozen_lookahead_enabled():
+            generator_state = local_state.get("nwm_generator_state")
+            if generator_state is None:
+                raise ValueError("active GRPO runtime state lacks NWM generator")
+            self.frozen_lookahead.set_pending_generator_state(generator_state)
         logger.info(
             "Restored exact GRPO runtime state for rank %d across %d "
             "environment(s)",
@@ -383,11 +447,12 @@ class RLTrainer(BaseVLNCETrainer):
         torch.cuda.set_device(self.device)
         if self.world_size > 1:
             distr.init_process_group(backend='nccl', init_method='env://')
-            self.device = self.config.TORCH_GPU_IDS[self.local_rank]
+            device_id = int(self.config.TORCH_GPU_IDS[self.local_rank])
+            self.device = torch.device("cuda", device_id)
             self.config.defrost()
-            self.config.TORCH_GPU_ID = self.config.TORCH_GPU_IDS[self.local_rank]
+            self.config.TORCH_GPU_ID = device_id
             self.config.freeze()
-            torch.cuda.set_device(self.device)
+            torch.cuda.set_device(device_id)
 
     def _init_envs(self):
         # for DDP to load different data
@@ -451,6 +516,88 @@ class RLTrainer(BaseVLNCETrainer):
                 self.policy.eval()
             else:
                 raise ValueError("Mode must be 'train' or 'eval'.")
+
+    @staticmethod
+    def _reference_state_dict(checkpoint):
+        state_dict = checkpoint.get("state_dict")
+        if not isinstance(state_dict, dict) or not state_dict:
+            raise ValueError("GRPO reference checkpoint has no state_dict")
+        normalized = OrderedDict()
+        for key, value in state_dict.items():
+            if key.startswith("net.module."):
+                key = key.replace("net.module.", "net.", 1)
+            normalized[key] = value
+        return normalized
+
+    def _load_active_reference_checkpoint(self):
+        path = str(self.config.GRPO.reference_ckpt_to_load).strip()
+        expected_sha = str(
+            self.config.GRPO.reference_checkpoint_sha256
+        ).strip().lower()
+        if not path:
+            raise ValueError(
+                "active GRPO requires GRPO.reference_ckpt_to_load"
+            )
+        if len(expected_sha) != 64:
+            raise ValueError(
+                "active GRPO requires a complete reference checkpoint SHA256"
+            )
+        actual_sha = sha256_file(path)
+        if actual_sha != expected_sha:
+            raise ValueError(
+                "GRPO reference checkpoint SHA256 mismatch: "
+                f"expected={expected_sha} actual={actual_sha}"
+            )
+        checkpoint = self.load_checkpoint(path, map_location="cpu")
+        return checkpoint
+
+    def _bind_active_source_identity(self, checkpoint):
+        saved_config = checkpoint.get("config")
+        saved_model = getattr(saved_config, "MODEL", None)
+        saved_active = getattr(saved_model, "ACTIVE_LOOKAHEAD", None)
+        if saved_active is None:
+            raise ValueError("active GRPO reference lacks saved lookahead config")
+        if str(getattr(saved_model, "task_type", "")).lower() != str(
+            self.config.MODEL.task_type
+        ).lower():
+            raise ValueError("active GRPO reference task identity mismatch")
+        self.config.defrost()
+        current_active = self.config.MODEL.ACTIVE_LOOKAHEAD
+        for name in (
+            "base_checkpoint_sha256",
+            "base_iteration",
+            "base_selection_manifest_sha256",
+        ):
+            if hasattr(saved_active, name):
+                setattr(current_active, name, getattr(saved_active, name))
+        self.config.freeze()
+
+    @staticmethod
+    def _validate_frozen_state_matches_reference(current, reference):
+        for field in (
+            "raenwm_rgb_fusion_adapter_state_dict",
+            "e24_joint_state_dict",
+        ):
+            current_state = current.get(field)
+            reference_state = reference.get(field)
+            if not isinstance(current_state, dict) or not isinstance(
+                reference_state, dict
+            ):
+                raise ValueError(f"active GRPO checkpoint lacks {field}")
+            if set(current_state) != set(reference_state):
+                raise ValueError(
+                    f"active GRPO frozen state keys changed for {field}"
+                )
+            changed = [
+                name
+                for name in current_state
+                if not torch.equal(current_state[name], reference_state[name])
+            ]
+            if changed:
+                raise ValueError(
+                    f"active GRPO frozen tensors changed for {field}: "
+                    f"{changed[:8]}"
+                )
             
     def _initialize_policy(
         self,
@@ -499,8 +646,13 @@ class RLTrainer(BaseVLNCETrainer):
         if self.config.GPU_NUMBERS > 1:
             print('Using', self.config.GPU_NUMBERS,'GPU!')
             # find_unused_parameters=False fix ddp bug
-            self.policy.net = DDP(self.policy.net.to(self.device), device_ids=[self.device],
-                output_device=self.device, find_unused_parameters=False, broadcast_buffers=False)
+            self.policy.net = DDP(
+                self.policy.net.to(self.device),
+                device_ids=[self.device.index],
+                output_device=self.device.index,
+                find_unused_parameters=False,
+                broadcast_buffers=False,
+            )
 
         not_trainable_parameters = [p for p in self.policy.parameters() if not p.requires_grad]
         trainable_parameters = [(n, p) for n, p in self.policy.named_parameters() if p.requires_grad]
@@ -535,6 +687,19 @@ class RLTrainer(BaseVLNCETrainer):
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
 
         self._resume_training_state = None
+        reference_checkpoint = None
+        if self._frozen_lookahead_enabled():
+            if not load_from_ckpt:
+                raise ValueError(
+                    "active GRPO must start from a native joint-SFT checkpoint"
+                )
+            if str(self.config.GRPO.lookahead_distribution_version) != (
+                FROZEN_LOOKAHEAD_DISTRIBUTION_VERSION
+            ):
+                raise ValueError("unsupported frozen-lookahead distribution")
+            reference_checkpoint = self._load_active_reference_checkpoint()
+            self._bind_active_source_identity(reference_checkpoint)
+            validate_rgb_checkpoint_metadata(reference_checkpoint, config)
         if load_from_ckpt:
             training_state = None
             if config.GRPO.is_requeue:
@@ -555,7 +720,23 @@ class RLTrainer(BaseVLNCETrainer):
                 ckpt_path = config.GRPO.ckpt_to_load
             ckpt_dict = self.load_checkpoint(ckpt_path, map_location="cpu")
             validate_rgb_checkpoint_metadata(ckpt_dict, config)
+            if self._frozen_lookahead_enabled() and not config.GRPO.is_requeue:
+                current_sha = sha256_file(ckpt_path)
+                if current_sha != str(config.GRPO.reference_checkpoint_sha256):
+                    raise ValueError(
+                        "new active GRPO must start from its immutable reference "
+                        "joint-SFT checkpoint"
+                    )
             if config.GRPO.is_requeue:
+                expected_training_format = (
+                    2 if self._frozen_lookahead_enabled() else 1
+                )
+                if training_state.get("format_version") != expected_training_format:
+                    raise ValueError(
+                        "GRPO training-state format mismatch: "
+                        f"expected={expected_training_format} "
+                        f"actual={training_state.get('format_version')}"
+                    )
                 required_training_state = {
                     "iteration",
                     "model_checkpoint",
@@ -621,6 +802,35 @@ class RLTrainer(BaseVLNCETrainer):
                 config,
             )
 
+            if self._frozen_lookahead_enabled():
+                self._validate_frozen_state_matches_reference(
+                    ckpt_dict, reference_checkpoint
+                )
+                self.frozen_lookahead = FrozenLookaheadController(
+                    self, ckpt_dict
+                )
+                reference_provenance = reference_checkpoint.get(
+                    "e24_joint_provenance"
+                )
+                if (
+                    reference_provenance
+                    != self.frozen_lookahead.e24_joint_provenance
+                ):
+                    raise ValueError(
+                        "current and reference lookahead provenance differ"
+                    )
+                recorded_reference = ckpt_dict.get(
+                    "grpo_reference_checkpoint_sha256"
+                )
+                if (
+                    config.GRPO.is_requeue
+                    and recorded_reference
+                    != str(config.GRPO.reference_checkpoint_sha256)
+                ):
+                    raise ValueError(
+                        "GRPO checkpoint references a different SFT policy"
+                    )
+
             if config.GRPO.is_requeue:
                 self.optimizer.load_state_dict(training_state["optim_state"])
                 self.scheduler.load_state_dict(
@@ -643,9 +853,17 @@ class RLTrainer(BaseVLNCETrainer):
             self.ref_policy.eval() 
             for param in self.ref_policy.parameters():
                 param.requires_grad = False
-            if self.config.GPU_NUMBERS > 1:
+            if self._frozen_lookahead_enabled():
+                incompatible_reference = self.ref_policy.load_state_dict(
+                    self._reference_state_dict(reference_checkpoint),
+                    strict=False,
+                )
+                report_navigation_incompatible_keys(
+                    incompatible_reference,
+                    config,
+                )
+            elif self.config.GPU_NUMBERS > 1:
                 policy_state_dict = self.policy.state_dict()
-                from collections import OrderedDict
                 new_state_dict = OrderedDict()
                 for k, v in policy_state_dict.items():
                     if k.startswith("net.module."):
@@ -878,6 +1096,7 @@ class RLTrainer(BaseVLNCETrainer):
             self.policy.net.rgb_encoder.eval()
             self.policy.net.depth_encoder.eval()
         self.waypoint_predictor.eval()
+        self._lookahead_diagnostic_totals = defaultdict(float)
 
         if self.local_rank < 1:
             pbar = tqdm.trange(interval, leave=False, dynamic_ncols=True)
@@ -893,6 +1112,35 @@ class RLTrainer(BaseVLNCETrainer):
 
             if self.local_rank < 1:
                 pbar.set_postfix({'iter': f'{idx+1}/{interval}'})
+
+        if self._frozen_lookahead_enabled():
+            values = torch.tensor(
+                [
+                    self._lookahead_diagnostic_totals[name]
+                    for name in PREDICTED_FUTURE_DIAGNOSTIC_NAMES
+                ],
+                dtype=torch.float64,
+                device=self.device,
+            )
+            if self.world_size > 1:
+                distr.all_reduce(values, op=distr.ReduceOp.SUM)
+            summary = summarize_predicted_future_diagnostics(dict(zip(
+                PREDICTED_FUTURE_DIAGNOSTIC_NAMES,
+                values.tolist(),
+            )))
+            for name, value in summary.items():
+                self.logs[f"lookahead_{name}"].append(float(value))
+            rgb_fused = torch.tensor(
+                self._lookahead_diagnostic_totals["rgb_fused_candidates"],
+                dtype=torch.float64,
+                device=self.device,
+            )
+            if self.world_size > 1:
+                distr.all_reduce(rgb_fused, op=distr.ReduceOp.SUM)
+            self.logs["lookahead_rgb_fused_candidates"].append(
+                float(rgb_fused.item())
+            )
+            self.frozen_lookahead.assert_frozen()
 
         return deepcopy(self.logs)
     
@@ -966,6 +1214,10 @@ class RLTrainer(BaseVLNCETrainer):
                             taken_actions_cpu = step_data["action"]
                             old_probs_at_sampling_cpu = step_data["probs"]
                             active_indices_in_original_batch = step_data["indices"] 
+                            policy_action_valid_cpu = step_data.get(
+                                "policy_action_valid",
+                                torch.ones_like(taken_actions_cpu, dtype=torch.bool),
+                            )
 
                             if not active_indices_in_original_batch:
                                 print("ERROR!! NO active_indices_in_original_batch")
@@ -984,6 +1236,11 @@ class RLTrainer(BaseVLNCETrainer):
                             nav_inputs_cuda['mode'] = 'navigation' 
 
                             taken_actions_cuda = taken_actions_cpu.to(self.device)
+                            policy_action_valid = policy_action_valid_cpu.to(
+                                self.device, dtype=torch.bool
+                            )
+                            if not bool(policy_action_valid.any()):
+                                continue
                     
                         current_policy_outputs = self.policy.net(**nav_inputs_cuda)
                         if self.need_ref_policy:
@@ -992,11 +1249,45 @@ class RLTrainer(BaseVLNCETrainer):
 
                         with autocast(enabled=False):
                             current_logits = current_policy_outputs['global_logits']
-                            current_log_probs = F.log_softmax(current_logits, dim=1)
+                            if self._frozen_lookahead_enabled():
+                                frozen_delta = step_data[
+                                    "frozen_lookahead_delta"
+                                ].to(self.device, non_blocking=True)
+                                valid_action_mask = step_data[
+                                    "valid_action_mask"
+                                ].to(
+                                    self.device,
+                                    dtype=torch.bool,
+                                    non_blocking=True,
+                                )
+                                current_probs = frozen_lookahead_probs(
+                                    current_logits,
+                                    frozen_delta,
+                                    valid_action_mask,
+                                )
+                                current_log_probs = torch.log(
+                                    current_probs.clamp_min(1e-9)
+                                )
+                            else:
+                                current_log_probs = F.log_softmax(
+                                    current_logits, dim=1
+                                )
                             current_log_probs_taken_action = current_log_probs.gather(1, taken_actions_cuda.unsqueeze(1)).squeeze(1)
                             if self.need_ref_policy:
                                 ref_logits = ref_policy_outputs['global_logits']
-                                ref_log_probs = F.log_softmax(ref_logits, dim=1)
+                                if self._frozen_lookahead_enabled():
+                                    ref_probs = frozen_lookahead_probs(
+                                        ref_logits,
+                                        frozen_delta,
+                                        valid_action_mask,
+                                    )
+                                    ref_log_probs = torch.log(
+                                        ref_probs.clamp_min(1e-9)
+                                    )
+                                else:
+                                    ref_log_probs = F.log_softmax(
+                                        ref_logits, dim=1
+                                    )
                                 ref_log_probs_taken_action_no_grad = ref_log_probs.gather(1, taken_actions_cuda.unsqueeze(1)).squeeze(1)
 
                             step_advantages_for_active_envs = torch.tensor(
@@ -1004,11 +1295,36 @@ class RLTrainer(BaseVLNCETrainer):
                                 device=self.device, dtype=torch.float32
                             )
 
+                            current_log_probs_taken_action = (
+                                current_log_probs_taken_action[
+                                    policy_action_valid
+                                ]
+                            )
+                            taken_actions_cuda = taken_actions_cuda[
+                                policy_action_valid
+                            ]
+                            step_advantages_for_active_envs = (
+                                step_advantages_for_active_envs[
+                                    policy_action_valid
+                                ]
+                            )
+                            old_probs_for_valid = old_probs_at_sampling_cpu.to(
+                                self.device
+                            )[policy_action_valid]
+                            if self.need_ref_policy:
+                                ref_log_probs_taken_action_no_grad = (
+                                    ref_log_probs_taken_action_no_grad[
+                                        policy_action_valid
+                                    ]
+                                )
+
                             if self.grpo_update_epochs == -1:
                                 old_log_probs_taken_action = current_log_probs_taken_action.detach()
                             else:
                                 old_log_probs_taken_action = torch.log(
-                                    old_probs_at_sampling_cpu.to(self.device).gather(1, taken_actions_cuda.unsqueeze(1)).squeeze(1) + 1e-9
+                                    old_probs_for_valid.gather(
+                                        1, taken_actions_cuda.unsqueeze(1)
+                                    ).squeeze(1) + 1e-9
                                 )
                             
                             ratio = torch.exp(current_log_probs_taken_action - old_log_probs_taken_action)
@@ -1183,6 +1499,13 @@ class RLTrainer(BaseVLNCETrainer):
                                self.config.MODEL.merge_ghost, 
                                ghost_aug) for _ in range(self.envs.num_envs)]
         prev_vp = [None] * self.envs.num_envs
+        if self._frozen_lookahead_enabled():
+            self.frozen_lookahead.initialize_runtime(self.envs.num_envs)
+            if (
+                bool(self.config.MODEL.ACTIVE_LOOKAHEAD.smoke_freeze_check)
+                and self.frozen_lookahead._frozen_manifest is None
+            ):
+                self.frozen_lookahead.capture_frozen_manifest()
 
         for stepk in range(self.max_len): 
             total_actions += self.envs.num_envs
@@ -1195,44 +1518,141 @@ class RLTrainer(BaseVLNCETrainer):
                 observations = batch,
                 in_train = (mode == 'train' and self.config.GRPO.waypoint_aug),
             )
+            front_latents = None
+            front_cls = None
+            if self._frozen_lookahead_enabled():
+                pano_latents = wp_outputs.pop("pano_rae_latents", None)
+                pano_raw_cls = wp_outputs.pop("pano_rae_raw_cls", None)
+                if pano_latents is None or pano_raw_cls is None:
+                    raise RuntimeError(
+                        "active GRPO waypoint output lacks native NWM features"
+                    )
+                front_latents = pano_latents[:, 0].detach()
+                front_cls = pano_raw_cls[:, 0].detach()
 
-            # pano encoder
-            vp_inputs = self._vp_feature_variable(wp_outputs)
-            vp_inputs.update({
-                'mode': 'panorama',
-            })
-            pano_embeds, pano_masks = self.policy.net(**vp_inputs)
-            avg_pano_embeds = torch.sum(pano_embeds * pano_masks.unsqueeze(2), 1) / \
-                              torch.sum(pano_masks, 1, keepdim=True)
+            candidate_q0_records = None
+            if self._frozen_lookahead_enabled():
+                navigation_states = self.envs.call(
+                    ["get_navigation_state"] * self.envs.num_envs,
+                    [
+                        {
+                            "angles": wp_outputs['cand_angles'][i],
+                            "forwards": wp_outputs['cand_distances'][i],
+                            "include_current_goal_distance": False,
+                            "include_candidate_goal_distances": False,
+                        }
+                        for i in range(self.envs.num_envs)
+                    ],
+                )
+                cur_pos = [state["position"] for state in navigation_states]
+                cur_ori = [state["orientation"] for state in navigation_states]
+                cand_real_pos = [
+                    state["candidate_positions"] for state in navigation_states
+                ]
+                candidate_q0_records = [
+                    state["candidate_q0_records"] for state in navigation_states
+                ]
+            else:
+                cur_pos, cur_ori = self.get_pos_ori()
+                cand_real_pos = []
+                for i in range(self.envs.num_envs):
+                    cand_real_pos.append([
+                        self.envs.call_at(
+                            i,
+                            "get_cand_real_pos",
+                            {"angle": ang, "forward": dis},
+                        )
+                        for ang, dis in zip(
+                            wp_outputs['cand_angles'][i],
+                            wp_outputs['cand_distances'][i],
+                        )
+                    ])
 
-            cur_pos, cur_ori = self.get_pos_ori()
             cur_vp, cand_vp, cand_pos = [], [], []
+            candidate_previews = []
             for i in range(self.envs.num_envs):
                 cur_vp_i, cand_vp_i, cand_pos_i = self.gmaps[i].identify_node(
                     cur_pos[i], cur_ori[i], wp_outputs['cand_angles'][i], wp_outputs['cand_distances'][i]
                 )
                 cur_vp.append(cur_vp_i)
                 cand_vp.append(cand_vp_i)
-                cand_pos.append(cand_pos_i) 
-            
-            if mode == 'train' or self.config.VIDEO_OPTION:
-                cand_real_pos = []
-                for i in range(self.envs.num_envs):
-                    cand_real_pos_i = [
-                        self.envs.call_at(i, "get_cand_real_pos", {"angle": ang, "forward": dis})
-                        for ang, dis in zip(wp_outputs['cand_angles'][i], wp_outputs['cand_distances'][i])
-                    ]
-                    cand_real_pos.append(cand_real_pos_i)
-            else:
-                cand_real_pos = [None] * self.envs.num_envs
+                cand_pos.append(cand_pos_i)
+                if self._frozen_lookahead_enabled():
+                    candidate_previews.append(
+                        self.gmaps[i].preview_candidate_mapping(
+                            cur_vp_i, cur_pos[i], cand_vp_i, cand_pos_i
+                        )
+                    )
 
+            if self._frozen_lookahead_enabled():
+                raw_wp_outputs = clone_wp_outputs_candidate_rgb(wp_outputs)
+                self.frozen_lookahead.inject_rgb(
+                    front_latents,
+                    front_cls,
+                    cur_pos,
+                    cur_ori,
+                    candidate_previews,
+                    wp_outputs,
+                )
+                self._lookahead_diagnostic_totals[
+                    "rgb_fused_candidates"
+                ] += float(sum(
+                    int(item.get("fused_candidate_count", 0))
+                    for item in (
+                        self.frozen_lookahead.last_rgb_diagnostics or []
+                    )
+                ))
+                vp_inputs = self._vp_feature_variable(wp_outputs)
+                vp_inputs.update({'mode': 'panorama'})
+                pano_embeds, pano_masks = self.policy.net(**vp_inputs)
+                node_pano_embeds, node_pano_masks = pano_embeds, pano_masks
+                if self.frozen_lookahead.rgb_was_applied():
+                    raw_vp_inputs = self._vp_feature_variable(raw_wp_outputs)
+                    raw_vp_inputs.update({'mode': 'panorama'})
+                    node_pano_embeds, node_pano_masks = self.policy.net(
+                        **raw_vp_inputs
+                    )
+                avg_pano_embeds = torch.sum(
+                    node_pano_embeds * node_pano_masks.unsqueeze(2), 1
+                ) / torch.sum(node_pano_masks, 1, keepdim=True)
+            else:
+                vp_inputs = self._vp_feature_variable(wp_outputs)
+                vp_inputs.update({'mode': 'panorama'})
+                pano_embeds, pano_masks = self.policy.net(**vp_inputs)
+                avg_pano_embeds = torch.sum(
+                    pano_embeds * pano_masks.unsqueeze(2), 1
+                ) / torch.sum(pano_masks, 1, keepdim=True)
+
+            batch_candidate_to_ghost = []
             for i in range(self.envs.num_envs):
                 cur_embeds = avg_pano_embeds[i]
                 cand_embeds = pano_embeds[i][vp_inputs['nav_types'][i]==1] 
-                self.gmaps[i].update_graph(prev_vp[i], stepk+1,
+                candidate_to_ghost = self.gmaps[i].update_graph(prev_vp[i], stepk+1,
                                         cur_vp[i], cur_pos[i], cur_embeds,
                                         cand_vp[i], cand_pos[i], cand_embeds,
-                                        cand_real_pos[i])
+                                        cand_real_pos[i],
+                                        candidate_preview=(
+                                            candidate_previews[i]
+                                            if self._frozen_lookahead_enabled()
+                                            else None
+                                        ))
+                batch_candidate_to_ghost.append(candidate_to_ghost)
+
+            if self._frozen_lookahead_enabled():
+                for i, gmap in enumerate(self.gmaps):
+                    gmap.record_persistent_q0_candidates(
+                        batch_candidate_to_ghost[i],
+                        cand_pos[i],
+                        cand_real_pos[i],
+                        candidate_q0_records[i],
+                        wp_outputs['cand_img_idxes'][i],
+                        wp_outputs['cand_distances'][i],
+                        source_front_vp=str(cur_vp[i]),
+                        source_high_level_step=int(stepk),
+                    )
+                self.frozen_lookahead.record_source_contexts(
+                    stepk=stepk, cur_vp=cur_vp
+                )
 
             nav_inputs = self._nav_gmap_variable(cur_vp, cur_pos, cur_ori, task_type)
             nav_inputs.update({
@@ -1247,14 +1667,40 @@ class RLTrainer(BaseVLNCETrainer):
             nav_inputs_copy_for_cpu = self.copy_nav_inputs_dict(nav_inputs)
             nav_outs = self.policy.net(**nav_inputs_for_gpu)
             nav_logits = nav_outs['global_logits']
-            nav_probs = F.softmax(nav_logits, 1)
+            frozen_delta = torch.zeros_like(nav_logits)
+            valid_action_mask = torch.isfinite(nav_logits)
+            if self._frozen_lookahead_enabled():
+                (
+                    frozen_delta,
+                    _query_counts,
+                    lookahead_diagnostics,
+                ) = self.frozen_lookahead.build_frozen_deltas(
+                    nav_inputs=nav_inputs_for_gpu,
+                    nav_outs=nav_outs,
+                    txt_embeds=txt_embeds,
+                    txt_masks=txt_masks,
+                )
+                for name, value in lookahead_diagnostics.items():
+                    self._lookahead_diagnostic_totals[name] += float(value)
+                nav_probs = frozen_lookahead_probs(
+                    nav_logits,
+                    frozen_delta,
+                    valid_action_mask,
+                )
+            else:
+                nav_probs = F.softmax(nav_logits, 1)
 
             for i, gmap in enumerate(self.gmaps):
                 gmap.node_stop_scores[cur_vp[i]] = nav_probs[i, 0].data.item() 
 
             # determine action
             c = torch.distributions.Categorical(nav_probs)
-            a_t = c.sample().detach()
+            sampled_a_t = c.sample().detach()
+            a_t, policy_action_valid = resolve_executed_actions(
+                sampled_a_t,
+                no_vp_left=no_vp_left,
+                final_step=(stepk == self.max_len - 1),
+            )
             cpu_a_t = a_t.cpu().numpy()
 
             # ------------------- start store data ------------------- 
@@ -1263,6 +1709,16 @@ class RLTrainer(BaseVLNCETrainer):
             data_this_stepk["action"] = a_t.detach().cpu() 
             data_this_stepk["probs"] = nav_probs.detach().cpu() 
             data_this_stepk["indices"] = copy.deepcopy(not_done_index) 
+            data_this_stepk["policy_action_valid"] = (
+                policy_action_valid.detach().cpu()
+            )
+            if self._frozen_lookahead_enabled():
+                data_this_stepk["frozen_lookahead_delta"] = (
+                    frozen_delta.detach().cpu()
+                )
+                data_this_stepk["valid_action_mask"] = (
+                    valid_action_mask.detach().cpu()
+                )
             data_this_sample['data_buffer'].append(data_this_stepk)
             # ------------------- end store data ------------------- 
 
@@ -1270,7 +1726,7 @@ class RLTrainer(BaseVLNCETrainer):
             env_actions = []
             use_tryout = (self.config.GRPO.tryout and not self.config.TASK_CONFIG.SIMULATOR.HABITAT_SIM_V0.ALLOW_SLIDING) 
             for i, gmap in enumerate(self.gmaps):
-                if cpu_a_t[i] == 0 or stepk == self.max_len - 1 or no_vp_left[i]: 
+                if cpu_a_t[i] == 0:
                     vp_stop_scores = [(vp, stop_score) for vp, stop_score in gmap.node_stop_scores.items()]
                     stop_scores = [s[1] for s in vp_stop_scores]
                     stop_vp = vp_stop_scores[np.argmax(stop_scores)][0]
@@ -1387,6 +1843,8 @@ class RLTrainer(BaseVLNCETrainer):
                     if dones[i]:
                         stopped_env_index = not_done_index.pop(i)
                         self.envs.pause_at(i)
+                        if self._frozen_lookahead_enabled():
+                            self.frozen_lookahead.pause_at(i)
                         observations.pop(i)
                         self.gmaps.pop(i)
                         prev_vp.pop(i)

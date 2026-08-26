@@ -70,6 +70,13 @@ _C.GRPO.keep_last_train_states = 3
 _C.GRPO.keep_train_state_every_n_iters = 0
 _C.GRPO.checkpoint_sync_enabled = False
 _C.GRPO.checkpoint_sync_destination = ""
+_C.GRPO.reference_ckpt_to_load = ""
+_C.GRPO.reference_checkpoint_sha256 = ""
+_C.GRPO.lookahead_distribution_version = (
+    "etpr1-frozen-lookahead-stop-mass-v1"
+)
+_C.GRPO.train_rgb_fusion = False
+_C.GRPO.train_top5_e24 = False
 # -----------------------------------------------------------------------------
 # IMITATION LEARNING CONFIG
 # -----------------------------------------------------------------------------

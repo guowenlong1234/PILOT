@@ -1,0 +1,44 @@
+TRAINER_NAME: GRPO-R1
+
+TENSORBOARD_DIR: data/logs/active_lookahead/rxr_native_cls_e24_grpo/tensorboard/
+CHECKPOINT_FOLDER: data/logs/active_lookahead/rxr_native_cls_e24_grpo/checkpoints/
+RESULTS_DIR: data/logs/active_lookahead/rxr_native_cls_e24_grpo/results/
+ONLY_LAST_SAVEALL: True
+
+GRPO:
+  load_from_ckpt: True
+  is_requeue: False
+  ckpt_to_load: ''
+  reference_ckpt_to_load: ''
+  reference_checkpoint_sha256: ''
+  lookahead_distribution_version: etpr1-frozen-lookahead-stop-mass-v1
+  train_rgb_fusion: False
+  train_top5_e24: False
+  resumable_checkpoints: True
+  keep_last_train_states: 3
+  keep_train_state_every_n_iters: 250
+  checkpoint_sync_enabled: False
+  checkpoint_sync_destination: ''
+  iters: 1500
+  log_every: 10
+  lr: 2.0e-5
+  batch_size: 2
+  max_traj_len: 25
+  max_text_len: 250
+  loc_noise: 0.5
+  waypoint_aug: True
+  ghost_aug: 0.0
+  back_algo: teleport
+  tryout: True
+  warmup_iters: 0
+  min_lr_ratio: 0.25
+  sample_num: 8
+  grpo_epsilon: 0.2
+  grpo_beta: 0.04
+  max_grad_norm: 2.0
+  update_epochs: 1
+  dropout_rate: 0.1
+  train_all: False
+  enable_amp: False
+  enable_all_dropouts: True
+  dropout_in_sampling: True
