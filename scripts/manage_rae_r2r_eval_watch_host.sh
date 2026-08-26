@@ -146,7 +146,11 @@ evaluate_checkpoint() {
             export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8
             extra_config_args=()
             case "$CONFIG_FILE" in
-                *run_rxr/*) extra_config_args=(TASK_CONFIG.DATASET.SUFFIX "") ;;
+                *run_rxr/*) extra_config_args=(
+                    TASK_CONFIG.DATASET.SUFFIX ""
+                    TASK_CONFIG.DATASET.ROLES "['guide']"
+                    TASK_CONFIG.DATASET.LANGUAGES "['en-US','en-IN','hi-IN','te-IN']"
+                ) ;;
             esac
             scripts/etpr1_rae_runtime_exec.sh python run.py \
                 --exp_name "$EXP_NAME" \

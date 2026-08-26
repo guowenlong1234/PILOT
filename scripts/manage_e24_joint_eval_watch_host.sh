@@ -202,6 +202,8 @@ PY
                     [ "${#provenance_fields[@]}" -eq 4 ]
                     extra_config_args=(
                         TASK_CONFIG.DATASET.SUFFIX ""
+                        TASK_CONFIG.DATASET.ROLES "['guide']"
+                        TASK_CONFIG.DATASET.LANGUAGES "['en-US','en-IN','hi-IN','te-IN']"
                         MODEL.ACTIVE_LOOKAHEAD.base_checkpoint_sha256 "${provenance_fields[0]}"
                         MODEL.ACTIVE_LOOKAHEAD.base_iteration "${provenance_fields[1]}"
                         MODEL.ACTIVE_LOOKAHEAD.base_selection_manifest_sha256 "${provenance_fields[2]}"

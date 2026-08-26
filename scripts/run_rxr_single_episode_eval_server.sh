@@ -95,6 +95,8 @@ set +e
     TENSORBOARD_DIR "$OUTPUT_ROOT/tensorboard/" \
     RESULTS_DIR "$OUTPUT_ROOT/results/" \
     TASK_CONFIG.DATASET.SUFFIX "" \
+    TASK_CONFIG.DATASET.ROLES "['guide']" \
+    TASK_CONFIG.DATASET.LANGUAGES "['en-US','en-IN','hi-IN','te-IN']" \
     "${extra_config_args[@]}" \
     2>&1 | "$PYTHON_BIN" -u scripts/filter_habitat_startup_noise.py | tee -a "$LOG_FILE"
 exit_code=${PIPESTATUS[0]}

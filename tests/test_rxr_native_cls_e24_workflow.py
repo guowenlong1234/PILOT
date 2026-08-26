@@ -93,6 +93,10 @@ def test_rxr_management_scripts_are_isolated_and_selection_is_explicit():
         'MODEL.ACTIVE_LOOKAHEAD.base_iteration "$BASE_ITERATION"',
         "base_selection_manifest_sha256",
         'IL.sample_ratio_iteration_offset "$BASE_ITERATION"',
+        "TASK_CONFIG.SIMULATOR.HABITAT_SIM_V0.ALLOW_SLIDING True",
+        "TASK_CONFIG.DATASET.SUFFIX _90",
+        "TASK_CONFIG.DATASET.ROLES",
+        "TASK_CONFIG.DATASET.LANGUAGES",
     ):
         assert token in launcher
 
@@ -237,6 +241,7 @@ def test_rxr_eval_and_sync_wrappers_enforce_safe_defaults():
     assert "ready_marker" in sync
     assert "EVAL.EPISODE_COUNT 1" in single
     assert 'TASK_CONFIG.DATASET.SUFFIX ""' in single
+    assert "TASK_CONFIG.DATASET.LANGUAGES" in single
     assert "oracle_q1_calls" in single
 
 

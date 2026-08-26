@@ -87,6 +87,13 @@ resume_args=(IL.load_from_ckpt False IL.is_requeue False)
 if [ "$MODE" = resume ]; then
     resume_args=(IL.load_from_ckpt True IL.is_requeue True)
 fi
+task_dataset_args=()
+case "$CONFIG_FILE" in
+    run_rxr/*) task_dataset_args=(
+        TASK_CONFIG.DATASET.ROLES "['guide']"
+        TASK_CONFIG.DATASET.LANGUAGES "['en-US','en-IN','hi-IN','te-IN']"
+    ) ;;
+esac
 
 {
     echo "run_started_at=$(date --iso-8601=seconds)"
@@ -146,6 +153,7 @@ set +e
     "${resume_args[@]}" \
     TASK_CONFIG.SIMULATOR.HABITAT_SIM_V0.ALLOW_SLIDING True \
     TASK_CONFIG.DATASET.SUFFIX _90 \
+    "${task_dataset_args[@]}" \
     ONLY_LAST_SAVEALL True \
     CHECKPOINT_FOLDER "$OUTPUT_ROOT/checkpoints/" \
     TENSORBOARD_DIR "$OUTPUT_ROOT/tensorboard/" \
