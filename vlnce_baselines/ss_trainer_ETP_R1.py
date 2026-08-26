@@ -186,6 +186,15 @@ class RLTrainer(BaseVLNCETrainer):
         cfg = self._active_lookahead_config()
         return bool(cfg is not None and getattr(cfg, "enabled", False))
 
+    def _native_cls_joint_enabled(self):
+        return self._active_lookahead_enabled() and bool(
+            getattr(
+                getattr(getattr(self.config, "MODEL", None), "RAENWM", None),
+                "predict_cls_token",
+                False,
+            )
+        )
+
     def _e24_joint_head_state_module(self):
         module = self.e24_joint_head
         if module is None:
@@ -254,7 +263,6 @@ class RLTrainer(BaseVLNCETrainer):
             "e24_init_checkpoint_sha256": str(cfg.e24_joint_init_sha256),
             "dino_cwp_checkpoint_sha256": str(cfg.dino_cwp_checkpoint_sha256),
             "nwm_checkpoint_sha256": str(self.config.MODEL.RAENWM.checkpoint_sha256),
-            "nwm_heads_sha256": str(self.config.MODEL.RAENWM.head_checkpoint_sha256),
             "nwm_stat_sha256": str(self.config.MODEL.RAENWM.stat_sha256),
             "source": "dino_cwp_nwm",
             "context_strategy": "fixed_initial",
@@ -274,6 +282,12 @@ class RLTrainer(BaseVLNCETrainer):
                 cfg.e24_source_base_manifest_sha256
             ),
         }
+        if self._native_cls_joint_enabled():
+            expected.update(self._native_cls_provenance_fields())
+        else:
+            expected["nwm_heads_sha256"] = str(
+                self.config.MODEL.RAENWM.head_checkpoint_sha256
+            )
         mismatches = {
             key: (provenance.get(key), value)
             for key, value in expected.items()
@@ -285,7 +299,7 @@ class RLTrainer(BaseVLNCETrainer):
 
     def _e24_joint_provenance(self):
         cfg = self._active_lookahead_config()
-        return {
+        provenance = {
             "base_checkpoint_sha256": str(cfg.base_checkpoint_sha256),
             "base_iteration": int(cfg.base_iteration),
             "e24_init_checkpoint_sha256": str(cfg.e24_joint_init_sha256),
@@ -294,9 +308,6 @@ class RLTrainer(BaseVLNCETrainer):
             ),
             "dino_cwp_checkpoint_sha256": str(cfg.dino_cwp_checkpoint_sha256),
             "nwm_checkpoint_sha256": str(self.config.MODEL.RAENWM.checkpoint_sha256),
-            "nwm_heads_sha256": str(
-                self.config.MODEL.RAENWM.head_checkpoint_sha256
-            ),
             "nwm_stat_sha256": str(self.config.MODEL.RAENWM.stat_sha256),
             "source": "dino_cwp_nwm",
             "q0_contract": "temporary_action_same_island_navmesh",
@@ -313,6 +324,39 @@ class RLTrainer(BaseVLNCETrainer):
                 self.config.IL.sample_ratio_zero_threshold
             ),
             "delta_scale": float(cfg.e24_train_delta_scale),
+        }
+        if self._native_cls_joint_enabled():
+            provenance.update(self._native_cls_provenance_fields())
+        else:
+            provenance["nwm_heads_sha256"] = str(
+                self.config.MODEL.RAENWM.head_checkpoint_sha256
+            )
+        return provenance
+
+    def _native_cls_provenance_fields(self):
+        cfg = self._active_lookahead_config()
+        nwm_cfg = self.config.MODEL.RAENWM
+        return {
+            "predict_cls_token": True,
+            "token_count": 257,
+            "nwm_inference_config_sha256": sha256_file(nwm_cfg.config_path),
+            "nwm_num_steps": int(nwm_cfg.num_steps),
+            "dino_model_dir": str(self.config.MODEL.RGB_ENCODER.model_dir),
+            "rgb_adapter": {
+                "input_dim": 768,
+                "hidden_dim": 768,
+                "alpha": float(nwm_cfg.rgb_fusion_alpha),
+                "gate_bias_init": float(nwm_cfg.rgb_fusion_gate_bias_init),
+            },
+            "top5_cls_adapter": {
+                "feature_dim": 768,
+                "condition_hidden_dim": int(
+                    cfg.top5_cls_condition_hidden_dim
+                ),
+                "condition_xy": "normalized_nwm_action",
+            },
+            "base_loss_weight": 1.0,
+            "adjusted_loss_weight": float(cfg.e24_loss_weight),
         }
 
     def _initialize_e24_joint_head(self, checkpoint=None):
@@ -526,6 +570,12 @@ class RLTrainer(BaseVLNCETrainer):
             )
             self._raenwm_head_state_override = None
         self.raenwm_runtime.reset(num_envs)
+        pending_generator_state = getattr(
+            self, "_pending_nwm_generator_state", None
+        )
+        if pending_generator_state is not None:
+            self.raenwm_runtime.generator.set_state(pending_generator_state)
+            self._pending_nwm_generator_state = None
         self.last_raenwm_prediction = None
         self._raenwm_context_source_logged = False
         return self.raenwm_runtime
@@ -783,7 +833,9 @@ class RLTrainer(BaseVLNCETrainer):
                 )
             training_state = {
                 "format_version": (
-                    3 if self._active_lookahead_enabled() else 2
+                    4
+                    if self._native_cls_joint_enabled()
+                    else (3 if self._active_lookahead_enabled() else 2)
                 ),
                 "iteration": iteration,
                 "model_checkpoint": os.path.basename(checkpoint_path),
@@ -792,6 +844,19 @@ class RLTrainer(BaseVLNCETrainer):
                 "scaler_state": self.scaler.state_dict(),
                 "episode_iterator_state": episode_iterator_state,
             }
+            if self._native_cls_joint_enabled():
+                ranks = episode_iterator_state.get("ranks")
+                if not isinstance(ranks, list) or len(ranks) != self.world_size:
+                    raise ValueError(
+                        "native CLS resumable checkpoint requires one rank state "
+                        "per training rank"
+                    )
+                training_state["rng_states"] = [
+                    rank_state["rng_state"] for rank_state in ranks
+                ]
+                training_state["nwm_generator_states"] = [
+                    rank_state["nwm_generator_state"] for rank_state in ranks
+                ]
             training_state_path = os.path.join(
                 self.config.CHECKPOINT_FOLDER,
                 "train_states",
@@ -845,6 +910,20 @@ class RLTrainer(BaseVLNCETrainer):
             "num_envs": int(self.envs.num_envs),
             "environments": environment_states,
         }
+        if self._native_cls_joint_enabled():
+            if self.raenwm_runtime is None:
+                raise RuntimeError(
+                    "native CLS checkpoint capture requires initialized NWM runtime"
+                )
+            local_state["rng_state"] = {
+                "python": random.getstate(),
+                "numpy": np.random.get_state(),
+                "torch": torch.get_rng_state(),
+                "cuda": torch.cuda.get_rng_state(self.device),
+            }
+            local_state["nwm_generator_state"] = (
+                self.raenwm_runtime.generator.get_state()
+            )
         if self.world_size > 1:
             rank_states = [None for _ in range(self.world_size)]
             distr.all_gather_object(rank_states, local_state)
@@ -1157,11 +1236,29 @@ class RLTrainer(BaseVLNCETrainer):
             'name': 'navigation_no_decay'}
         ]
         if self._active_lookahead_enabled() and self._e24_joint_training:
+            active_cfg = self._active_lookahead_config()
+            wrapper = self._e24_joint_wrapper_state_module()
+            if wrapper.cls_adapter is not None:
+                optimizer_grouped_parameters.append(
+                    {
+                        'params': list(wrapper.cls_adapter.parameters()),
+                        'weight_decay': float(
+                            active_cfg.top5_cls_weight_decay
+                        ),
+                        'lr': float(active_cfg.top5_cls_lr),
+                        'name': 'top5_cls_adapter',
+                    }
+                )
+                e24_parameters = list(wrapper.head.parameters())
+            else:
+                e24_parameters = list(wrapper.parameters())
             optimizer_grouped_parameters.append(
                 {
-                    'params': list(self.e24_joint_head.parameters()),
-                    'weight_decay': 0.01,
-                    'lr': float(self._active_lookahead_config().e24_head_lr),
+                    'params': e24_parameters,
+                    'weight_decay': float(
+                        getattr(active_cfg, 'e24_head_weight_decay', 0.01)
+                    ),
+                    'lr': float(active_cfg.e24_head_lr),
                     'name': 'e24',
                 }
             )
@@ -1284,31 +1381,68 @@ class RLTrainer(BaseVLNCETrainer):
                 training_state_format = training_state.get(
                     "format_version", 1
                 )
-                if training_state_format not in (1, 2, 3):
+                if training_state_format not in (1, 2, 3, 4):
                     raise ValueError(
                         "Unsupported SFT training-state format: "
                         f"{training_state_format!r}"
                     )
                 if self._active_lookahead_enabled():
-                    if training_state_format != 3:
+                    expected_format = 4 if self._native_cls_joint_enabled() else 3
+                    if training_state_format != expected_format:
                         raise ValueError(
-                            "active-lookahead requeue requires training-state format 3"
+                            "active-lookahead requeue requires training-state "
+                            f"format {expected_format}"
                         )
                     saved_groups = training_state["optim_state"].get(
                         "param_groups", []
                     )
                     current_groups = self.optimizer.param_groups
-                    if len(saved_groups) != 3 or len(current_groups) != 3:
+                    expected_names = (
+                        [
+                            "navigation_decay",
+                            "navigation_no_decay",
+                            "top5_cls_adapter",
+                            "e24",
+                        ]
+                        if self._native_cls_joint_enabled()
+                        else ["navigation_decay", "navigation_no_decay", "e24"]
+                    )
+                    if (
+                        len(saved_groups) != len(expected_names)
+                        or len(current_groups) != len(expected_names)
+                    ):
                         raise ValueError(
-                            "active-lookahead requeue requires exactly three optimizer groups"
+                            "active-lookahead requeue optimizer group count "
+                            "does not match the experiment contract"
                         )
-                    if [group.get("name") for group in saved_groups] != [
-                        "navigation_decay",
-                        "navigation_no_decay",
-                        "e24",
-                    ]:
+                    if [group.get("name") for group in saved_groups] != expected_names:
                         raise ValueError(
                             "active-lookahead optimizer group names do not match the joint contract"
+                        )
+                    if self._native_cls_joint_enabled():
+                        rng_states = training_state.get("rng_states")
+                        generator_states = training_state.get(
+                            "nwm_generator_states"
+                        )
+                        if (
+                            not isinstance(rng_states, list)
+                            or len(rng_states) != self.world_size
+                            or not isinstance(generator_states, list)
+                            or len(generator_states) != self.world_size
+                        ):
+                            raise ValueError(
+                                "native CLS training-state format 4 is missing "
+                                "per-rank RNG or NWM generator state"
+                            )
+                        rng_state = rng_states[self.local_rank]
+                        random.setstate(rng_state["python"])
+                        np.random.set_state(rng_state["numpy"])
+                        torch.set_rng_state(rng_state["torch"])
+                        torch.cuda.set_rng_state(
+                            rng_state["cuda"], device=self.device
+                        )
+                        self._pending_nwm_generator_state = (
+                            generator_states[self.local_rank]
                         )
                 episode_iterator_state = training_state.get(
                     "episode_iterator_state"
@@ -2028,13 +2162,25 @@ class RLTrainer(BaseVLNCETrainer):
                 self.scaler.unscale_(self.optimizer)
             self._synchronize_raenwm_rgb_fusion_gradients()
             if joint_training:
+                wrapper = self._e24_joint_wrapper_state_module()
                 e24_grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.e24_joint_head.parameters(),
+                    wrapper.head.parameters(),
                     float(
                         self._active_lookahead_config().e24_head_gradient_clip_norm
                     ),
                 )
                 self.logs["E24_grad_norm"].append(float(e24_grad_norm.cpu()))
+                if wrapper.cls_adapter is not None:
+                    adapter_grad_norm = torch.nn.utils.clip_grad_norm_(
+                        wrapper.cls_adapter.parameters(),
+                        float(
+                            self._active_lookahead_config()
+                            .top5_cls_gradient_clip_norm
+                        ),
+                    )
+                    self.logs["Top5_CLS_grad_norm"].append(
+                        float(adapter_grad_norm.cpu())
+                    )
             step_amp_optimizer(
                 self.scaler,
                 self.optimizer,

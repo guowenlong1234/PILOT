@@ -1,0 +1,21 @@
+# Frozen native-CLS RAE-NWM runtime. Large assets are supplied externally.
+model: CDiT-B/2
+context_size: 4
+predict_cls_token: true
+image_size: 224
+latent_dim: 768
+latent_size: 16
+token_count: 257
+head_width: 2048
+head_depth: 2
+head_num_heads: 16
+
+transport:
+  model_type: velocity
+  path_type: linear
+  loss_type: velocity
+  time_dist_type: uniform
+  time_dist_shift_disable: false
+  num_steps: 10
+  sampling_method: euler
+  final_only_euler: false

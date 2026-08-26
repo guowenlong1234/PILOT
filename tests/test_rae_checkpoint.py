@@ -967,6 +967,33 @@ def test_sft_captures_and_restores_all_local_episode_iterators():
     ]
 
 
+def test_native_sft_capture_includes_rng_and_nwm_generator(monkeypatch):
+    trainer = object.__new__(SftTrainer)
+    trainer.local_rank = 0
+    trainer.world_size = 1
+    trainer.device = 0
+    trainer.config = SimpleNamespace(
+        MODEL=SimpleNamespace(
+            RAENWM=SimpleNamespace(predict_cls_token=True),
+            ACTIVE_LOOKAHEAD=SimpleNamespace(enabled=True),
+        )
+    )
+    trainer.envs = _FakeVectorEnvs([{"worker": 0}])
+    generator = torch.Generator().manual_seed(123)
+    trainer.raenwm_runtime = SimpleNamespace(generator=generator)
+    cuda_state = torch.tensor([7], dtype=torch.uint8)
+    monkeypatch.setattr(
+        torch.cuda, "get_rng_state", lambda _device: cuda_state
+    )
+
+    captured = trainer._capture_episode_iterator_state()
+    local = captured["ranks"][0]
+
+    assert set(local["rng_state"]) == {"python", "numpy", "torch", "cuda"}
+    assert torch.equal(local["rng_state"]["cuda"], cuda_state)
+    assert torch.equal(local["nwm_generator_state"], generator.get_state())
+
+
 def test_sft_episode_restore_rejects_changed_parallelism():
     trainer = object.__new__(SftTrainer)
     trainer.local_rank = 0

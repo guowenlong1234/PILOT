@@ -296,12 +296,17 @@ class NwmPredictionRuntime:
                 "context_size": 4,
                 "image_size": 224,
                 "latent_dim": 768,
+                "token_count": 257,
             }
             for name, value in expected.items():
                 if int(self.predictor.config.get(name, -1)) != value:
                     raise ValueError(
                         f"native CLS NWM requires {name}={value}"
                     )
+            if int(getattr(config, "token_count", -1)) != 257:
+                raise ValueError(
+                    "MODEL.RAENWM.token_count must be 257 in native CLS mode"
+                )
         generator_device = self.device if self.device.type == "cuda" else torch.device("cpu")
         self.generator = torch.Generator(device=generator_device)
         self.generator.manual_seed(int(config.noise_seed))

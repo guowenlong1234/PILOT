@@ -3,9 +3,40 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import yaml
 
 
 ROOT = Path(__file__).parents[1]
+
+
+def test_native_cls_config_is_isolated_and_uses_v2_contract():
+    path = ROOT / "run_r2r/iter_train_rae_dino_native_cls_e24_joint.yaml"
+    config = yaml.safe_load(path.read_text())
+    nwm = config["MODEL"]["RAENWM"]
+    active = config["MODEL"]["ACTIVE_LOOKAHEAD"]
+
+    assert nwm["predict_cls_token"] is True
+    assert nwm["token_count"] == 257
+    assert nwm["checkpoint_sha256"] == (
+        "38b24af13b76ba8faef367559244c3a0401e0557e7c299870c273cbee8a07064"
+    )
+    assert "head_checkpoint_path" not in nwm
+    assert "head_checkpoint_sha256" not in nwm
+    assert nwm["rgb_fusion_gate_bias_init"] == 0.0
+    assert active["checkpoint_format_version"] == (
+        "etpr1-native-cls-e24-joint-v2"
+    )
+    assert active["top5_cls_lr"] == 1.0e-5
+    assert active["e24_head_lr"] == 5.0e-6
+
+    inference = yaml.safe_load(
+        (ROOT / "configs/nwm/raenwm_mp3d_fresh_cls.yaml").read_text()
+    )
+    assert inference["predict_cls_token"] is True
+    assert inference["token_count"] == 257
+    assert inference["transport"]["num_steps"] == 10
+    assert inference["transport"]["sampling_method"] == "euler"
+    assert inference["transport"]["final_only_euler"] is False
 
 
 def test_joint_config_and_launchers_fix_the_formal_contract():
