@@ -120,6 +120,7 @@ def test_active_grpo_launcher_pins_reference_and_joint_configs():
         'GRPO.reference_ckpt_to_load "$SOURCE_CHECKPOINT"',
         'GRPO.reference_checkpoint_sha256 "$SOURCE_SHA"',
         "MODEL.RAENWM.rgb_fusion_trainable False",
+        'CHECKPOINT_FOLDER "$OUTPUT_ROOT/checkpoints/"',
     ):
         assert token in launcher
     assert "<r2r|rxr>" in manager

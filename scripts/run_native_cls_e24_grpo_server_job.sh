@@ -109,9 +109,9 @@ set +e
     MODEL.RAENWM.rgb_fusion_trainable False \
     TASK_CONFIG.SIMULATOR.HABITAT_SIM_V0.ALLOW_SLIDING True \
     TASK_CONFIG.DATASET.SUFFIX _10 \
-    CHECKPOINT_FOLDER "$OUTPUT_ROOT/checkpoints/$EXP_NAME" \
-    TENSORBOARD_DIR "$OUTPUT_ROOT/tensorboard/$EXP_NAME" \
-    RESULTS_DIR "$OUTPUT_ROOT/results/$EXP_NAME" \
+    CHECKPOINT_FOLDER "$OUTPUT_ROOT/checkpoints/" \
+    TENSORBOARD_DIR "$OUTPUT_ROOT/tensorboard/" \
+    RESULTS_DIR "$OUTPUT_ROOT/results/" \
     2>&1 | "$PYTHON_BIN" -u scripts/filter_habitat_startup_noise.py \
     | tee -a "$LOG_FILE"
 exit_code=${PIPESTATUS[0]}
