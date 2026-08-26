@@ -325,6 +325,24 @@ def test_native_dummy_replay_covers_adapter_and_e24_parameters():
             condition_hidden_dim=4,
         ),
     )
+    dummy = make_e24_joint_dummy_batch(
+        topk=3,
+        feature_dim=8,
+        token_count=257,
+        native_cls=True,
+    )
+
+    result, _ = forward_e24_joint_batch(
+        module,
+        dummy,
+        loss_config=_loss_config(),
+    )
+    result.loss.backward()
+
+    assert all(
+        parameter.grad is not None and torch.count_nonzero(parameter.grad) == 0
+        for parameter in module.parameters()
+    )
 
 
 class _FixedNativeModule(torch.nn.Module):
@@ -438,24 +456,6 @@ def test_native_adjusted_loss_only_updates_adapter_and_e24():
     assert torch.count_nonzero(module.cls_adapter.fusion[-1].weight.grad) > 0
     for value in (owner, text, future, geometry, full_base, batch["q1_conditions"]):
         assert value.grad is None
-    dummy = make_e24_joint_dummy_batch(
-        topk=3,
-        feature_dim=8,
-        token_count=257,
-        native_cls=True,
-    )
-
-    result, _ = forward_e24_joint_batch(
-        module,
-        dummy,
-        loss_config=_loss_config(),
-    )
-    result.loss.backward()
-
-    assert all(
-        parameter.grad is not None and torch.count_nonzero(parameter.grad) == 0
-        for parameter in module.parameters()
-    )
 
 
 def test_stop_isolation_preserves_base_stop_and_cannot_create_stop():
