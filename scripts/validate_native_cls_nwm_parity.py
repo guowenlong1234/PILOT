@@ -154,8 +154,8 @@ def sample(
         "patch_tokens": tokens[:, 1:],
         "versions": {
             "python": platform.python_version(),
-            "torch": torch.__version__,
-            "cuda": torch.version.cuda,
+            "torch": str(torch.__version__),
+            "cuda": None if torch.version.cuda is None else str(torch.version.cuda),
         },
     }
     _save(output, output_path)
