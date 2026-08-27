@@ -23,6 +23,9 @@ def test_native_cls_config_is_isolated_and_uses_v2_contract():
     assert "head_checkpoint_path" not in nwm
     assert "head_checkpoint_sha256" not in nwm
     assert nwm["rgb_fusion_gate_bias_init"] == 0.0
+    assert config["IL"]["checkpoint_sync_destination"].endswith(
+        "native_cls_e24_joint_sft/checkpoints/etpr1_native_cls_e24_joint_sft"
+    )
     assert active["checkpoint_format_version"] == (
         "etpr1-native-cls-e24-joint-v2"
     )
@@ -51,6 +54,8 @@ def test_native_cls_smoke_and_single_episode_wrappers_are_isolated():
     for contract in (
         "iter_train_rae_dino_native_cls_e24_joint.yaml",
         "native_cls_e24_joint_smoke",
+        "ETPR1_NATIVE_CLS_SYNC_DESTINATION",
+        "native_cls_e24_joint_sft/checkpoints/${ETPR1_E24_JOINT_EXP_NAME}",
         "ETPR1_E24_JOINT_ITERS=2",
         "ETPR1_E24_JOINT_SYNC_ENABLED=False",
         "ETPR1_E24_JOINT_SMOKE_FREEZE_CHECK=True",
@@ -72,6 +77,25 @@ def test_native_cls_smoke_and_single_episode_wrappers_are_isolated():
         "ETPR1_E24_EVAL_NUM_ENVIRONMENTS=1",
     ):
         assert contract in single
+
+
+def test_native_cls_formal_eval_wrapper_uses_isolated_atomic_sync_directory():
+    wrapper = (
+        ROOT / "scripts/manage_rae_r2r_native_cls_e24_eval_watch_host.sh"
+    ).read_text()
+    for contract in (
+        "run_r2r/iter_train_rae_dino_native_cls_e24_joint.yaml",
+        "native_cls_e24_joint_sft/checkpoints/etpr1_native_cls_e24_joint_sft",
+        "native_cls_e24_joint_eval",
+        "etpr1_native_cls_e24_joint_eval_watch",
+        "ETPR1_E24_EVAL_NUM_ENVIRONMENTS",
+        "ETPR1_E24_EVAL_EXPECTED_CHECKPOINTS",
+        "ETPR1_E24_EVAL_SELECTION_ENABLED=True",
+        "ETPR1_E24_EVAL_CHECKPOINT_ORDER",
+        "ETPR1_E24_EVAL_READY_SHA_REQUIRED=False",
+        'manage_e24_joint_eval_watch_host.sh" "${1:-status}"',
+    ):
+        assert contract in wrapper
 
 
 def test_native_cls_parity_tool_pins_complete_sequence_comparison():
