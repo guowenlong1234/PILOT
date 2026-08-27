@@ -222,6 +222,64 @@ def test_predicted_future_source_never_calls_oracle_environment(monkeypatch):
     assert diagnostics["future_valid"] == 1.0
 
 
+def test_native_cls_base_stop_without_ghosts_skips_lookahead():
+    cfg = SimpleNamespace(
+        source="dino_cwp_nwm",
+        offline_topk=5,
+    )
+    trainer = SimpleNamespace(
+        device=torch.device("cpu"),
+        envs=SimpleNamespace(num_envs=1),
+        raenwm_runtime=SimpleNamespace(predict_cls_token=True),
+        _active_lookahead_config=lambda: cfg,
+        _e24_joint_head_state_module=lambda: _head().eval(),
+    )
+
+    deltas, counts, pack, diagnostics = build_e24_joint_step(
+        trainer,
+        nav_inputs={"gmap_vp_ids": [[None, "visited-node"]]},
+        nav_outs={
+            "global_logits": torch.tensor([[0.0, -torch.inf]]),
+            "gmap_embeds": torch.randn(1, 2, 8),
+        },
+        txt_embeds=torch.randn(1, 2, 8),
+        txt_masks=torch.ones(1, 2, dtype=torch.bool),
+    )
+
+    torch.testing.assert_close(deltas, torch.zeros_like(deltas))
+    assert counts == [0]
+    assert pack is None
+    assert all(value == 0.0 for value in diagnostics.values())
+
+
+def test_native_cls_base_move_without_executable_ghost_still_fails():
+    cfg = SimpleNamespace(
+        source="dino_cwp_nwm",
+        offline_topk=5,
+    )
+    trainer = SimpleNamespace(
+        device=torch.device("cpu"),
+        envs=SimpleNamespace(num_envs=1),
+        raenwm_runtime=SimpleNamespace(predict_cls_token=True),
+        _active_lookahead_config=lambda: cfg,
+        _e24_joint_head_state_module=lambda: _head().eval(),
+    )
+
+    with pytest.raises(
+        RuntimeError, match="base MOVE row has no executable ghost"
+    ):
+        build_e24_joint_step(
+            trainer,
+            nav_inputs={"gmap_vp_ids": [[None, "visited-node"]]},
+            nav_outs={
+                "global_logits": torch.tensor([[0.0, 1.0]]),
+                "gmap_embeds": torch.randn(1, 2, 8),
+            },
+            txt_embeds=torch.randn(1, 2, 8),
+            txt_masks=torch.ones(1, 2, dtype=torch.bool),
+        )
+
+
 def test_e24_loss_only_updates_head_and_navigation_loss_does_not():
     head = E24JointTrainModule(_head())
     batch = _batch()

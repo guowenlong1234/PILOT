@@ -318,10 +318,11 @@ def build_e24_joint_step(
 
     for env_index, ids in enumerate(nav_inputs["gmap_vp_ids"]):
         row_logits = base_logits[env_index, : len(ids)]
-        if not native_cls and int(row_logits.detach().argmax()) == 0:
+        base_action = int(row_logits.detach().argmax())
+        ghosts = executable_ghost_indices(ids)
+        if base_action == 0 and (not native_cls or not ghosts):
             continue
         ranked = stable_topk_ghost_indices(ids, row_logits.detach(), k=topk)
-        ghosts = executable_ghost_indices(ids)
         if not ranked or not ghosts:
             raise RuntimeError("E24 joint base MOVE row has no executable ghost")
         records = [
