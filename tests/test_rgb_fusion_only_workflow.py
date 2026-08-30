@@ -8,6 +8,9 @@ ROOT = Path(__file__).parents[1]
 CONFIG_PATH = ROOT / "run_r2r/iter_train_rae_dino_native_cls_rgb_fusion.yaml"
 JOB_PATH = ROOT / "scripts/run_rae_r2r_native_cls_rgb_fusion_server_job.sh"
 MANAGER_PATH = ROOT / "scripts/manage_rae_r2r_native_cls_rgb_fusion_server.sh"
+EVAL_MANAGER_PATH = (
+    ROOT / "scripts/manage_rae_r2r_native_cls_rgb_fusion_eval_watch_host.sh"
+)
 
 
 def test_rgb_fusion_only_config_matches_the_native_cls_long_run_contract():
@@ -95,5 +98,22 @@ def test_rgb_fusion_only_manager_has_isolated_formal_and_smoke_outputs():
 
 
 def test_rgb_fusion_only_shell_entrypoints_parse():
-    for path in (JOB_PATH, MANAGER_PATH):
+    for path in (JOB_PATH, MANAGER_PATH, EVAL_MANAGER_PATH):
         subprocess.run(["bash", "-n", str(path)], check=True)
+
+
+def test_rgb_fusion_only_eval_watcher_isolated_and_matches_training_config():
+    manager = EVAL_MANAGER_PATH.read_text()
+    for contract in (
+        "iter_train_rae_dino_native_cls_rgb_fusion.yaml",
+        "native_cls_sft/checkpoints/etpr1_native_cls_rgb_fusion_sft",
+        "data/logs/raenwm_rgb_fusion/native_cls_eval",
+        "etpr1_native_cls_rgb_fusion_eval_watch",
+        "model_best_step_465000.pt",
+        "ETPR1_RGB_FUSION_EVAL_NUM_ENVIRONMENTS:-8",
+        "ETPR1_RGB_FUSION_EVAL_EPISODE_COUNT:--1",
+        "ETPR1_RGB_FUSION_EVAL_CHECKPOINT_ORDER:-ascending",
+        "ETPR1_R2R_EVAL_READY_SHA_REQUIRED=False",
+        'manage_rae_r2r_eval_watch_host.sh" "${1:-status}"',
+    ):
+        assert contract in manager
