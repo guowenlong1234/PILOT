@@ -294,6 +294,7 @@ def test_predicted_future_diagnostic_summary_preserves_counts_and_rates():
         "topk_slots": 10.0,
         "q0_record_present": 10.0,
         "q0_context_present": 6.0,
+        "q0_cache_present": 6.0,
         "q0_requested": 6.0,
         "q0_nwm_success": 6.0,
         "cwp_requested": 6.0,

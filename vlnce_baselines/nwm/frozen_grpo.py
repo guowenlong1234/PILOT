@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Mapping
+import time
 
 import numpy as np
 import torch
@@ -47,6 +48,7 @@ class FrozenLookaheadController:
         self.raenwm_runtime = None
         self.last_prediction = None
         self.last_rgb_diagnostics = None
+        self.last_candidate_q0_prediction_diagnostics = None
         self._pending_generator_state = None
         self._frozen_manifest = None
 
@@ -248,6 +250,7 @@ class FrozenLookaheadController:
             self._pending_generator_state = None
         self.last_prediction = None
         self.last_rgb_diagnostics = None
+        self.last_candidate_q0_prediction_diagnostics = None
         return self.raenwm_runtime
 
     def set_pending_generator_state(self, state):
@@ -308,9 +311,18 @@ class FrozenLookaheadController:
             yaws,
             raw_front_cls=front_cls,
         )
-        prediction = self.raenwm_runtime.predict(
-            self._build_preview_queries(cur_pos, cur_ori, candidate_previews)
+        queries = self._build_preview_queries(
+            cur_pos, cur_ori, candidate_previews
         )
+        started = time.perf_counter()
+        prediction = self.raenwm_runtime.predict(queries)
+        elapsed = time.perf_counter() - started
+        success = len((prediction.meta or {}).get("records", ()))
+        self.last_candidate_q0_prediction_diagnostics = {
+            "q0_first_stage_requested": float(len(queries)),
+            "q0_first_stage_success": float(success),
+            "q0_first_stage_nwm_seconds": float(elapsed),
+        }
         self.last_prediction = prediction
         self.last_rgb_diagnostics = apply_rgb_fusion_to_current_candidates(
             wp_outputs,

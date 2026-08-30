@@ -23,11 +23,12 @@ SOURCE_CODE_COMMIT = "1045bbbee7f957511b00aa057cb79844f2748009"
 PREDICTED_FUTURE_DIAGNOSTIC_NAMES = (
     "topk_slots", "oracle_q1_requested", "q0_record_present", "q0_context_present",
     "q0_cache_present", "q0_cache_invalid",
+    "q0_first_stage_requested", "q0_first_stage_success",
     "q0_requested", "q0_nwm_success", "q0_batch_failures", "q0_row_failures",
     "cwp_requested", "cwp_invalid", "cwp_none", "cwp_top1",
     "cwp_batch_failures", "cwp_row_failures", "q1_requested",
     "q1_nwm_success", "q1_batch_failures", "q1_row_failures", "future_valid",
-    "q0_nwm_seconds", "cwp_seconds", "q1_nwm_seconds",
+    "q0_first_stage_nwm_seconds", "q0_nwm_seconds", "cwp_seconds", "q1_nwm_seconds",
     "q0_latent_rows", "q0_latent_mean_sum", "q0_latent_std_sum", "q0_latent_norm_sum",
     "q1_latent_rows", "q1_latent_mean_sum", "q1_latent_std_sum", "q1_latent_norm_sum",
     "action_rows", "action_flips",
@@ -46,6 +47,7 @@ def summarize_predicted_future_diagnostics(totals: Mapping[str, float]) -> dict[
         for name in (
             "topk_slots", "oracle_q1_requested", "q0_record_present",
             "q0_context_present", "q0_cache_present", "q0_cache_invalid",
+            "q0_first_stage_requested", "q0_first_stage_success",
             "q0_requested", "q0_nwm_success",
             "cwp_requested", "cwp_invalid", "cwp_none", "cwp_top1",
             "cwp_batch_failures", "cwp_row_failures",
@@ -57,7 +59,7 @@ def summarize_predicted_future_diagnostics(totals: Mapping[str, float]) -> dict[
     for name, numerator, denominator in (
         ("q0_record_coverage", "q0_record_present", "topk_slots"),
         ("q0_context_coverage", "q0_context_present", "topk_slots"),
-        ("q0_success_rate", "q0_nwm_success", "q0_requested"),
+        ("q0_success_rate", "q0_cache_present", "q0_context_present"),
         ("cwp_none_rate", "cwp_none", "cwp_requested"),
         ("q1_success_rate", "q1_nwm_success", "q1_requested"),
         ("valid_rate", "future_valid", "topk_slots"),
@@ -70,7 +72,10 @@ def summarize_predicted_future_diagnostics(totals: Mapping[str, float]) -> dict[
             summary[f"{stage}_latent_{statistic}"] = (
                 values[f"{stage}_latent_{statistic}_sum"] / rows
             )
-    for name in ("q0_nwm_seconds", "cwp_seconds", "q1_nwm_seconds"):
+    for name in (
+        "q0_first_stage_nwm_seconds", "q0_nwm_seconds",
+        "cwp_seconds", "q1_nwm_seconds",
+    ):
         summary[name] = values[name]
     return summary
 
@@ -426,6 +431,15 @@ def build_dino_cwp_nwm_future_tokens(
     diagnostics: dict[str, float] = {
         key: 0.0 for key in PREDICTED_FUTURE_DIAGNOSTIC_NAMES
     }
+    first_stage = getattr(
+        trainer, "last_candidate_q0_prediction_diagnostics", None
+    ) or {}
+    for name in (
+        "q0_first_stage_requested",
+        "q0_first_stage_success",
+        "q0_first_stage_nwm_seconds",
+    ):
+        diagnostics[name] = float(first_stage.get(name, 0.0))
     future = reference.new_zeros((len(active_envs), int(topk), 257, int(feature_dim)))
     valid = torch.zeros(
         (len(active_envs), int(topk)), dtype=torch.bool, device=reference.device

@@ -184,6 +184,7 @@ class RLTrainer(BaseVLNCETrainer):
         self._e24_future_diagnostic_totals = defaultdict(float)
         self._e24_joint_frozen_manifest = None
         self._lookahead_warm_start_metadata = None
+        self.last_candidate_q0_prediction_diagnostics = None
 
     def _active_lookahead_config(self):
         return getattr(
@@ -741,6 +742,7 @@ class RLTrainer(BaseVLNCETrainer):
             self.raenwm_runtime.generator.set_state(pending_generator_state)
             self._pending_nwm_generator_state = None
         self.last_raenwm_prediction = None
+        self.last_candidate_q0_prediction_diagnostics = None
         self._raenwm_context_source_logged = False
         return self.raenwm_runtime
 
@@ -785,11 +787,18 @@ class RLTrainer(BaseVLNCETrainer):
             )
         else:
             runtime.update_contexts(front_latents, cur_pos, yaws)
-        prediction = runtime.predict(
-            self._build_raenwm_preview_queries(
-                cur_pos, cur_ori, candidate_previews
-            )
+        queries = self._build_raenwm_preview_queries(
+            cur_pos, cur_ori, candidate_previews
         )
+        started = time.perf_counter()
+        prediction = runtime.predict(queries)
+        elapsed = time.perf_counter() - started
+        success = len((prediction.meta or {}).get("records", ()))
+        self.last_candidate_q0_prediction_diagnostics = {
+            "q0_first_stage_requested": float(len(queries)),
+            "q0_first_stage_success": float(success),
+            "q0_first_stage_nwm_seconds": float(elapsed),
+        }
         self.last_raenwm_prediction = prediction
         self.last_raenwm_rgb_fusion_diagnostics = (
             apply_rgb_fusion_to_current_candidates(
