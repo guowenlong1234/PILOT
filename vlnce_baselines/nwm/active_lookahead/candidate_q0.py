@@ -146,6 +146,11 @@ def commit_candidate_q0_cache(
             )
             condition = record.condition
             target_yaw = float(snapshot.source_yaw) + float(condition.dtheta)
+            patch_cpu = patch.detach().to(device="cpu", dtype=torch.float32)
+            patch_fp16 = patch_cpu.to(dtype=torch.float16).contiguous()
+            quantization_max_abs = float(
+                (patch_cpu - patch_fp16.float()).abs().max().item()
+            )
             cached.append(
                 CandidateQ0(
                     contract_version=Q0_CONTRACT,
@@ -167,9 +172,8 @@ def commit_candidate_q0_cache(
                     ),
                     horizon=float(record.horizon),
                     source_context=snapshot,
-                    predicted_patch_cpu_fp16=patch.detach().to(
-                        device="cpu", dtype=torch.float16
-                    ).contiguous(),
+                    predicted_patch_cpu_fp16=patch_fp16,
+                    patch_quantization_max_abs=quantization_max_abs,
                     candidate_forward_m=forward,
                     current_view_index=view_index,
                 )

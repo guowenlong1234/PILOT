@@ -84,6 +84,7 @@ def test_candidate_q0_cache_uses_committed_mean_and_cpu_fp16_patch():
     np.testing.assert_allclose(record.target_position, graph.ghost_mean_pos["g0"])
     assert record.predicted_patch_cpu_fp16.device.type == "cpu"
     assert record.predicted_patch_cpu_fp16.dtype == torch.float16
+    assert record.patch_quantization_max_abs == 0.0
     assert record.current_view_index == 1
 
 

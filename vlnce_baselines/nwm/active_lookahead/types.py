@@ -37,6 +37,7 @@ class CandidateQ0:
     horizon: float
     source_context: Any
     predicted_patch_cpu_fp16: torch.Tensor
+    patch_quantization_max_abs: float
     candidate_forward_m: float
     current_view_index: int
 

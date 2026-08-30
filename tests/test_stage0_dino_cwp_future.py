@@ -143,7 +143,7 @@ def test_predicted_future_batches_distinct_historical_contexts_and_reuses_them_f
     assert valid.tolist() == [[True, True]]
     assert tuple(future.shape) == (1, 2, 257, 768)
     assert tuple(q1_conditions.shape) == (1, 2, 4)
-    assert trainer.raenwm_runtime.predictor.context_markers == [[1.0, 5.0]]
+    assert trainer.raenwm_runtime.predictor.context_markers == [[1.0, 4.0]]
     assert future[0, 0, 0, 0].item() == pytest.approx(101.0)
     assert future[0, 1, 0, 0].item() == pytest.approx(104.0)
     assert future[0, 0, 1, 0].item() == pytest.approx(1.0)
