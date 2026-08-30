@@ -320,3 +320,5 @@ def test_predicted_future_diagnostic_summary_preserves_counts_and_rates():
     assert summary["action_flip_rate"] == pytest.approx(0.25)
     assert summary["q0_latent_norm"] == pytest.approx(4.0)
     assert summary["q1_latent_norm"] == pytest.approx(3.0)
+    assert summary["q0_cache_live_records_mean"] == 0.0
+    assert summary["q0_cache_mebibytes_mean"] == 0.0

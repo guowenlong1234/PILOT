@@ -23,6 +23,7 @@ SOURCE_CODE_COMMIT = "1045bbbee7f957511b00aa057cb79844f2748009"
 PREDICTED_FUTURE_DIAGNOSTIC_NAMES = (
     "topk_slots", "oracle_q1_requested", "q0_record_present", "q0_context_present",
     "q0_cache_present", "q0_cache_invalid",
+    "q0_cache_samples", "q0_cache_live_records_sum", "q0_cache_bytes_sum",
     "q0_first_stage_requested", "q0_first_stage_success",
     "q0_requested", "q0_nwm_success", "q0_batch_failures", "q0_row_failures",
     "cwp_requested", "cwp_invalid", "cwp_none", "cwp_top1",
@@ -77,6 +78,13 @@ def summarize_predicted_future_diagnostics(totals: Mapping[str, float]) -> dict[
         "cwp_seconds", "q1_nwm_seconds",
     ):
         summary[name] = values[name]
+    cache_samples = max(1.0, values["q0_cache_samples"])
+    summary["q0_cache_live_records_mean"] = (
+        values["q0_cache_live_records_sum"] / cache_samples
+    )
+    summary["q0_cache_mebibytes_mean"] = (
+        values["q0_cache_bytes_sum"] / cache_samples / (1024.0 ** 2)
+    )
     return summary
 
 
@@ -440,6 +448,29 @@ def build_dino_cwp_nwm_future_tokens(
         "q0_first_stage_nwm_seconds",
     ):
         diagnostics[name] = float(first_stage.get(name, 0.0))
+    live_records = []
+    for graph in getattr(trainer, "gmaps", ()):
+        live_records.extend(
+            getattr(graph, "ghost_candidate_q0", {}).values()
+        )
+    cache_bytes = sum(
+        int(record.predicted_patch_cpu_fp16.numel())
+        * int(record.predicted_patch_cpu_fp16.element_size())
+        for record in live_records
+    )
+    unique_contexts = {}
+    for record in live_records:
+        snapshot = getattr(record, "source_context", None)
+        context = getattr(snapshot, "context_latents", None)
+        if torch.is_tensor(context):
+            unique_contexts.setdefault(id(snapshot), context)
+    cache_bytes += sum(
+        int(context.numel()) * int(context.element_size())
+        for context in unique_contexts.values()
+    )
+    diagnostics["q0_cache_samples"] = 1.0
+    diagnostics["q0_cache_live_records_sum"] = float(len(live_records))
+    diagnostics["q0_cache_bytes_sum"] = float(cache_bytes)
     future = reference.new_zeros((len(active_envs), int(topk), 257, int(feature_dim)))
     valid = torch.zeros(
         (len(active_envs), int(topk)), dtype=torch.bool, device=reference.device
