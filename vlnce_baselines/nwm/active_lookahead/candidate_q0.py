@@ -16,11 +16,21 @@ Q0_CONTRACT = "r1_post_update_ghost_mean_cached_v1"
 Q0_POSITION_SOURCE = "r1_post_update_ghost_mean"
 
 
-def build_candidate_q0_queries(cur_pos, cur_ori, candidate_previews):
+def build_candidate_q0_queries(
+    cur_pos,
+    cur_ori,
+    candidate_previews,
+    *,
+    heading_from_orientation=None,
+):
     """Build exactly one query per ghost at its final post-update R1 mean."""
 
-    from vlnce_baselines.models.graph_utils import heading_from_quaternion
     from vlnce_baselines.nwm.runtime import NwmQuery
+
+    if heading_from_orientation is None:
+        from vlnce_baselines.models.graph_utils import heading_from_quaternion
+
+        heading_from_orientation = heading_from_quaternion
 
     queries = []
     for env_index, previews in enumerate(candidate_previews):
@@ -43,7 +53,9 @@ def build_candidate_q0_queries(cur_pos, cur_ori, candidate_previews):
                     env_index=int(env_index),
                     query_id=ghost_vp,
                     current_position=np.asarray(cur_pos[env_index], dtype=np.float32),
-                    current_yaw=float(heading_from_quaternion(cur_ori[env_index])),
+                    current_yaw=float(
+                        heading_from_orientation(cur_ori[env_index])
+                    ),
                     target_position=target.copy(),
                 )
             )

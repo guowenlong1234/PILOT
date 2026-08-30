@@ -260,7 +260,10 @@ class FrozenLookaheadController:
 
     def _build_preview_queries(self, cur_pos, cur_ori, candidate_previews):
         return build_candidate_q0_queries(
-            cur_pos, cur_ori, candidate_previews
+            cur_pos,
+            cur_ori,
+            candidate_previews,
+            heading_from_orientation=heading_from_quaternion,
         )
 
     def commit_candidate_q0(

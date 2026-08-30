@@ -231,11 +231,13 @@ def test_sft_rgb_fusion_groups_preview_queries_once_per_ghost(monkeypatch):
                 target_kind="new_ghost",
                 target_vp="g0",
                 position=np.asarray([1.0, 0.0, 0.0]),
+                post_update_ghost_mean=np.asarray([2.0, 0.0, 0.0]),
             ),
             preview(
                 target_kind="new_ghost",
                 target_vp="g0",
                 position=np.asarray([3.0, 0.0, 0.0]),
+                post_update_ghost_mean=np.asarray([2.0, 0.0, 0.0]),
             ),
             preview(
                 target_kind="node", target_vp="0", position=np.zeros(3)
