@@ -886,7 +886,7 @@ class RLTrainer(BaseVLNCETrainer):
         if state_dict is None:
             if allow_missing:
                 logger.info(
-                    "Starting a new single-GPU RGB-fusion training run from "
+                    "Starting a new RGB-fusion training run from "
                     "a checkpoint without fusion weights"
                 )
                 return None
