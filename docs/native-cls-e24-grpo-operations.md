@@ -50,3 +50,13 @@ smoke 必须使用独立输出目录，不能接续正式训练。
 `sample_num=8` 会把 NWM 与 DINO-CWP 推理量放大八倍，正式参数必须在短测后
 根据吞吐和显存决定。第一阶段强制 `update_epochs=1`，不允许用同一份冻结
 rollout context 做多轮参数更新。
+
+统一 Q0 缓存版本还要求源 checkpoint 的 provenance 包含：
+
+- `q0_contract: r1_post_update_ghost_mean_cached_v1`；
+- `q0_cache_precision: cpu_fp16`；
+- `q0_recompute_forbidden: true`。
+
+GRPO rollout 继续执行一次第一阶段 Q0，并把同一缓存交给 Top-5；日志中的
+`lookahead_q0_requested` 必须为 0。保存后应逐张量比较源 SFT 与 GRPO
+checkpoint 的 RGB 融合层及 E24/Top-5 状态，确认冻结权重完全相同。

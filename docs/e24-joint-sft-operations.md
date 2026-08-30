@@ -1,5 +1,34 @@
 # ETP-R1 Top-5 前瞻与 E24 联合 SFT 操作说明
 
+## 2026-08-30：统一 Q0 缓存链路
+
+原生 CLS 配置现使用 `r1_post_update_ghost_mean_cached_v1`。第一阶段先按
+R1 原版图更新规则算出候选并入后的 `ghost_mean_pos`，用它完成一次 Q0
+预测并保存 CPU FP16 patch；Top-5 阶段只读取该缓存，再由 DINO-CWP 产生
+Q1 查询。缓存缺失或过期时只让对应槽无效，不允许重新预测 Q0。
+
+因此每个有效前瞻步骤只有两段世界模型推理：共享的第一阶段 Q0 和 Q1。
+日志中 `q0_first_stage_*` 记录共享 Q0，`q0_requested` 与
+`q0_nwm_seconds` 专指 Top-5 重算，正常情况下必须始终为 0。
+
+新实验从普通导航基座启动，并显式指定旧 joint checkpoint 作为权重初始化：
+
+```bash
+export ETPR1_E24_WARM_START_CHECKPOINT=/absolute/path/to/old/ckpt.iterN.pth
+export ETPR1_E24_WARM_START_SHA256=<64位小写SHA-256>
+bash scripts/manage_rae_r2r_native_cls_e24_joint_server.sh start
+```
+
+只加载旧 checkpoint 中的 RGB 融合层、E24 残差头和 Top-5 CLS 适配层。
+导航策略仍来自 `base_checkpoint_path`，优化器、调度器、迭代号、随机状态和
+episode 队列全部重新建立，训练从 iteration 0 开始。旧格式 checkpoint 不能
+直接 resume；只有 `etpr1-native-cls-e24-joint-q0-cache-v3`（RxR 对应
+`etpr1-rxr-native-cls-e24-joint-q0-cache-v2`）才能恢复并进入冻结 GRPO。
+
+启动器会在加载前后核验热启动文件 SHA。新 checkpoint 的 provenance 会记录
+热启动文件名、SHA、旧 Q0 契约、实际加载的三组权重，并明确
+`training_state_loaded: false`。
+
 ## 固定实验
 
 本实验只运行 R2R。决策链为：基座 Top-5 ghost、q0 NWM、DINO-CWP g1、
