@@ -56,7 +56,10 @@ def test_rxr_baseline_and_joint_configs_preserve_task_contract():
     assert joint["MODEL"]["RAENWM"]["token_count"] == 257
     active = joint["MODEL"]["ACTIVE_LOOKAHEAD"]
     assert active["checkpoint_format_version"] == (
-        "etpr1-rxr-native-cls-e24-joint-v1"
+        "etpr1-rxr-native-cls-e24-joint-q0-cache-v2"
+    )
+    assert active["warm_start_expected_q0_contract"] == (
+        "temporary_action_same_island_navmesh"
     )
     assert active["e24_action_warmup_iters"] == 400
     assert active["e24_replay_micro_batch_size"] == 2

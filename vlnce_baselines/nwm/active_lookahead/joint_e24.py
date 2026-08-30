@@ -326,7 +326,7 @@ def build_e24_joint_step(
         if not ranked or not ghosts:
             raise RuntimeError("E24 joint base MOVE row has no executable ghost")
         records = [
-            trainer.gmaps[env_index].select_persistent_q0(ids[index])
+            trainer.gmaps[env_index].select_candidate_q0(ids[index])
             for index in ranked
         ]
         active_envs.append(env_index)

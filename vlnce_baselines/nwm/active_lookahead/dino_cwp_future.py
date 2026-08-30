@@ -22,6 +22,7 @@ DEFAULT_NONE_THRESHOLD = 0.3
 SOURCE_CODE_COMMIT = "1045bbbee7f957511b00aa057cb79844f2748009"
 PREDICTED_FUTURE_DIAGNOSTIC_NAMES = (
     "topk_slots", "oracle_q1_requested", "q0_record_present", "q0_context_present",
+    "q0_cache_present", "q0_cache_invalid",
     "q0_requested", "q0_nwm_success", "q0_batch_failures", "q0_row_failures",
     "cwp_requested", "cwp_invalid", "cwp_none", "cwp_top1",
     "cwp_batch_failures", "cwp_row_failures", "q1_requested",
@@ -44,7 +45,8 @@ def summarize_predicted_future_diagnostics(totals: Mapping[str, float]) -> dict[
         name: values[name]
         for name in (
             "topk_slots", "oracle_q1_requested", "q0_record_present",
-            "q0_context_present", "q0_requested", "q0_nwm_success",
+            "q0_context_present", "q0_cache_present", "q0_cache_invalid",
+            "q0_requested", "q0_nwm_success",
             "cwp_requested", "cwp_invalid", "cwp_none", "cwp_top1",
             "cwp_batch_failures", "cwp_row_failures",
             "q1_requested", "q1_nwm_success", "future_valid",
@@ -430,39 +432,48 @@ def build_dino_cwp_nwm_future_tokens(
     )
     q1_conditions = reference.new_zeros((len(active_envs), int(topk), 4))
     prepared = []
-    q0_requests = []
     for row, (env_index, records) in enumerate(zip(active_envs, records_by_env)):
         diagnostics["topk_slots"] += float(len(records))
         for slot, record in enumerate(records):
             if record is None:
                 continue
             diagnostics["q0_record_present"] += 1.0
-            snapshot = trainer.gmaps[env_index].get_raenwm_source_context(record)
+            if getattr(record, "contract_version", None) != (
+                "r1_post_update_ghost_mean_cached_v1"
+            ):
+                diagnostics["q0_cache_invalid"] += 1.0
+                continue
+            snapshot = getattr(record, "source_context", None)
+            patch = getattr(record, "predicted_patch_cpu_fp16", None)
             if snapshot is None:
+                diagnostics["q0_cache_invalid"] += 1.0
                 continue
             diagnostics["q0_context_present"] += 1.0
-            prepared.append((row, slot, env_index, record, snapshot))
-            q0_requests.append(
-                RaeLatentTargetRequest(
-                    env_index=int(env_index),
-                    ghost_vp=str(record.ghost_vp),
-                    snapshot=snapshot,
-                    target_position=np.asarray(record.canonical_q0_position, dtype=np.float32),
-                )
-            )
+            if (
+                not torch.is_tensor(patch)
+                or patch.device.type != "cpu"
+                or patch.dtype != torch.float16
+                or tuple(patch.shape) != (768, 16, 16)
+                or not bool(torch.isfinite(patch).all())
+            ):
+                diagnostics["q0_cache_invalid"] += 1.0
+                continue
+            prepared.append((row, slot, env_index, record, snapshot, patch))
+            diagnostics["q0_cache_present"] += 1.0
 
-    diagnostics["q0_requested"] = float(len(q0_requests))
-    q0_rows = _predict_nwm_rows(
-        trainer, q0_requests, stage="q0", diagnostics=diagnostics
-    )
-    diagnostics["q0_nwm_success"] = float(len(q0_rows))
-    if not q0_rows:
+    # Q0 is deliberately never recomputed here. Missing/invalid cache entries
+    # stay invalid so the saved NWM forward is an invariant, not a best effort.
+    diagnostics["q0_requested"] = 0.0
+    diagnostics["q0_nwm_success"] = 0.0
+    if not prepared:
         return future, q1_conditions, valid, diagnostics
 
-    ordered_q0 = sorted(q0_rows)
-    patches = torch.stack(
-        [q0_rows[index][0] for index in ordered_q0], dim=0
+    ordered_q0 = list(range(len(prepared)))
+    cached_latents = torch.stack(
+        [prepared[index][5].float() for index in ordered_q0], dim=0
     )
+    _add_latent_stats(diagnostics, "q0", cached_latents)
+    patches = cached_latents
     patches = latent_to_patch_tokens(patches)
     diagnostics["cwp_requested"] = float(len(ordered_q0))
     cwp_started = time.perf_counter()
@@ -510,7 +521,7 @@ def build_dino_cwp_nwm_future_tokens(
         if prediction.pred_none:
             diagnostics["cwp_none"] += 1.0
             continue
-        row, slot, env_index, record, snapshot = prepared[q0_index]
+        row, slot, env_index, record, snapshot, _cached_patch = prepared[q0_index]
         q0_position = np.asarray(record.canonical_q0_position, dtype=np.float32)
         q0_heading_deg = _face_motion_heading_deg(
             snapshot.source_position,

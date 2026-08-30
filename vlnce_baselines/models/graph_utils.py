@@ -1,5 +1,5 @@
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import numpy as np
 from copy import deepcopy
 import networkx as nx
@@ -79,6 +79,7 @@ class CandidatePreview:
     target_vp: str
     position: object
     front_vp: str
+    post_update_ghost_mean: object = None
 
 
 class FloydGraph(object):
@@ -162,6 +163,7 @@ class GraphMap(object):
         self.ghost_real_pos = {}    # for training
         self.ghost_goal_dists = {}  # cached geodesic distance for real pos
         self.ghost_persistent_q0 = {}
+        self.ghost_candidate_q0 = {}
         self.raenwm_source_contexts = {}
         self.has_real_pos = has_real_pos
         self.merge_ghost = merge_ghost
@@ -242,13 +244,28 @@ class GraphMap(object):
                 previews.append(CandidatePreview(
                     cvp, kind, localized_gvp, cpos, cur_vp
                 ))
-        return previews
+        final_means = {
+            ghost_vp: np.asarray(position, dtype=np.float32).copy()
+            for ghost_vp, position in reserved_ghost_pos.items()
+        }
+        return [
+            replace(
+                preview,
+                post_update_ghost_mean=(
+                    final_means[str(preview.target_vp)].copy()
+                    if preview.target_kind in ("new_ghost", "existing_ghost")
+                    else None
+                ),
+            )
+            for preview in previews
+        ]
 
     def delete_ghost(self, vp):
         self.ghost_pos.pop(vp)
         self.ghost_mean_pos.pop(vp)
         self.ghost_embeds.pop(vp)
         self.ghost_fronts.pop(vp)
+        self.ghost_candidate_q0.pop(vp, None)
         removed_q0 = self.ghost_persistent_q0.pop(vp, None)
         if removed_q0:
             live_context_keys = {
@@ -316,6 +333,51 @@ class GraphMap(object):
             ghost_vp,
             self.ghost_mean_pos[ghost_vp],
         )
+
+    def replace_candidate_q0_cache(self, observed_ghosts, records):
+        """Invalidate observed ghosts, then publish successful latest predictions."""
+
+        from vlnce_baselines.nwm.active_lookahead.types import CandidateQ0
+
+        for ghost_vp in observed_ghosts:
+            self.ghost_candidate_q0.pop(str(ghost_vp), None)
+        for record in records:
+            if not isinstance(record, CandidateQ0):
+                raise TypeError("candidate q0 cache must contain CandidateQ0 values")
+            ghost_vp = str(record.ghost_vp)
+            if ghost_vp not in self.ghost_mean_pos:
+                raise KeyError(f"Cannot cache q0 for unknown ghost: {ghost_vp}")
+            if not np.allclose(
+                np.asarray(record.target_position, dtype=np.float32),
+                np.asarray(self.ghost_mean_pos[ghost_vp], dtype=np.float32),
+                atol=1.0e-6,
+                rtol=0.0,
+            ):
+                raise ValueError(
+                    "candidate q0 target differs from committed ghost_mean_pos: "
+                    f"{ghost_vp}"
+                )
+            self.ghost_candidate_q0[ghost_vp] = record
+        return tuple(records)
+
+    def select_candidate_q0(self, ghost_vp):
+        """Return only the latest reusable prediction; never recompute or fall back."""
+
+        ghost_vp = str(ghost_vp)
+        if ghost_vp not in self.ghost_mean_pos:
+            raise KeyError(f"Unknown ghost vp: {ghost_vp}")
+        record = self.ghost_candidate_q0.get(ghost_vp)
+        if record is None:
+            return None
+        if not np.allclose(
+            np.asarray(record.target_position, dtype=np.float32),
+            np.asarray(self.ghost_mean_pos[ghost_vp], dtype=np.float32),
+            atol=1.0e-6,
+            rtol=0.0,
+        ):
+            self.ghost_candidate_q0.pop(ghost_vp, None)
+            return None
+        return record
 
     @staticmethod
     def _raenwm_source_context_key(source_front_vp, source_high_level_step):
@@ -425,6 +487,24 @@ class GraphMap(object):
                 raise ValueError(
                     "Unsupported candidate preview target_kind: "
                     f"{preview.target_kind}"
+                )
+
+        expected_means = {}
+        for preview in candidate_preview:
+            if preview.target_kind in ("new_ghost", "existing_ghost"):
+                expected_means[str(preview.target_vp)] = np.asarray(
+                    preview.post_update_ghost_mean, dtype=np.float32
+                )
+        for ghost_vp, expected_mean in expected_means.items():
+            if not np.allclose(
+                np.asarray(self.ghost_mean_pos[ghost_vp], dtype=np.float32),
+                expected_mean,
+                atol=1.0e-6,
+                rtol=0.0,
+            ):
+                raise ValueError(
+                    "candidate preview post-update mean differs from graph update: "
+                    f"{ghost_vp}"
                 )
         
         self.ghost_aug_pos = deepcopy(self.ghost_mean_pos)

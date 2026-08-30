@@ -32,21 +32,20 @@ def _snapshot(marker, front, step, *, native=False):
     )
 
 
-def _record(ghost, front, step, x):
+def _record(ghost, front, step, x, *, marker=None, native=False):
+    marker = float(step if step else 1) if marker is None else float(marker)
+    snapshot = _snapshot(marker, front, step, native=native)
     return SimpleNamespace(
+        contract_version="r1_post_update_ghost_mean_cached_v1",
         ghost_vp=ghost,
         source_front_vp=front,
         source_high_level_step=step,
         canonical_q0_position=np.asarray([x, 0.0, 1.0], dtype=np.float32),
+        source_context=snapshot,
+        predicted_patch_cpu_fp16=torch.full(
+            (768, 16, 16), marker, dtype=torch.float16
+        ),
     )
-
-
-class _Graph:
-    def __init__(self, snapshots):
-        self.snapshots = snapshots
-
-    def get_raenwm_source_context(self, record):
-        return self.snapshots.get((record.source_front_vp, record.source_high_level_step))
 
 
 class _FakeNwm:
@@ -116,7 +115,7 @@ def _trainer(snapshots, *, none_rows=(), native=False):
         device=torch.device("cpu"),
         raenwm_runtime=runtime,
         dino_cwp_future_predictor=_FakeCwp(none_rows),
-        gmaps=[_Graph(snapshots)],
+        gmaps=[SimpleNamespace()],
         _active_lookahead_config=lambda: SimpleNamespace(dino_cwp_none_threshold=0.3),
     )
 
@@ -144,29 +143,27 @@ def test_predicted_future_batches_distinct_historical_contexts_and_reuses_them_f
     assert valid.tolist() == [[True, True]]
     assert tuple(future.shape) == (1, 2, 257, 768)
     assert tuple(q1_conditions.shape) == (1, 2, 4)
-    assert trainer.raenwm_runtime.predictor.context_markers == [
-        [1.0, 4.0], [1.0, 4.0]
-    ]
+    assert trainer.raenwm_runtime.predictor.context_markers == [[1.0, 5.0]]
     assert future[0, 0, 0, 0].item() == pytest.approx(101.0)
     assert future[0, 1, 0, 0].item() == pytest.approx(104.0)
     assert future[0, 0, 1, 0].item() == pytest.approx(1.0)
     assert diagnostics["q0_context_present"] == 2.0
     assert diagnostics["q1_nwm_success"] == 2.0
     assert diagnostics["future_valid"] == 2.0
-    assert len(trainer.raenwm_runtime.requests) == 2
-    q0_requests, q1_requests = trainer.raenwm_runtime.requests
-    assert all(request.horizon_override is None for request in q0_requests)
+    assert len(trainer.raenwm_runtime.requests) == 1
+    q1_requests = trainer.raenwm_runtime.requests[0]
     assert all(request.horizon_override is not None for request in q1_requests)
     assert all(request.target_yaw is not None for request in q1_requests)
+    assert diagnostics["q0_requested"] == 0.0
+    assert diagnostics["q0_cache_present"] == 2.0
 
 
 def test_missing_context_and_cwp_none_invalidate_only_their_slots():
     snapshots = {("front0", 0): _snapshot(2.0, "front0", 0)}
     trainer = _trainer(snapshots, none_rows=(0,))
-    records = [[
-        _record("g0", "front0", 0, 0.0),
-        _record("g1", "missing", 1, 1.0),
-    ]]
+    missing = _record("g1", "missing", 1, 1.0)
+    missing.source_context = None
+    records = [[_record("g0", "front0", 0, 0.0), missing]]
 
     future, q1_conditions, valid, diagnostics = build_dino_cwp_nwm_future_tokens(
         trainer,
@@ -196,7 +193,9 @@ def test_native_q1_uses_raw_cls_and_preserves_native_patch_tokens():
         build_dino_cwp_nwm_future_tokens(
             trainer,
             active_envs=[0],
-            records_by_env=[[_record("g0", "front0", 0, 0.0)]],
+            records_by_env=[[
+                _record("g0", "front0", 0, 0.0, marker=3.0, native=True)
+            ]],
             topk=1,
             feature_dim=768,
             reference=torch.zeros(1),

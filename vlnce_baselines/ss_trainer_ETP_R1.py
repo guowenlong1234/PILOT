@@ -4,7 +4,8 @@ import sys
 import random
 from collections import defaultdict
 from contextlib import nullcontext
-from typing import Dict, List
+from pathlib import Path
+from typing import Dict, List, Mapping
 import jsonlines
 
 import lmdb
@@ -51,6 +52,10 @@ from vlnce_baselines.nwm.rgb_fusion import (
 from vlnce_baselines.nwm.active_lookahead.base_freeze import (
     capture_base_tensor_manifest,
     compare_base_tensor_manifests,
+)
+from vlnce_baselines.nwm.active_lookahead.candidate_q0 import (
+    build_candidate_q0_queries,
+    commit_candidate_q0_cache,
 )
 from vlnce_baselines.nwm.active_lookahead.dino_cwp_future import (
     PREDICTED_FUTURE_DIAGNOSTIC_NAMES,
@@ -178,6 +183,7 @@ class RLTrainer(BaseVLNCETrainer):
         self._e24_joint_start_iteration = 0
         self._e24_future_diagnostic_totals = defaultdict(float)
         self._e24_joint_frozen_manifest = None
+        self._lookahead_warm_start_metadata = None
 
     def _active_lookahead_config(self):
         return getattr(
@@ -212,7 +218,10 @@ class RLTrainer(BaseVLNCETrainer):
         cfg = self._active_lookahead_config()
         return self._native_cls_joint_enabled() and str(
             getattr(cfg, "checkpoint_format_version", "")
-        ) == "etpr1-rxr-native-cls-e24-joint-v1"
+        ) in {
+            "etpr1-rxr-native-cls-e24-joint-v1",
+            "etpr1-rxr-native-cls-e24-joint-q0-cache-v2",
+        }
 
     def _e24_joint_head_state_module(self):
         module = self.e24_joint_head
@@ -300,6 +309,11 @@ class RLTrainer(BaseVLNCETrainer):
             "e24_source_base_manifest_sha256": str(
                 cfg.e24_source_base_manifest_sha256
             ),
+            "q0_contract": "r1_post_update_ghost_mean_cached_v1",
+            "q0_position_source": "r1_post_update_ghost_mean",
+            "q0_reuse_required": True,
+            "q0_cache_precision": "cpu_fp16",
+            "q0_recompute_forbidden": True,
         }
         if self._native_cls_joint_enabled():
             expected.update(self._native_cls_provenance_fields())
@@ -316,6 +330,23 @@ class RLTrainer(BaseVLNCETrainer):
         }
         if mismatches:
             raise ValueError(f"joint checkpoint provenance mismatch: {mismatches}")
+        saved_warm_start = provenance.get("warm_start")
+        configured_warm_start = self._configured_lookahead_warm_start_provenance()
+        if configured_warm_start is not None and saved_warm_start != configured_warm_start:
+            raise ValueError(
+                "joint checkpoint warm-start provenance mismatch: "
+                f"saved={saved_warm_start!r} configured={configured_warm_start!r}"
+            )
+        if saved_warm_start is not None and (
+            not isinstance(saved_warm_start, dict)
+            or saved_warm_start.get("training_state_loaded") is not False
+            or saved_warm_start.get("weights") != [
+                "raenwm_rgb_fusion_adapter",
+                "e24_residual_head",
+                "top5_cls_adapter",
+            ]
+        ):
+            raise ValueError("joint checkpoint has invalid warm-start provenance")
         return provenance
 
     def _e24_joint_provenance(self):
@@ -331,7 +362,11 @@ class RLTrainer(BaseVLNCETrainer):
             "nwm_checkpoint_sha256": str(self.config.MODEL.RAENWM.checkpoint_sha256),
             "nwm_stat_sha256": str(self.config.MODEL.RAENWM.stat_sha256),
             "source": "dino_cwp_nwm",
-            "q0_contract": "temporary_action_same_island_navmesh",
+            "q0_contract": "r1_post_update_ghost_mean_cached_v1",
+            "q0_position_source": "r1_post_update_ghost_mean",
+            "q0_reuse_required": True,
+            "q0_cache_precision": "cpu_fp16",
+            "q0_recompute_forbidden": True,
             "q1_contract": "nwm_predicted_no_simulator_query",
             "context_strategy": "fixed_initial",
             "heading_policy": "face_motion",
@@ -345,6 +380,7 @@ class RLTrainer(BaseVLNCETrainer):
                 self.config.IL.sample_ratio_zero_threshold
             ),
             "delta_scale": float(cfg.e24_train_delta_scale),
+            "warm_start": self._configured_lookahead_warm_start_provenance(),
         }
         if self._native_cls_joint_enabled():
             provenance.update(self._native_cls_provenance_fields())
@@ -355,6 +391,84 @@ class RLTrainer(BaseVLNCETrainer):
                 self.config.MODEL.RAENWM.head_checkpoint_sha256
             )
         return provenance
+
+    def _configured_lookahead_warm_start_provenance(self):
+        cfg = self._active_lookahead_config()
+        path = str(getattr(cfg, "warm_start_checkpoint_path", "")).strip()
+        sha = str(getattr(cfg, "warm_start_checkpoint_sha256", "")).strip().lower()
+        old_contract = str(
+            getattr(
+                cfg,
+                "warm_start_expected_q0_contract",
+                "temporary_action_same_island_navmesh",
+            )
+        )
+        if not path and not sha:
+            return None
+        if not path or len(sha) != 64 or any(
+            character not in "0123456789abcdef" for character in sha
+        ):
+            raise ValueError(
+                "active-lookahead warm start requires a path and valid SHA256"
+            )
+        return {
+            "checkpoint_name": Path(path).name,
+            "checkpoint_sha256": sha,
+            "source_q0_contract": old_contract,
+            "weights": [
+                "raenwm_rgb_fusion_adapter",
+                "e24_residual_head",
+                "top5_cls_adapter",
+            ],
+            "training_state_loaded": False,
+        }
+
+    def _load_active_lookahead_warm_start(self):
+        provenance = self._configured_lookahead_warm_start_provenance()
+        if provenance is None:
+            self._lookahead_warm_start_metadata = None
+            return None
+        cfg = self._active_lookahead_config()
+        path = Path(cfg.warm_start_checkpoint_path).expanduser().resolve()
+        if not path.is_file():
+            raise ValueError(f"lookahead warm-start checkpoint does not exist: {path}")
+        actual_sha = sha256_file(path)
+        if actual_sha != provenance["checkpoint_sha256"]:
+            raise ValueError(
+                "lookahead warm-start checkpoint SHA256 mismatch: "
+                f"expected={provenance['checkpoint_sha256']} actual={actual_sha}"
+            )
+        checkpoint = self.load_checkpoint(str(path), map_location="cpu")
+        if sha256_file(path) != actual_sha:
+            raise RuntimeError("lookahead warm-start checkpoint changed while loading")
+        source_provenance = checkpoint.get("e24_joint_provenance")
+        if not isinstance(source_provenance, dict):
+            raise ValueError("lookahead warm-start checkpoint lacks provenance")
+        actual_contract = str(source_provenance.get("q0_contract", ""))
+        if actual_contract != provenance["source_q0_contract"]:
+            raise ValueError(
+                "lookahead warm-start Q0 contract mismatch: "
+                f"expected={provenance['source_q0_contract']} actual={actual_contract}"
+            )
+        e24_state = checkpoint.get("e24_joint_state_dict")
+        fusion_state = checkpoint.get("raenwm_rgb_fusion_adapter_state_dict")
+        if not isinstance(e24_state, Mapping) or not isinstance(fusion_state, Mapping):
+            raise ValueError(
+                "lookahead warm-start checkpoint must contain E24 and RGB fusion weights"
+            )
+        wrapper = self._e24_joint_wrapper_state_module()
+        fusion = self._raenwm_rgb_fusion_state_module()
+        if wrapper is None or fusion is None:
+            raise RuntimeError("lookahead warm-start modules are not initialized")
+        wrapper.load_state_dict(e24_state, strict=True)
+        fusion.load_state_dict(fusion_state, strict=True)
+        self._lookahead_warm_start_metadata = dict(provenance)
+        logger.info(
+            "Loaded lookahead weights-only warm start: %s sha256=%s",
+            path,
+            actual_sha,
+        )
+        return dict(provenance)
 
     def _native_cls_provenance_fields(self):
         cfg = self._active_lookahead_config()
@@ -633,30 +747,9 @@ class RLTrainer(BaseVLNCETrainer):
     def _build_raenwm_preview_queries(
         self, cur_pos, cur_ori, candidate_previews
     ):
-        from vlnce_baselines.nwm.runtime import NwmQuery
-
-        queries = []
-        for env_index, previews in enumerate(candidate_previews):
-            grouped_positions = OrderedDict()
-            for preview in previews:
-                if preview.target_kind not in ("new_ghost", "existing_ghost"):
-                    continue
-                grouped_positions.setdefault(str(preview.target_vp), []).append(
-                    np.asarray(preview.position, dtype=np.float32)
-                )
-            for ghost_vp, positions in grouped_positions.items():
-                queries.append(NwmQuery(
-                    env_index=env_index,
-                    query_id=ghost_vp,
-                    current_position=np.asarray(
-                        cur_pos[env_index], dtype=np.float32
-                    ),
-                    current_yaw=float(
-                        heading_from_quaternion(cur_ori[env_index])
-                    ),
-                    target_position=np.mean(positions, axis=0).astype(np.float32),
-                ))
-        return queries
+        return build_candidate_q0_queries(
+            cur_pos, cur_ori, candidate_previews
+        )
 
     def _run_raenwm_rgb_fusion_prediction(
         self,
@@ -1420,6 +1513,8 @@ class RLTrainer(BaseVLNCETrainer):
                 ckpt_dict,
                 allow_missing=bool(allow_missing_fusion_checkpoint),
             )
+            if self._active_lookahead_enabled() and not config.IL.is_requeue:
+                self._load_active_lookahead_warm_start()
             
             if self.local_rank < 1:
                 report_navigation_incompatible_keys(
@@ -2713,11 +2808,9 @@ class RLTrainer(BaseVLNCETrainer):
 
             current_goal_distances = None
             cand_goal_dists = None
-            candidate_q0_records = None
             if (
                 mode == 'train'
                 or self.config.VIDEO_OPTION
-                or self._active_lookahead_enabled()
             ):
                 navigation_states = self.envs.call(
                     ["get_navigation_state"] * self.envs.num_envs,
@@ -2742,10 +2835,6 @@ class RLTrainer(BaseVLNCETrainer):
                 ]
                 cand_real_pos = [
                     state["candidate_positions"]
-                    for state in navigation_states
-                ]
-                candidate_q0_records = [
-                    state["candidate_q0_records"]
                     for state in navigation_states
                 ]
                 if mode == 'train':
@@ -2781,7 +2870,7 @@ class RLTrainer(BaseVLNCETrainer):
 
             if fusion_enabled:
                 raw_wp_outputs = clone_wp_outputs_candidate_rgb(wp_outputs)
-                self._run_raenwm_rgb_fusion_prediction(
+                candidate_q0_prediction = self._run_raenwm_rgb_fusion_prediction(
                     raenwm_front_latents,
                     cur_pos,
                     cur_ori,
@@ -2803,6 +2892,7 @@ class RLTrainer(BaseVLNCETrainer):
                     node_pano_embeds * node_pano_masks.unsqueeze(2), 1
                 ) / torch.sum(node_pano_masks, 1, keepdim=True)
             else:
+                candidate_q0_prediction = None
                 self._run_raenwm_prediction(
                     raenwm_front_latents,
                     cur_pos,
@@ -2827,20 +2917,18 @@ class RLTrainer(BaseVLNCETrainer):
                 batch_candidate_to_ghost.append(candidate_to_ghost)
 
             if self._active_lookahead_enabled():
-                if candidate_q0_records is None:
-                    raise RuntimeError("active lookahead did not receive candidate q0 records")
                 for i, gmap in enumerate(self.gmaps):
-                    gmap.record_persistent_q0_candidates(
-                        batch_candidate_to_ghost[i],
-                        cand_pos[i],
-                        cand_real_pos[i],
-                        candidate_q0_records[i],
-                        wp_outputs['cand_img_idxes'][i],
-                        wp_outputs['cand_distances'][i],
+                    commit_candidate_q0_cache(
+                        gmap,
+                        env_index=i,
+                        candidate_previews=candidate_previews[i],
+                        candidate_view_indices=wp_outputs['cand_img_idxes'][i],
+                        candidate_forward_distances=wp_outputs['cand_distances'][i],
+                        prediction=candidate_q0_prediction,
+                        runtime=self.raenwm_runtime,
                         source_front_vp=str(cur_vp[i]),
                         source_high_level_step=int(stepk),
                     )
-                self._record_e24_source_contexts(stepk=stepk, cur_vp=cur_vp)
 
             nav_inputs = self._nav_gmap_variable(cur_vp, cur_pos, cur_ori, task_type)
             nav_inputs.update({

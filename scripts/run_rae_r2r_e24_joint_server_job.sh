@@ -15,6 +15,8 @@ BASE_SELECTION_MANIFEST_SHA=${ETPR1_E24_JOINT_BASE_SELECTION_MANIFEST_SHA:-}
 RXR_BASE_SELECTION=${ETPR1_RXR_BASE_SELECTION:-}
 RXR_BASE_CHECKPOINT=${ETPR1_RXR_BASE_CHECKPOINT:-}
 RXR_ALLOW_SMOKE_BASE=${ETPR1_RXR_ALLOW_SMOKE_BASE:-False}
+WARM_START_CKPT=${ETPR1_E24_WARM_START_CHECKPOINT:-}
+WARM_START_SHA=${ETPR1_E24_WARM_START_SHA256:-}
 PRETRAIN_PATH=${ETPR1_E24_JOINT_PRETRAIN_PATH:-${REPO_ROOT}/pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768_eval_final_best/model_best_step_465000.pt}
 CHECKPOINT_SYNC_DESTINATION=${ETPR1_E24_JOINT_SYNC_DESTINATION:-a6000@10.10.10.2:/home/a6000/gwl/ETP-R1/data/logs/active_lookahead/e24_joint_sft/checkpoints/etpr1_e24_joint_sft}
 CHECKPOINT_SYNC_ENABLED=${ETPR1_E24_JOINT_SYNC_ENABLED:-True}
@@ -82,12 +84,23 @@ case "$MODE" in
     *) echo "Unknown mode: $MODE" >&2; exit 2 ;;
 esac
 
+if [[ "$CONFIG_FILE" == *native_cls* ]]; then
+    [ -n "$WARM_START_CKPT" ] && [ -n "$WARM_START_SHA" ] || {
+        echo "Native Q0-cache training requires ETPR1_E24_WARM_START_CHECKPOINT and ETPR1_E24_WARM_START_SHA256" >&2
+        exit 2
+    }
+fi
+
 for integer_setting in "$TRAIN_ITERS" "$LOG_EVERY"; do
     [[ "$integer_setting" =~ ^[1-9][0-9]*$ ]] || {
         echo "Training iteration settings must be positive integers: $integer_setting" >&2
         exit 2
     }
 done
+[ -z "$WARM_START_CKPT" ] || [ -e "$WARM_START_CKPT" ] || {
+    echo "Missing lookahead warm-start checkpoint: $WARM_START_CKPT" >&2
+    exit 1
+}
 for integer_setting in "$NPROC_PER_NODE" "$NUM_ENVIRONMENTS" "$BATCH_SIZE"; do
     [[ "$integer_setting" =~ ^[1-9][0-9]*$ ]] || {
         echo "Distributed and batch settings must be positive integers: $integer_setting" >&2
@@ -140,6 +153,7 @@ if [ -n "$NWM_HEAD_CHECKPOINT" ]; then
     verify_sha256 "$NWM_HEAD_CHECKPOINT" "$NWM_HEAD_SHA" "NWM heads"
 fi
 verify_sha256 "$REPO_ROOT/pretrained/raenwm_stage0/stat.pt" 84ede66def5e6e3f25679334dc89cf63b12aacb99cbf0f5ae7ed4ad3187f7e59 "NWM stat"
+[ -z "$WARM_START_CKPT" ] || verify_sha256 "$WARM_START_CKPT" "$WARM_START_SHA" "lookahead warm start"
 
 mkdir -p "$(dirname -- "$LOG_FILE")"
 cd "$REPO_ROOT"
@@ -176,6 +190,8 @@ esac
     echo "start_checkpoint_sha256=$START_CKPT_SHA"
     echo "base_iteration=$BASE_ITERATION"
     echo "base_selection_manifest_sha256=${BASE_SELECTION_MANIFEST_SHA:-none}"
+    echo "warm_start_checkpoint=${WARM_START_CKPT:-none}"
+    echo "warm_start_checkpoint_sha256=${WARM_START_SHA:-none}"
     echo "pretrain_path=$PRETRAIN_PATH"
     echo "checkpoint_sync_destination=$CHECKPOINT_SYNC_DESTINATION"
     echo "checkpoint_sync_enabled=$CHECKPOINT_SYNC_ENABLED"
@@ -222,6 +238,8 @@ fi
     MODEL.ACTIVE_LOOKAHEAD.base_checkpoint_path "$START_CKPT" \
     MODEL.ACTIVE_LOOKAHEAD.base_checkpoint_sha256 "$START_CKPT_SHA" \
     MODEL.ACTIVE_LOOKAHEAD.base_iteration "$BASE_ITERATION" \
+    MODEL.ACTIVE_LOOKAHEAD.warm_start_checkpoint_path "$WARM_START_CKPT" \
+    MODEL.ACTIVE_LOOKAHEAD.warm_start_checkpoint_sha256 "$WARM_START_SHA" \
     MODEL.ACTIVE_LOOKAHEAD.base_selection_manifest_sha256 "$BASE_SELECTION_MANIFEST_SHA" \
     IL.sample_ratio_iteration_offset "$BASE_ITERATION" \
     MODEL.ACTIVE_LOOKAHEAD.smoke_freeze_check "$SMOKE_FREEZE_CHECK" \

@@ -188,7 +188,7 @@ def test_predicted_future_source_never_calls_oracle_environment(monkeypatch):
     trainer = SimpleNamespace(
         device=torch.device("cpu"),
         envs=_Env(),
-        gmaps=[SimpleNamespace(select_persistent_q0=lambda _ids: record)],
+        gmaps=[SimpleNamespace(select_candidate_q0=lambda _ids: record)],
         _active_lookahead_config=lambda: cfg,
         _e24_joint_head_state_module=lambda: _head().eval(),
     )

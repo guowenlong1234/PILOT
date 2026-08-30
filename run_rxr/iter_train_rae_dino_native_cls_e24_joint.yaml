@@ -143,7 +143,10 @@ MODEL:
     dino_cwp_none_threshold: 0.3
     dino_cwp_context_strategy: fixed_initial
     dino_cwp_heading_policy: face_motion
-    checkpoint_format_version: etpr1-rxr-native-cls-e24-joint-v1
+    warm_start_checkpoint_path: ''
+    warm_start_checkpoint_sha256: ''
+    warm_start_expected_q0_contract: temporary_action_same_island_navmesh
+    checkpoint_format_version: etpr1-rxr-native-cls-e24-joint-q0-cache-v2
     smoke_freeze_check: False
     diagnostics_enabled: True
   DEPTH_ENCODER:

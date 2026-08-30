@@ -273,7 +273,14 @@ _C.MODEL.ACTIVE_LOOKAHEAD.dino_cwp_checkpoint_sha256 = ""
 _C.MODEL.ACTIVE_LOOKAHEAD.dino_cwp_none_threshold = 0.3
 _C.MODEL.ACTIVE_LOOKAHEAD.dino_cwp_context_strategy = "fixed_initial"
 _C.MODEL.ACTIVE_LOOKAHEAD.dino_cwp_heading_policy = "face_motion"
-_C.MODEL.ACTIVE_LOOKAHEAD.checkpoint_format_version = "etpr1-e24-joint-v1"
+_C.MODEL.ACTIVE_LOOKAHEAD.warm_start_checkpoint_path = ""
+_C.MODEL.ACTIVE_LOOKAHEAD.warm_start_checkpoint_sha256 = ""
+_C.MODEL.ACTIVE_LOOKAHEAD.warm_start_expected_q0_contract = (
+    "temporary_action_same_island_navmesh"
+)
+_C.MODEL.ACTIVE_LOOKAHEAD.checkpoint_format_version = (
+    "etpr1-active-lookahead-q0-cache-v1"
+)
 _C.MODEL.ACTIVE_LOOKAHEAD.smoke_freeze_check = False
 _C.MODEL.ACTIVE_LOOKAHEAD.diagnostics_enabled = True
 

@@ -1531,7 +1531,6 @@ class RLTrainer(BaseVLNCETrainer):
                 front_latents = pano_latents[:, 0].detach()
                 front_cls = pano_raw_cls[:, 0].detach()
 
-            candidate_q0_records = None
             if self._frozen_lookahead_enabled():
                 navigation_states = self.envs.call(
                     ["get_navigation_state"] * self.envs.num_envs,
@@ -1549,9 +1548,6 @@ class RLTrainer(BaseVLNCETrainer):
                 cur_ori = [state["orientation"] for state in navigation_states]
                 cand_real_pos = [
                     state["candidate_positions"] for state in navigation_states
-                ]
-                candidate_q0_records = [
-                    state["candidate_q0_records"] for state in navigation_states
                 ]
             else:
                 cur_pos, cur_ori = self.get_pos_ori()
@@ -1641,19 +1637,14 @@ class RLTrainer(BaseVLNCETrainer):
 
             if self._frozen_lookahead_enabled():
                 for i, gmap in enumerate(self.gmaps):
-                    gmap.record_persistent_q0_candidates(
-                        batch_candidate_to_ghost[i],
-                        cand_pos[i],
-                        cand_real_pos[i],
-                        candidate_q0_records[i],
-                        wp_outputs['cand_img_idxes'][i],
-                        wp_outputs['cand_distances'][i],
+                    self.frozen_lookahead.commit_candidate_q0(
+                        env_index=i,
+                        candidate_previews=candidate_previews[i],
+                        candidate_view_indices=wp_outputs['cand_img_idxes'][i],
+                        candidate_forward_distances=wp_outputs['cand_distances'][i],
                         source_front_vp=str(cur_vp[i]),
                         source_high_level_step=int(stepk),
                     )
-                self.frozen_lookahead.record_source_contexts(
-                    stepk=stepk, cur_vp=cur_vp
-                )
 
             nav_inputs = self._nav_gmap_variable(cur_vp, cur_pos, cur_ori, task_type)
             nav_inputs.update({

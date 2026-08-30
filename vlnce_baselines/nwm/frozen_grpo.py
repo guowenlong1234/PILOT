@@ -31,6 +31,10 @@ from vlnce_baselines.nwm.rgb_fusion import (
     RaeNwmRgbFusionAdapter,
     apply_rgb_fusion_to_current_candidates,
 )
+from vlnce_baselines.nwm.active_lookahead.candidate_q0 import (
+    build_candidate_q0_queries,
+    commit_candidate_q0_cache,
+)
 
 
 class FrozenLookaheadController:
@@ -154,6 +158,11 @@ class FrozenLookaheadController:
             "nwm_num_steps": int(self.config.MODEL.RAENWM.num_steps),
             "none_threshold": float(active.dino_cwp_none_threshold),
             "delta_scale": float(active.e24_train_delta_scale),
+            "q0_contract": "r1_post_update_ghost_mean_cached_v1",
+            "q0_position_source": "r1_post_update_ghost_mean",
+            "q0_reuse_required": True,
+            "q0_cache_precision": "cpu_fp16",
+            "q0_recompute_forbidden": True,
         }
         mismatches = {
             key: (provenance.get(key), value)
@@ -250,26 +259,31 @@ class FrozenLookaheadController:
         return self.raenwm_runtime.generator.get_state().cpu()
 
     def _build_preview_queries(self, cur_pos, cur_ori, candidate_previews):
-        from vlnce_baselines.nwm.runtime import NwmQuery
+        return build_candidate_q0_queries(
+            cur_pos, cur_ori, candidate_previews
+        )
 
-        queries = []
-        for env_index, previews in enumerate(candidate_previews):
-            grouped = OrderedDict()
-            for preview in previews:
-                if preview.target_kind not in ("new_ghost", "existing_ghost"):
-                    continue
-                grouped.setdefault(str(preview.target_vp), []).append(
-                    np.asarray(preview.position, dtype=np.float32)
-                )
-            for ghost_vp, positions in grouped.items():
-                queries.append(NwmQuery(
-                    env_index=env_index,
-                    query_id=ghost_vp,
-                    current_position=np.asarray(cur_pos[env_index], dtype=np.float32),
-                    current_yaw=float(heading_from_quaternion(cur_ori[env_index])),
-                    target_position=np.mean(positions, axis=0).astype(np.float32),
-                ))
-        return queries
+    def commit_candidate_q0(
+        self,
+        *,
+        env_index,
+        candidate_previews,
+        candidate_view_indices,
+        candidate_forward_distances,
+        source_front_vp,
+        source_high_level_step,
+    ):
+        return commit_candidate_q0_cache(
+            self.gmaps[env_index],
+            env_index=env_index,
+            candidate_previews=candidate_previews,
+            candidate_view_indices=candidate_view_indices,
+            candidate_forward_distances=candidate_forward_distances,
+            prediction=self.last_prediction,
+            runtime=self.raenwm_runtime,
+            source_front_vp=source_front_vp,
+            source_high_level_step=source_high_level_step,
+        )
 
     def inject_rgb(
         self,

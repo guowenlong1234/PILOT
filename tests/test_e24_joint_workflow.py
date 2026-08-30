@@ -9,7 +9,7 @@ import yaml
 ROOT = Path(__file__).parents[1]
 
 
-def test_native_cls_config_is_isolated_and_uses_v2_contract():
+def test_native_cls_config_uses_reusable_q0_cache_contract():
     path = ROOT / "run_r2r/iter_train_rae_dino_native_cls_e24_joint.yaml"
     config = yaml.safe_load(path.read_text())
     nwm = config["MODEL"]["RAENWM"]
@@ -27,7 +27,12 @@ def test_native_cls_config_is_isolated_and_uses_v2_contract():
         "native_cls_e24_joint_sft/checkpoints/etpr1_native_cls_e24_joint_sft"
     )
     assert active["checkpoint_format_version"] == (
-        "etpr1-native-cls-e24-joint-v2"
+        "etpr1-native-cls-e24-joint-q0-cache-v3"
+    )
+    assert active["warm_start_checkpoint_path"] == ""
+    assert active["warm_start_checkpoint_sha256"] == ""
+    assert active["warm_start_expected_q0_contract"] == (
+        "temporary_action_same_island_navmesh"
     )
     assert active["top5_cls_lr"] == 1.0e-5
     assert active["e24_head_lr"] == 5.0e-6
@@ -47,6 +52,8 @@ def test_native_cls_smoke_and_single_episode_wrappers_are_isolated():
     assert "*native_cls*)" in launcher
     assert "pretrained/raenwm_native_cls/checkpoint_step_75000.pth.tar" in launcher
     assert "38b24af13b76ba8faef367559244c3a0401e0557e7c299870c273cbee8a07064" in launcher
+    assert "ETPR1_E24_WARM_START_CHECKPOINT" in launcher
+    assert "ETPR1_E24_WARM_START_SHA256" in launcher
 
     smoke = (
         ROOT / "scripts/manage_rae_r2r_native_cls_e24_joint_server.sh"

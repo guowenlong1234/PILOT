@@ -54,6 +54,10 @@ def test_preview_is_side_effect_free_and_merges_same_step_ghosts():
     assert [(item.target_kind, item.target_vp) for item in preview] == [
         ("new_ghost", "g0"), ("new_ghost", "g0")
     ]
+    for item in preview:
+        np.testing.assert_allclose(
+            item.post_update_ghost_mean, [1.1, 0.0, 0.0], atol=1.0e-6
+        )
     assert graph.node_pos == {} and graph.ghost_pos == {}
     mapping = graph.update_graph(
         None, 1, "0", np.zeros(3, dtype=np.float32), torch.zeros(2),
