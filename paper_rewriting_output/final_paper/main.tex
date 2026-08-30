@@ -1,0 +1,411 @@
+\documentclass[UTF8,11pt]{ctexart}
+\usepackage[a4paper,margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+\usepackage{xcolor}
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcommand{\method}{RWM-Lookahead}
+
+\title{面向连续环境视觉语言导航的受约束表征世界模型主动前视}
+\author{作者信息待定}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section*{摘要}
+连续环境视觉语言导航要求智能体将自然语言指令转化为在线感知、拓扑规划与连续控制。现有图式策略能够借助拓扑图压缩长程动作空间，但候选节点的评分仍主要依赖当前观测和历史状态；当多个候选在当前证据下难以区分时，策略缺少与候选动作直接对齐的未来视觉依据。本文提出一种受约束的表征世界模型主动前视方法。冻结的世界模型从四帧历史上下文预测原生 CLS 与图像块标记，并在不读取真实未来观测的条件下为在线拓扑候选构造未来证据；候选残差评分头仅对基础策略排名前五的可移动候选施加有界增量，不直接改写停止动作和其他候选的分数。监督微调学习 CLS 适配器与候选残差评分头，组相对策略优化阶段则复用 rollout 时缓存的残差向量和动作掩码，使前视模块不参与强化更新。系统测试验证了预训练权重严格加载、257 标记数值一致性、候选级回退、梯度边界和恢复语义。\textit{[RESULT-SUMMARY：R2R-CE/RxR-CE 同口径主结果、逐级消融、未来证据来源、一步至三步视野、动作翻转净价值及开销的核心数值。]} 这些实验共同检验未来表征在什么条件下改善拓扑决策，并把预测范围、误差和计算成本置于同一评价框架。
+\noindent\textbf{关键词：}连续环境视觉语言导航；拓扑规划；世界模型；表征自动编码器；主动前视；强化微调
+
+\section{引言}
+
+视觉语言导航要求智能体依据自然语言指令，在此前未见的环境中寻找目标位置。早期研究通常把环境表示为离散全景图\cite{anderson2018r2r}；连续环境视觉语言导航进一步移除了已知导航图、完美定位和短程 oracle 等假设，使智能体必须把高层规划落实为低层运动\cite{krantz2020vlnce}。Habitat 与 Matterport3D 为这一问题提供了可重复的三维仿真和室内场景\cite{savva2019habitat,chang2017matterport}，RxR 则把语言范围扩展到英语、印地语和泰卢固语，并提供更长、更密集的指令—轨迹对齐\cite{ku2020rxr}。
+
+拓扑方法在这一设置中具有明确价值。它们把已经访问的位置和仍可探索的候选位置组织为在线图，使长程决策从连续控制序列转化为节点选择。ETPNav 将这种在线图规划与 waypoint 控制结合，在连续环境中建立了有竞争力的图式基线\cite{an2025etpnav}。随后，ETP-R1 通过跨 R2R/RxR 的联合预训练、在线监督微调和组相对策略优化，扩展了图式策略的数据与训练范式\cite{ye2025etpr1}。GridMM、BEVBert 等工作也从栅格记忆和多模态地图预训练角度强化了空间表征\cite{wang2023gridmm,an2023bevbert}。这些方法说明，显式空间结构仍是连续导航中高效而可靠的归纳偏置。
+
+然而，在线图并没有消除观测不充分的问题。候选 ghost 的得分主要由当前视觉、指令和历史图状态决定。当走廊转角、遮挡或相似房间使多个候选在当前时刻难以区分时，基础策略需要评估“如果沿该候选继续移动，可能看到什么”。直接查询未来模拟器观测会破坏在线决策的合法性；直接把世界模型输出覆盖到策略表示中，又可能因预测误差改变原本正确的停止或候选动作。近期 NavMorph 已经表明，世界模型可以为 VLN-CE 提供潜在前瞻\cite{yao2025navmorph}。因此，本文不把“世界模型用于连续导航”作为首创，而把问题收窄为：如何让原生未来表征与在线拓扑候选直接对齐，同时明确限制错误预测能够影响的动作范围。
+
+为此，我们提出\method{}。该方法从基础拓扑策略选出的前五个 ghost 出发，使用四帧历史视觉上下文驱动冻结的表征世界模型。视觉编码器输出一个 CLS 标记和 256 个图像块标记；世界模型在同一高维潜在空间内预测候选到达位置 $q_0$ 的表征。冻结的候选航点预测器再给出一个局部位移，世界模型据此生成候选前方一步 $q_1$ 的表征。零残差初始化的 CLS 适配器只调整 $q_1$ 的第一个标记，候选残差评分头（工程内部名为 E24）为前五个移动候选产生有界分数增量。停止动作与其他候选不直接加残差，任一候选前视失败时仅该候选回退。本文以 $q_1$，即候选前方一步，作为主设置；第二步和第三步是预先定义的受控实验扩展，用于研究额外信息、误差累积和推理成本的关系。
+
+训练设计同样遵循受约束原则。在线监督微调同时优化基础导航交叉熵和调整后完整动作分布的交叉熵，使前视模块在教师动作监督下学习何时改变候选排序。进入 GRPO 后，rollout 过程把动作对齐的完整残差向量、有效动作掩码和已调整旧策略概率写入缓存；更新阶段不重新选择前五个候选，而是让当前策略与参考策略在各自基础分数上使用同一缓存残差。世界模型、候选航点预测器、CLS 适配器和候选残差评分头均冻结，只有基础导航策略参与优化。GRPO 源于组内相对优势优化\cite{shao2024deepseekmath}，原版 ETP-R1 已将其用于图式 VLN-CE\cite{ye2025etpr1}，近期 NavGRPO 也研究了轨迹多样性驱动的 VLN 强化学习\cite{li2026navgrpo}。本文的增量不是再次引入 GRPO，而是定义可逐项检查的缓存残差契约。
+
+本文的贡献概括如下。
+\begin{itemize}
+  \item 提出一种面向在线拓扑候选的原生 CLS+patch 主动前视方法。它不读取真实未来观测，并通过前五候选范围、残差限幅、停止分数不直接改写和候选级回退约束预测误差的作用范围。
+  \item 建立监督学习与强化微调之间可复现的训练契约。前视适配器与候选残差评分头在 SFT 中学习；GRPO 使用 rollout 缓存的动作对齐残差和掩码，避免动态重算前五候选把前视变化混入策略比值。
+  \item 建立与贡献直接对应的实验体系：逐级分解视觉表征、RGB 未来融合、候选残差评分与 GRPO；比较无 $q_1$、候选级真实渲染 $q_1$ 和预测 $q_1$；分析向前第一、第二、第三步的视野权衡，并以动作翻转、预测误差、有效覆盖和开销刻画方法边界。
+\end{itemize}
+
+\section{相关工作}
+
+\subsection{连续环境视觉语言导航与拓扑规划}
+
+R2R 建立了真实室内场景中的指令跟随任务\cite{anderson2018r2r}，VLN-CE 将其扩展到连续动作和未知导航图\cite{krantz2020vlnce}，RxR 则进一步引入多语言和更密集的时空对齐\cite{ku2020rxr}。拓扑与地图方法通过显式空间记忆减少长程状态混淆。ETPNav 维护已访问节点和候选 ghost，并把图上选择转为连续控制\cite{an2025etpnav}；GridMM 以栅格记忆聚合历史观测\cite{wang2023gridmm}；BEVBert 把局部度量图与全局拓扑图结合用于多模态预训练\cite{an2023bevbert}。大模型方法则尝试显式推理、地图提示或视频历史，包括 NavGPT、MapGPT、NavGPT-2 和 NaVid\cite{zhou2024navgpt,chen2024mapgpt,zhou2024navgpt2,zhang2024navid}。本文沿用图式策略的结构效率，但关注基础图分数之外的候选相关未来证据。
+
+\subsection{视觉表征与导航世界模型}
+
+CLIP 通过图文对比学习提供通用视觉语义\cite{radford2021clip}，DINOv2 则从大规模自监督训练中获得无需文本标注的图像级和像素级特征\cite{oquab2023dinov2}。表征自动编码器把 DINO 等预训练编码器与可学习解码器结合，使生成模型在语义丰富的高维潜在空间中工作\cite{zheng2025rae}。在导航侧，Dreamwalker 用心理规划研究连续 VLN 的未来推演\cite{wang2023dreamwalker}，NavMorph 进一步以循环状态空间模型、自演化记忆和两步想象规划研究 VLN-CE\cite{yao2025navmorph}。这些工作说明未来表征具有潜力，但也使宽泛的世界模型新颖性不再成立。表~\ref{tab:navmorph} 将最邻近的 NavMorph 与本文方法按决策接口而非只按任务名称区分。
+
+\begin{table}[t]
+\centering
+\caption{本文方法与 NavMorph 的功能边界。NavMorph 信息依据其公开论文\cite{yao2025navmorph}；“未设置等价约束”不表示其整体决策缺少安全机制。}
+\label{tab:navmorph}
+\begin{tabularx}{\linewidth}{p{0.20\linewidth}YY}
+\toprule
+维度 & NavMorph & \method{} \\
+\midrule
+未来表示 & 紧凑循环潜状态与重建视觉嵌入 & 原生 CLS+256 图像块标记 \\
+动作条件 & 预测动作序列 & 在线图中每个候选的累计位姿条件 \\
+决策对象 & 航点与预测路径的一致性 & 逐 ghost 的候选残差 \\
+预测步数 & 主设置为两步想象 & 一步为主；二、三步为受控扩展 \\
+干预位置 & 预测动作与航点评分 & 拓扑动作分数 \\
+作用范围 & 未设置与本文等价的停止/非前五候选约束 & 停止分数不直接改写；非前五候选残差为零 \\
+测试时更新 & 上下文演化记忆持续更新 & 世界模型与前视模块参数固定 \\
+主要成本 & 循环潜状态与记忆检索 & 按有效候选执行世界模型与候选航点查询 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{在线监督学习与强化微调}
+
+DAgger 通过在学习策略访问的状态上查询教师，缓解离线模仿学习的分布偏移\cite{ross2011dagger}。PPO 以裁剪概率比限制策略更新幅度\cite{schulman2017ppo}，GRPO 则以同组样本的相对奖励替代独立价值模型，并加入 KL 约束\cite{shao2024deepseekmath}。ETP-R1 把在线 SFT 与 GRPO 串联到图式 VLN-CE 中\cite{ye2025etpr1}，NavGRPO 从轨迹多样性与鲁棒性角度研究 VLN 强化学习\cite{li2026navgrpo}。本文不改变 GRPO 的基本定义，而把前视模块视为冻结的动作残差函数，从而使强化更新只作用于基础策略。
+
+\section{方法}
+
+\subsection{问题定义}
+
+给定自然语言指令 $I$，智能体在时刻 $t$ 接收当前观测 $o_t$，并维护在线拓扑图 $G_t=(V_t,E_t)$。节点集合包含已经访问的节点 $V_t^{\mathrm{vis}}$ 和尚未访问但可执行的 ghost 候选 $V_t^{\mathrm{ghost}}$。基础策略根据指令、当前全景和图状态输出动作分数
+\begin{equation}
+\mathbf{z}_t=f_{\theta}(I,o_{\leq t},G_t),
+\end{equation}
+动作集合由停止动作、可执行 ghost 和填充项组成。本文只对基础分数排名前 $K$ 的 ghost 查询未来证据，主设置为 $K=5$；并列分数按图中稳定索引打破，以保证重复运行选择相同候选。
+
+为避免 $q_0$、$q_1$ 与预测视野混淆，我们把候选 $i$ 的到达位姿记为 $p_0^i$，它对应中间查询 $q_0$；候选前方第 $r$ 个局部预测位姿记为 $p_r^i$，对应 $q_r$。四帧历史上下文记为 $H_t$。冻结世界模型 $W$ 首先预测候选到达位置的表征
+\begin{equation}
+\widehat{X}_{0}^{i}=W(H_t,c(p_0^i)), \qquad
+\widehat{X}_{0}^{i}\in\mathbb{R}^{257\times768}.
+\end{equation}
+候选航点预测器 $C$ 读取 $\widehat{X}_{0}^{i}$ 的图像块标记，产生局部位移 $\Delta p_1^i$，随后
+\begin{equation}
+p_1^i=p_0^i\oplus\Delta p_1^i, \qquad
+\widehat{X}_{1}^{i}=W(H_t,c(p_1^i)).
+\end{equation}
+每个 $\widehat{X}_{r}^{i}$ 的第一个标记为 CLS，其余 256 个为图像块表征。世界模型不得读取对应位姿的真实 RGB。预测视野 $h$ 从 $q_0$ 之后计数：$h=1$ 使用 $\widehat{X}_{1}^{i}$，也就是候选前方一步；$h=2,3$ 分别表示再递推一次或两次。工程已经实现并验证 $h=1$；$h=2,3$ 是实验 2 中待实现的受控扩展。
+
+\subsection{总体框架}
+
+\method{} 保留 ETP-R1 的语言编码、在线拓扑图、基础动作头、低层控制器以及原有 SFT/GRPO 框架\cite{ye2025etpr1}。本文新增的部分是 RAE/DINOv2 视觉接口、RGB 世界模型融合、候选持久上下文、$q_0\rightarrow C\rightarrow q_1$ 前视链、CLS 适配器、候选残差评分头，以及 GRPO 的缓存残差分布。基础策略得到前五个 ghost 后，系统为每个候选读取其来源节点保存的历史快照，再生成候选相关的未来标记。候选残差评分头读取候选所有者表示、语言标记、$q_0$ 几何、基础对数概率和 $q_1$ 标记，输出动作对齐的残差。
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.96\linewidth]{figures/method_overview.png}
+\caption{受约束表征世界模型主动前视的总体流程。实线表示已实现的 $h=1$ 主路径，虚线表示计划中的 $h=2,3$ 受控扩展。}
+\label{fig:overview}
+\end{figure}
+
+\subsection{原生 CLS+patch 表征世界模型}
+
+冻结的 DINOv2 编码器对前向 RGB 视图输出原始 CLS $x_t^{\mathrm{cls}}\in\mathbb{R}^{768}$ 和图像块特征 $x_t^{\mathrm{patch}}\in\mathbb{R}^{256\times768}$\cite{oquab2023dinov2}。导航分支继续使用经过残差映射的 CLS；世界模型上下文只使用未经导航适配的原始标记。按照 RAE 统计量完成归一化后，每帧被打包为
+\begin{equation}
+X_t=[x_t^{\mathrm{cls}};x_t^{\mathrm{patch}}]\in\mathbb{R}^{257\times768}.
+\end{equation}
+上下文由四个去重后的历史帧组成。上下文不足时不复制首帧制造伪历史，而是关闭对应候选的前视。世界模型使用严格匹配的 EMA 权重、固定归一化统计和 10 次 Euler 采样；兼容实现与参考实现的完整 257 标记输出已经进行固定噪声数值比较。该测试支持实现一致性，但不等价于预测有助于导航。
+
+\subsection{候选相关 $q_0$、航点预测与 $q_1$}
+
+每个 ghost 保存与其轨迹来源对应的历史快照。系统从该快照和候选累计位姿条件预测 $q_0$。冻结的 DINO 候选航点预测器读取 $q_0$ 的 256 个图像块标记，输出 $30\times12$ 的角度--距离离散分布和一个空结果概率；空结果阈值为 0.3。有效的最高概率单元被转换为局部位移和朝向，再相对同一来源快照形成 $q_1$ 的累计位姿条件。世界模型随后生成 $q_1$ 的完整标记序列，全程不调用模拟器渲染未来 RGB。
+
+一步预测是本文的主方法。计划中的 $h=2,3$ 扩展将沿用固定历史快照：第 $r$ 轮只让候选航点预测器读取 $\widehat{X}_{r-1}^{i}$ 的图像块标记，并把新位移累加为 $p_r^i$；世界模型仍从 $H_t$ 和累计条件 $c(p_r^i)$ 预测端点表征。任一轮返回空结果、不可达条件或非有限输出时，该候选在本轮及更远视野中失效。为保持评分头输入维度不变，视野 $h$ 只把端点 $\widehat{X}_{h}^{i}$ 送入评分头；每个视野单独训练，使用相同参数量、优化预算和随机种子集合。多步代码、单元测试和完整评测产生前，$h=2,3$ 只表示实验协议而非已完成结果。
+
+\subsection{CLS 适配与候选残差评分}
+
+$q_1$ 的 CLS 先经过独立适配器 $A_{\phi}$：
+\begin{equation}
+\widetilde{x}_{t+1}^{i,\mathrm{cls}}
+=\widehat{x}_{t+1}^{i,\mathrm{cls}}
++A_{\phi}(\widehat{x}_{t+1}^{i,\mathrm{cls}},c_{t+1}^{i}).
+\end{equation}
+适配器把归一化 CLS 与五维条件 $(d_x,d_y,\sin d_\theta,\cos d_\theta,d_t)$ 融合，最后一层为零初始化，因此初始输出严格等于世界模型预测；256 个图像块标记逐值保持不变。候选残差评分头在三轮交错融合中依次读取指令标记、未来图像块、未来 CLS 和候选间关系，再结合候选所有者表示、$q_0$ 几何与基础对数概率产生原始分数。残差以
+\begin{equation}
+\delta_t^i=\delta_{\max}\tanh(s_t^i)
+\end{equation}
+限幅，当前结构配置取 $\delta_{\max}=1$。调整后动作分数为
+\begin{equation}
+z_t^{\prime i}=
+\begin{cases}
+z_t^i+\delta_t^i, & i\in\mathrm{TopK}_{\mathrm{ghost}},\\
+z_t^i, & \text{停止、非前 $K$ 候选或无效动作}.
+\end{cases}
+\end{equation}
+该公式只保证停止动作的分数不直接加残差；移动候选变化后，普通 softmax 下的停止概率仍可能改变。GRPO 使用的条件移动分布另外保持基础停止概率质量不变。若某个候选缺少四帧上下文、$q_0$ 失败、候选航点预测为空、$q_1$ 失败或输出非有限，则只把该候选残差置零，不用其他候选补位；若整行无有效未来候选，则完整动作分布退化为基础策略。该设计限制了影响范围，但不保证导航性能不会下降。
+
+\subsection{联合监督训练}
+
+SFT 同时保留基础动作监督和调整后完整动作分布监督：
+\begin{equation}
+\mathcal{L}_{\mathrm{SFT}}
+=\mathcal{L}_{\mathrm{base}}
++\lambda_{\mathrm{adj}}\mathcal{L}_{\mathrm{adj}}.
+\end{equation}
+基础损失更新导航策略、导航 CLS 映射和 RGB 融合；调整后损失只更新 CLS 适配器与候选残差评分头。一次 rollout 内，候选所有者表示、语言标记、未来标记、几何、基础动作分数、有效掩码、候选索引和教师动作全部停止梯度，并以半精度保存到 CPU 端回放缓存。导航损失和回放损失分别反向传播，随后在同一次优化器更新中合并梯度；回放微批大小为 2。由于前视输入均已停止梯度，调整后损失不会更新基础策略。DINOv2、世界模型、候选航点预测器和基础航点预测器在两项损失下均冻结。
+
+\begin{table}[t]
+\centering
+\caption{联合 SFT 的参数更新边界。}
+\label{tab:gradients}
+\begin{tabularx}{\linewidth}{Ycc}
+\toprule
+参数组 & 基础损失 & 调整后损失 \\
+\midrule
+基础导航策略与导航 CLS 映射 & 更新 & 停止梯度 \\
+RGB 世界模型融合适配器 & 更新 & 停止梯度 \\
+$q_1$ CLS 适配器 & 不参与 & 更新 \\
+候选残差评分头 & 不参与 & 更新 \\
+DINOv2、世界模型、两类航点预测器 & 冻结 & 冻结 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{冻结式 GRPO}
+
+GRPO 从联合 SFT 选定的单一 checkpoint 启动。对同一起点采样一组轨迹，以组内标准化奖励形成优势 $\hat{A}$，并使用裁剪概率比和 KL 正则约束更新\cite{shao2024deepseekmath,schulman2017ppo}。rollout 时，系统根据当时的基础分数选定前五候选并计算完整动作对齐残差 $\bar{\boldsymbol\delta}_t$；随后缓存 $\bar{\boldsymbol\delta}_t$、有效动作掩码 $\mathbf m_t$ 和已经调整的旧策略概率。更新阶段不重新计算前五候选或前视特征，而是定义
+\begin{equation}
+\pi^{\mathrm{LA}}(a\mid s;\theta,\bar{\boldsymbol\delta}_t,\mathbf m_t)
+=\mathcal{F}(\mathbf z_{\theta},\bar{\boldsymbol\delta}_t,\mathbf m_t),
+\end{equation}
+其中 $\mathcal{F}$ 保持各自基础策略的停止概率质量，并只在有效移动动作的条件分布中加入缓存残差。当前策略和参考策略使用各自的基础分数，却共享逐元素相同的 $\bar{\boldsymbol\delta}_t$ 与 $\mathbf m_t$；旧策略概率直接取 rollout 缓存。世界模型、RGB 融合、CLS 适配器、候选残差评分头和两类航点预测器全部冻结，唯一可训练参数是基础导航策略。实现同时要求每个 rollout 样本只消费一次，并用零残差退化测试验证 $\mathcal{F}$ 恢复基础分布。
+
+\section{实验}
+
+\subsection{数据集与指标}
+
+实验覆盖 R2R-CE 和 RxR-CE。R2R-CE 报告导航误差（NE）、oracle 成功率（OSR）、成功率（SR）和路径长度加权成功率（SPL）；RxR-CE 进一步报告归一化动态时间规整（nDTW）和成功加权动态时间规整（SDTW）。除 NE 外，表中比例指标均以百分数表示。R2R-CE 的完整 \texttt{val\_unseen} 划分包含 1,839 个 episode；RxR-CE 的语言集合、episode 数和清单哈希由 \textit{RXR-EVAL-MANIFEST} 指定。
+
+每条可直接比较的结果绑定同一个协议键：数据集、划分、语言、传感器、低层控制器、成功阈值、最大步数、checkpoint、选择规则、训练种子、代码提交和原始 JSON。主表只比较协议键完全一致的运行。旧 ETP-R1 发布数字单列为文献背景，不计算与本文方法的差值。checkpoint 使用预先登记的选择函数 \textit{CKPT-SELECTION-RULE}；多种子结果报告均值和场景聚类 95\% 置信区间，单种子结果明确标注为单次运行，且不使用“稳定”或“显著”等措辞。
+
+\subsection{实现细节}
+
+视觉编码器使用冻结 DINOv2-base，特征维度为 768。世界模型接收四帧、每帧 257 个标记的上下文，一步主设置使用 10 次 Euler 采样。主候选预算为 $K=5$，残差上界为 1，候选残差在 SFT 前 400 次更新中预热。表~\ref{tab:implementation} 给出固定配置与具名复现字段。
+
+\begin{table}[t]
+\centering
+\caption{实现与复现设置。斜体大写字段与实验清单中的同名键一一对应。}
+\label{tab:implementation}
+\begin{tabularx}{\linewidth}{lY}
+\toprule
+项目 & 设置 \\
+\midrule
+视觉表征 & DINOv2-base；CLS+256 图像块；维度 768 \\
+世界模型 & 4 帧上下文；10 次 Euler；冻结；\textit{NWM-CKPT-SHA256} \\
+候选与主视野 & $K=5$；$h=1$；稳定并列排序；$\delta_{\max}=1$ \\
+视野扩展 & $h\in\{2,3\}$；端点表征；各视野独立训练 \\
+SFT & 基础交叉熵 + 调整后完整动作交叉熵；\textit{SFT-LR/BATCH/STEPS/SEEDS} \\
+GRPO & 前视链冻结；8 条组内轨迹；$\epsilon=0.2$；$\beta=0.04$；\textit{GRPO-STEPS/SEEDS} \\
+评测协议 & \textit{DATA-MANIFEST/CONTROLLER/SENSORS/MAX-STEPS/SUCCESS-THRESHOLD} \\
+运行环境 & \textit{PYTHON/PYTORCH/TRANSFORMERS/CUDA/HABITAT/HABITAT-SIM/GPU} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{研究问题与对照}
+
+实验围绕四个问题展开。RQ1 通过 Base、RAE/DINOv2、RGB-NWM、候选残差评分和 GRPO 的逐级对照识别边际作用。RQ2 先比较无 $q_1$、候选级真实渲染 $q_1$ 与预测 $q_1$，再在预测分支中比较 $h=1,2,3$。RQ3 对相同初始 episode 的完整轨迹和相同记录状态的一步动作分别配对，判断动作翻转是修正还是伤害。RQ4 联合预测误差、有效未来覆盖率、$K$、历史长度、视野长度和计算成本，解释方法何时有效。
+
+\subsection{主结果与阶段递进}
+
+表~\ref{tab:direct-r2r} 和表~\ref{tab:direct-rxr} 仅容纳同协议直接比较。已核验的 RAE/DINOv2 R2R-CE SFT 基座在完整 \texttt{val\_unseen} 上取得 63.73\% SR 和 55.61\% SPL；其余字段由对应结果清单写入。表~\ref{tab:published} 单列旧 ETP-R1 的发布结果，只说明原训练范式的量级。
+
+\begin{table}[t]
+\centering
+\caption{R2R-CE \texttt{val\_unseen} 同协议直接比较。数值格式为均值$\pm$95\%置信区间；\textit{DIRECT-R2R-PROTOCOL} 指向完整评测清单。}
+\label{tab:direct-r2r}
+\begin{tabular}{lcccc}
+\toprule
+方法 & NE$\downarrow$ & OSR$\uparrow$ & SR$\uparrow$ & SPL$\uparrow$ \\
+\midrule
+RAE/DINOv2 SFT & \textit{R2R-BASE-NE} & \textit{R2R-BASE-OSR} & 63.73 & 55.61 \\
+\method{} SFT & \textit{R2R-LA-SFT-NE} & \textit{R2R-LA-SFT-OSR} & \textit{R2R-LA-SFT-SR} & \textit{R2R-LA-SFT-SPL} \\
+无前视 GRPO 对照 & \textit{R2R-NOLA-GRPO-NE} & \textit{R2R-NOLA-GRPO-OSR} & \textit{R2R-NOLA-GRPO-SR} & \textit{R2R-NOLA-GRPO-SPL} \\
+\method{} GRPO & \textit{R2R-LA-GRPO-NE} & \textit{R2R-LA-GRPO-OSR} & \textit{R2R-LA-GRPO-SR} & \textit{R2R-LA-GRPO-SPL} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+R2R-CE 的 NE 与 OSR 分别反映终点距离和曾经进入成功半径的能力，它们与 SR/SPL 一起揭示停止决策和路径效率。RxR-CE 的指令更长且具有多语言设置，除 SR/SPL 外还需用 nDTW/SDTW 衡量整条轨迹与参考路径的形状一致性。因此，两组结果保留各自最有解释力的列，而不强行合并成一个宽表。
+
+\begin{table}[t]
+\centering
+\caption{RxR-CE \textit{RXR-SPLIT/LANGUAGES} 同协议直接比较。\textit{DIRECT-RXR-PROTOCOL} 指向完整评测清单。}
+\label{tab:direct-rxr}
+\begin{tabular}{lcccc}
+\toprule
+方法 & SR$\uparrow$ & SPL$\uparrow$ & nDTW$\uparrow$ & SDTW$\uparrow$ \\
+\midrule
+RAE/DINOv2 SFT & \textit{RXR-BASE-SR} & \textit{RXR-BASE-SPL} & \textit{RXR-BASE-NDTW} & \textit{RXR-BASE-SDTW} \\
+\method{} SFT & \textit{RXR-LA-SFT-SR} & \textit{RXR-LA-SFT-SPL} & \textit{RXR-LA-SFT-NDTW} & \textit{RXR-LA-SFT-SDTW} \\
+无前视 GRPO 对照 & \textit{RXR-NOLA-GRPO-SR} & \textit{RXR-NOLA-GRPO-SPL} & \textit{RXR-NOLA-GRPO-NDTW} & \textit{RXR-NOLA-GRPO-SDTW} \\
+\method{} GRPO & \textit{RXR-LA-GRPO-SR} & \textit{RXR-LA-GRPO-SPL} & \textit{RXR-LA-GRPO-NDTW} & \textit{RXR-LA-GRPO-SDTW} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{旧 ETP-R1 文献报告值\cite{ye2025etpr1}。这些行与表~\ref{tab:direct-r2r}--\ref{tab:direct-rxr} 的现代视觉链路和控制器协议不可直接求差。}
+\label{tab:published}
+\begin{tabular}{llcccc}
+\toprule
+数据集 & 阶段 & SR & SPL & nDTW & SDTW \\
+\midrule
+R2R-CE & SFT & 63.00 & 54.00 & -- & -- \\
+R2R-CE & GRPO & 65.00 & 56.00 & -- & -- \\
+RxR-CE & SFT & 58.26 & 48.19 & 63.78 & 48.53 \\
+RxR-CE & GRPO & 59.92 & 48.97 & 65.31 & 50.41 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{逐级模块消融}
+
+表~\ref{tab:stages} 回答性能变化来自哪里。每一行声明唯一变化，同时记录初始化 checkpoint、可训练参数、训练样本量与推理计算。GRPO 行另设相同 SFT 起点、相同强化预算但残差恒为零的对照，避免把额外训练预算误算为前视收益。
+
+\begin{table}[t]
+\centering
+\caption{逐级模块消融。每个数据集分别运行，所有行使用相同控制器与选择规则。}
+\label{tab:stages}
+\begin{tabularx}{\linewidth}{p{0.10\linewidth}p{0.15\linewidth}Yccc}
+\toprule
+数据集 & 阶段 & 唯一新增因素 & SR$\uparrow$ & SPL$\uparrow$ & SDTW$\uparrow$ \\
+\midrule
+R2R-CE & Base & 原始 ETP-R1 视觉与训练 & \textit{A1-R2R-BASE-SR} & \textit{A1-R2R-BASE-SPL} & -- \\
+R2R-CE & + RAE & 替换并训练 DINOv2 视觉接口 & \textit{A1-R2R-RAE-SR} & \textit{A1-R2R-RAE-SPL} & -- \\
+R2R-CE & + RGB & 增加当前候选 RGB 世界模型融合 & \textit{A1-R2R-RGB-SR} & \textit{A1-R2R-RGB-SPL} & -- \\
+R2R-CE & + 前视 & 增加 $q_1$ 与候选残差评分 & \textit{A1-R2R-LA-SR} & \textit{A1-R2R-LA-SPL} & -- \\
+R2R-CE & + GRPO & 相同起点增加强化微调 & \textit{A1-R2R-GRPO-SR} & \textit{A1-R2R-GRPO-SPL} & -- \\
+\midrule
+RxR-CE & Base & 原始 ETP-R1 视觉与训练 & \textit{A1-RXR-BASE-SR} & \textit{A1-RXR-BASE-SPL} & \textit{A1-RXR-BASE-SDTW} \\
+RxR-CE & + RAE & 替换并训练 DINOv2 视觉接口 & \textit{A1-RXR-RAE-SR} & \textit{A1-RXR-RAE-SPL} & \textit{A1-RXR-RAE-SDTW} \\
+RxR-CE & + RGB & 增加当前候选 RGB 世界模型融合 & \textit{A1-RXR-RGB-SR} & \textit{A1-RXR-RGB-SPL} & \textit{A1-RXR-RGB-SDTW} \\
+RxR-CE & + 前视 & 增加 $q_1$ 与候选残差评分 & \textit{A1-RXR-LA-SR} & \textit{A1-RXR-LA-SPL} & \textit{A1-RXR-LA-SDTW} \\
+RxR-CE & + GRPO & 相同起点增加强化微调 & \textit{A1-RXR-GRPO-SR} & \textit{A1-RXR-GRPO-SPL} & \textit{A1-RXR-GRPO-SDTW} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{$q_1$ 来源与预测视野长度}
+
+来源实验分为证据来源对照和视野对照。表~\ref{tab:source-protocol} 明确每个变体的训练与评测输入。“无 $q_1$”保留同样的 CLS 适配器和候选残差评分头，以固定零标记替代未来表征，同时保留候选有效掩码并单独训练；评分头因而仍可读取指令、候选所有者、几何和基础分数，从而控制额外参数与训练预算。“预测 $q_1$”是可部署主设置。“候选级真实渲染 $q_1$”只在评测时替换预测标记，保持同一预测分支 checkpoint，不把分布变化误写成严格性能上界。
+
+\begin{table}[t]
+\centering
+\caption{未来证据来源与视野长度的变体协议。}
+\label{tab:source-protocol}
+\begin{tabularx}{\linewidth}{p{0.20\linewidth}p{0.20\linewidth}p{0.20\linewidth}Y}
+\toprule
+变体 & 训练输入 & 评测输入 & 目的 \\
+\midrule
+无 $q_1$ & 零标记+保留候选掩码 & 同训练 & 参数量匹配的无未来对照 \\
+预测 $q_1$ & 预测标记 & 预测标记 & 可部署主结果，$h=1$ \\
+真实渲染 $q_1$ & 预测标记 & 候选级真实标记 & 固定头的表征质量诊断 \\
+预测 $h=2,3$ & 对应端点预测标记 & 同训练 & 计划中的视野--误差--成本对照 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+候选级真实渲染协议不读取目标位置或教师动作。对每个前五候选，先按预测链固定 $p_1^i$；随后克隆模拟器状态，在不推进真实 episode 的独立分支中把传感器放到该位姿并按相同相机参数渲染 RGB，再用同一冻结 DINOv2 和 RAE 统计编码。若位姿不能在导航网格上以 \textit{ORACLE-SNAP-TOLERANCE} 内吸附、发生碰撞或传感器输出无效，该候选记为无效，不改用已执行分支补齐。渲染后恢复原状态，并对所有前五候选使用同一规则。该变体报告真实渲染覆盖率；所谓 CLS 误差为零，仅指适配器之前用同一编码器得到的标记与其自身比较。
+
+\begin{table}[t]
+\centering
+\caption{R2R-CE \texttt{val\_unseen} 的未来证据来源和视野长度。二、三步为计划中的受控扩展。}
+\label{tab:horizon}
+\begin{tabular}{llcc}
+\toprule
+$q_1$ 来源 & 视野 $h$ & SR$\uparrow$ & SPL$\uparrow$ \\
+\midrule
+无 $q_1$ & 0 & \textit{A2-NOQ1-SR} & \textit{A2-NOQ1-SPL} \\
+真实渲染 $q_1$ & 1 & \textit{A2-ORACLE-SR} & \textit{A2-ORACLE-SPL} \\
+预测 $q_1$ & 1 & \textit{A2-H1-SR} & \textit{A2-H1-SPL} \\
+预测端点 & 2 & \textit{A2-H2-SR} & \textit{A2-H2-SPL} \\
+预测端点 & 3 & \textit{A2-H3-SR} & \textit{A2-H3-SPL} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{预测质量与计算成本。误差在 CLS 适配前计算；延迟单位为毫秒/高层决策，显存单位为 GiB。}
+\label{tab:horizon-cost}
+\begin{tabular}{lccccc}
+\toprule
+$h$ & CLS 距离$\downarrow$ & 图像块距离$\downarrow$ & 有效率$\uparrow$ & 延迟$\downarrow$ & 显存$\downarrow$ \\
+\midrule
+1 & \textit{A2-H1-CLSERR} & \textit{A2-H1-PATCHERR} & \textit{A2-H1-VALID} & \textit{A2-H1-MS} & \textit{A2-H1-GB} \\
+2 & \textit{A2-H2-CLSERR} & \textit{A2-H2-PATCHERR} & \textit{A2-H2-VALID} & \textit{A2-H2-MS} & \textit{A2-H2-GB} \\
+3 & \textit{A2-H3-CLSERR} & \textit{A2-H3-PATCHERR} & \textit{A2-H3-VALID} & \textit{A2-H3-MS} & \textit{A2-H3-GB} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+两个已完成的 R2R-CE 完整 \texttt{val\_unseen} 系统诊断点（SFT 第 1200 和 2000 次更新）中，$q_0$/$q_1$ 请求成功率均为 100\%，有效未来候选率分别约为 46.6\% 和 49.6\%，动作翻转率分别约为 0.29\% 和 0.17\%。请求成功率的分母是实际发出的世界模型请求，有效率的分母是前五候选槽，翻转率的分母是记录了基础动作与调整后动作的决策行；对应计数由 \textit{DIAG-1200/2000-COUNTS} 给出。这些数值只说明请求未报错且可用候选有限，不代表未来表征准确或导航受益。
+
+\subsection{动作翻转的修正与伤害}
+
+只报告动作翻转率会隐藏翻转方向。该分析包含两个互补层次。轨迹层在相同初始 episode、相同模拟器种子和确定性评测下成对运行基础策略与前视策略，以首次分歧为锚点，按终局成功和 SPL 变化归类；一个 episode 无论后续发生多少次翻转只计一次。状态层则在同一记录状态上离线计算基础动作与前视动作，用教师动作判断一步修正或伤害，并单列 STOP$\rightarrow$MOVE 与 MOVE$\rightarrow$STOP。轨迹层结果可以描述配对关联，不能把单次翻转写成最终成败的严格因果。
+
+\begin{table}[t]
+\centering
+\caption{相同初始 episode 的动作翻转配对结果。}
+\label{tab:flip}
+\begin{tabularx}{\linewidth}{Ycccc}
+\toprule
+类别 & 数量 & 占全部比例 & 占分歧比例 & 配对 $\Delta$SPL \\
+\midrule
+失败 $\rightarrow$ 成功 & \textit{A3-FIX-N} & \textit{A3-FIX-ALL} & \textit{A3-FIX-DIV} & \textit{A3-FIX-DSPL} \\
+成功 $\rightarrow$ 失败 & \textit{A3-HARM-N} & \textit{A3-HARM-ALL} & \textit{A3-HARM-DIV} & \textit{A3-HARM-DSPL} \\
+成功状态不变、效率改变 & \textit{A3-EFF-N} & \textit{A3-EFF-ALL} & \textit{A3-EFF-DIV} & \textit{A3-EFF-DSPL} \\
+失败状态不变 & \textit{A3-FAIL-N} & \textit{A3-FAIL-ALL} & \textit{A3-FAIL-DIV} & \textit{A3-FAIL-DSPL} \\
+无动作分歧 & \textit{A3-SAME-N} & \textit{A3-SAME-ALL} & -- & \textit{A3-SAME-DSPL} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{预测质量、候选覆盖与计算开销}
+
+该组分析进一步解释低翻转率的来源。CLS 误差定义为适配器前预测标记与真实渲染标记的余弦距离 $1-\cos(\widehat{x}^{\mathrm{cls}},x^{\mathrm{cls}})$；图像块误差是 256 个对应位置余弦距离的均值。分桶边界由固定开发集分位数确定，报告每桶样本数、有效未来候选率、平均绝对残差、动作翻转率和净修正率。候选覆盖率定义为有效未来槽数除以前五候选槽数，并按失败原因和决策步分层。
+
+超参数分析比较 $K\in\{1,3,5,10\}$、历史长度 $L\in\{1,2,4\}$ 和预测视野 $h\in\{1,2,3\}$，每组只改变一个声明变量。开销分析分别计时 DINOv2、$q_0$ 世界模型、候选航点预测、各级未来世界模型和候选残差评分；端到端延迟在同一 \textit{TIMING-GPU}、batch、预热次数和 episode 集合上以毫秒/高层决策报告，并同时记录峰值显存。由此得到的性能--成本曲线只适用于该部署配置。
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.96\linewidth]{figures/mechanism_analysis.png}
+\caption{机制与开销分析结构：预测视野同时影响表征误差、有效覆盖、动作干预与计算成本。各关系由同协议实验量化，相关关系不解释为普遍因果。}
+\label{fig:mechanism}
+\end{figure}
+
+\section{讨论}
+
+本文把世界模型前视视为候选评分的受约束证据，而不是替代基础策略的完整规划器。前五候选门控和残差限幅减少了单次错误预测可以直接改写的动作数，却也造成明显的稀疏干预：两个完整 R2R-CE 诊断点的动作翻转率均低于 0.3\%。因此，整体指标之外更关键的问题是这部分稀疏翻转的净价值，以及低干预究竟来自历史不足、候选链失效、基础分数间隔过大还是残差过弱。候选级覆盖、同状态一步分析和 episode 级配对共同提供了区分这些因素的手段。
+
+干预频率本身不应成为优化目标。一个谨慎系统可以在大多数时刻沿用原决策，只在视觉歧义较大且未来线索足够一致时介入；相反，频繁改动并不等于获得更多有用信息。更合适的量是每次介入的期望净收益，它同时考虑修正、伤害、路径代价和额外算力。真实渲染诊断给出可获得线索的参照，误差分桶揭示预测可信度，基础分数间隔则反映一次有限增量能否改变排序。三者结合后，系统才能区分“应该保持沉默”与“有证据但门控过强”，并为以后引入置信度校准或自适应候选预算提供依据。
+
+冻结式 GRPO 的可解释性来自缓存语义，而不只是“模块参数不更新”。动态上游表示会随基础策略改变；如果更新阶段重新计算前视，当前策略与参考策略可能得到不同的候选集合和残差。本文缓存 rollout 时的动作对齐残差与掩码，并在概率重算时复用它们，从而把离散候选切换排除在单次 GRPO 更新之外。这一设计提高了归因清晰度，但也意味着缓存只对应采样时状态，并限制前视模块适应强化学习产生的新状态分布。
+
+方法仍有三类边界。第一，证据来自仿真室内环境，尚未覆盖真实机器人传感器噪声、动态物体和定位漂移。第二，世界模型固定为特定 RAE-NWM，结论不能直接外推到其他生成或预测架构。第三，二步和三步视野尚属于受控实验扩展；其有效性必须同时由端点误差、候选覆盖、导航指标与硬件开销判断。候选级真实渲染只用于诊断预测表征，不是可部署输入，也不是无条件的性能上界。
+
+\section{结论}
+
+本文提出面向在线拓扑候选的受约束表征世界模型主动前视。原生 CLS+patch 预测通过 $q_0\rightarrow q_1$ 链路与 ghost 候选对齐，候选残差评分只作用于前五个移动候选，失败槽独立回退；GRPO 则复用 rollout 缓存的残差和动作掩码，使强化更新只改变基础导航策略。工程验证支持预训练权重加载、数值一致性、梯度边界、回退和恢复等系统主张。\textit{[CONCLUSION-EVIDENCE：根据同协议主结果、$h=1,2,3$、真实渲染诊断、动作翻转净价值和性能--开销曲线写入最终经验结论及其适用边界。]}
+
+\bibliographystyle{unsrt}
+\bibliography{references}
+
+\end{document}

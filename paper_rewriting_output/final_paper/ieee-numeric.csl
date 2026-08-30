@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<style xmlns="http://purl.org/net/xbiblio/csl" version="1.0" class="in-text" default-locale="en-US">
+  <info>
+    <title>ETP-R1 IEEE Numeric</title>
+    <id>https://example.invalid/styles/etpr1-ieee-numeric</id>
+    <link href="https://example.invalid/styles/etpr1-ieee-numeric" rel="self"/>
+    <updated>2026-08-28T00:00:00+00:00</updated>
+    <category citation-format="numeric"/>
+  </info>
+  <macro name="author">
+    <names variable="author">
+      <name initialize-with=". " name-as-sort-order="all" delimiter=", " and="text"/>
+      <substitute><text variable="publisher"/><text variable="title"/></substitute>
+    </names>
+  </macro>
+  <macro name="issued">
+    <date variable="issued"><date-part name="year"/></date>
+  </macro>
+  <citation collapse="citation-number">
+    <sort><key variable="citation-number"/></sort>
+    <layout prefix="[" suffix="]" delimiter=", ">
+      <text variable="citation-number"/>
+    </layout>
+  </citation>
+  <bibliography entry-spacing="0" line-spacing="1" second-field-align="flush">
+    <layout suffix=".">
+      <text variable="citation-number" prefix="[" suffix="]"/>
+      <group delimiter=", " suffix=".">
+        <text macro="author"/>
+        <text variable="title" quotes="true"/>
+        <text variable="container-title" font-style="italic"/>
+        <text variable="volume" prefix="vol. "/>
+        <text variable="issue" prefix="no. "/>
+        <text variable="page" prefix="pp. "/>
+        <text macro="issued"/>
+      </group>
+      <choose>
+        <if variable="DOI"><text variable="DOI" prefix=" doi: "/></if>
+        <else-if variable="URL"><text variable="URL" prefix=" "/></else-if>
+      </choose>
+    </layout>
+  </bibliography>
+</style>

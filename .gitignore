@@ -23,3 +23,9 @@ __pycache__/
 /bert-base-uncased
 *.bin
 /extra_files
+
+# PaperSpine source files are versioned; rendered artifacts stay local.
+/paper_rewriting_output/**/*.pdf
+/paper_rewriting_output/**/*.docx
+/paper_rewriting_output/**/*.bak_fonts
+/paper_rewriting_output/final_paper/figures/*.png
