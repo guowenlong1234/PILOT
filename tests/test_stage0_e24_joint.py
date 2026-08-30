@@ -205,7 +205,6 @@ def test_predicted_future_source_never_calls_oracle_environment(monkeypatch):
     monkeypatch.setattr(
         joint, "candidate_q0_geometry", lambda records: torch.zeros(len(records), 3)
     )
-    monkeypatch.setattr(joint, "persistent_q0_to_dict", lambda _record: {})
 
     _deltas, counts, pack, diagnostics = build_e24_joint_step(
         trainer,

@@ -27,7 +27,6 @@ from .online_e24 import (
     quantize_like_offline_cache,
 )
 from .native_cls_adapter import Top5NativeClsAdapter
-from .persistent_q0 import persistent_q0_to_dict
 from .residual_head import InterleavedCrossModalTopKFutureLogitResidualHead
 from .topk_query import executable_ghost_indices, stable_topk_ghost_indices
 
@@ -398,12 +397,9 @@ def build_e24_joint_step(
             dtype=torch.long,
             device=trainer.device,
         )
-        geometry[row, :count] = candidate_q0_geometry(
-            [
-                None if record is None else persistent_q0_to_dict(record)
-                for record in records
-            ]
-        ).to(device=trainer.device, dtype=base_logits.dtype)
+        geometry[row, :count] = candidate_q0_geometry(records).to(
+            device=trainer.device, dtype=base_logits.dtype
+        )
 
     active_index = torch.tensor(active_envs, dtype=torch.long, device=trainer.device)
     pack = E24JointDecisionPack(

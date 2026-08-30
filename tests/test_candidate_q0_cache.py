@@ -9,6 +9,7 @@ from vlnce_baselines.nwm.active_lookahead.candidate_q0 import (
     Q0_POSITION_SOURCE,
     commit_candidate_q0_cache,
 )
+from vlnce_baselines.nwm.active_lookahead.geometry import candidate_q0_geometry
 from vlnce_baselines.nwm.etp_adapter import RaeSourceContextSnapshot
 from vlnce_baselines.nwm.types import NwmCondition
 
@@ -86,6 +87,9 @@ def test_candidate_q0_cache_uses_committed_mean_and_cpu_fp16_patch():
     assert record.predicted_patch_cpu_fp16.dtype == torch.float16
     assert record.patch_quantization_max_abs == 0.0
     assert record.current_view_index == 1
+    geometry = candidate_q0_geometry([record])
+    assert tuple(geometry.shape) == (1, 3)
+    assert torch.isfinite(geometry).all()
 
 
 def test_observed_ghost_loses_old_cache_when_new_prediction_is_missing():

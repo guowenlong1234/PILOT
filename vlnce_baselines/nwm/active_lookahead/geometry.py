@@ -16,8 +16,12 @@ def candidate_q0_geometry(
         if record is None:
             values.append((0.0, 0.0, 0.0))
             continue
-        forward = float(record["candidate_forward_m"])
-        view = int(record["current_view_index"])
+        if isinstance(record, Mapping):
+            forward = float(record["candidate_forward_m"])
+            view = int(record["current_view_index"])
+        else:
+            forward = float(getattr(record, "candidate_forward_m"))
+            view = int(getattr(record, "current_view_index"))
         if not math.isfinite(forward) or forward < 0:
             raise ValueError(
                 f"persistent_q0[{index}].candidate_forward_m must be finite and non-negative"
