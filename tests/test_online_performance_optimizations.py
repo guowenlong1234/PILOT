@@ -10,8 +10,10 @@ from vlnce_baselines.common.environments import VLNCEDaggerEnv
 from vlnce_baselines.models.R1Policy import pack_panoramic_observations
 from vlnce_baselines.models.graph_utils import GraphMap
 from vlnce_baselines.ss_trainer_ETP_R1 import (
+    RGB_FUSION_DIAGNOSTIC_TOTAL_NAMES,
     RLTrainer,
     _load_adamw_optimizer_state,
+    summarize_rgb_fusion_diagnostic_totals,
 )
 from vlnce_baselines import ss_trainer_ETP_R1 as sft_trainer_module
 from vlnce_baselines.nwm.types import NwmPrediction
@@ -279,6 +281,52 @@ def test_sft_trainable_rgb_fusion_supports_multiple_gpus_before_sync():
     adapter = trainer._initialize_raenwm_rgb_fusion_adapter()
     assert adapter.training
     assert all(parameter.requires_grad for parameter in adapter.parameters())
+
+
+def test_sft_rgb_fusion_diagnostics_aggregate_global_moments_and_coverage():
+    totals = {name: 0.0 for name in RGB_FUSION_DIAGNOSTIC_TOTAL_NAMES}
+    totals.update(
+        query_requested=10.0,
+        query_success=8.0,
+        eligible_candidates=20.0,
+        fused_candidates=15.0,
+        gate_sum=3.0,
+        gate_square_sum=5.0,
+        gate_count=2.0,
+        cosine_sum=0.0,
+        cosine_square_sum=2.0,
+        cosine_count=2.0,
+        delta_norm_sum=4.0,
+        delta_norm_square_sum=10.0,
+        delta_norm_count=2.0,
+        nwm_seconds=4.0,
+        grad_norm_sum=6.0,
+        grad_norm_count=2.0,
+    )
+
+    summary = summarize_rgb_fusion_diagnostic_totals(totals, world_size=2)
+
+    assert summary["RGB_fusion_query_success_rate"] == pytest.approx(0.8)
+    assert summary["RGB_fusion_candidate_coverage"] == pytest.approx(0.75)
+    assert summary["RGB_fusion_gate_mean"] == pytest.approx(1.5)
+    assert summary["RGB_fusion_gate_std"] == pytest.approx(0.5)
+    assert summary["RGB_fusion_cosine_mean"] == pytest.approx(0.0)
+    assert summary["RGB_fusion_cosine_std"] == pytest.approx(1.0)
+    assert summary["RGB_fusion_delta_norm_mean"] == pytest.approx(2.0)
+    assert summary["RGB_fusion_delta_norm_std"] == pytest.approx(1.0)
+    assert summary["RGB_fusion_nwm_seconds_per_rank"] == pytest.approx(2.0)
+    assert summary["RGB_fusion_nwm_seconds_per_query"] == pytest.approx(0.4)
+    assert summary["RGB_fusion_grad_norm"] == pytest.approx(3.0)
+
+
+def test_sft_rgb_fusion_grad_norm_removes_amp_scale_before_logging():
+    trainer = object.__new__(RLTrainer)
+    trainer.raenwm_rgb_fusion_adapter = torch.nn.Linear(2, 1, bias=False)
+    trainer.raenwm_rgb_fusion_adapter.weight.grad = torch.tensor([[6.0, 8.0]])
+    trainer.scaler = SimpleNamespace(get_scale=lambda: 2.0)
+
+    assert trainer._rgb_fusion_grad_norm(gradients_unscaled=False) == 5.0
+    assert trainer._rgb_fusion_grad_norm(gradients_unscaled=True) == 10.0
 
 
 def test_graph_map_keeps_goal_distances_aligned_with_real_positions():

@@ -145,7 +145,67 @@ def test_candidate_fusion_changes_only_ghosts_and_reuses_ghost_prediction():
     torch.testing.assert_close(
         wp_outputs["cand_rgb"][0][1:], raw[1:] + 11.5
     )
-    assert diagnostics == [{"fused_candidate_count": 2}]
+    assert diagnostics[0]["eligible_candidate_count"] == 2
+    assert diagnostics[0]["fused_candidate_count"] == 2
+    assert diagnostics[0]["gate_count"] == 0
+
+
+def test_candidate_fusion_reports_coverage_and_distribution_moments():
+    raw = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+    wp_outputs = {"cand_rgb": [raw.clone()]}
+    previews = [[
+        _Preview("0_0", "new_ghost", "g0"),
+        _Preview("0_1", "existing_ghost", "g1"),
+        _Preview("0_2", "new_ghost", "missing"),
+    ]]
+    records = [
+        SimpleNamespace(env_index=0, ghost_vp="g0", distance_m=1.0),
+        SimpleNamespace(env_index=0, ghost_vp="g1", distance_m=2.0),
+    ]
+    adapter = RaeNwmRgbFusionAdapter(
+        input_dim=2,
+        hidden_dim=2,
+        zero_init=True,
+        gate_bias_init=0.0,
+    )
+    with torch.no_grad():
+        adapter.residual.layers[-1].bias.copy_(torch.tensor([2.0, 0.0]))
+
+    diagnostics = apply_rgb_fusion_to_current_candidates(
+        wp_outputs,
+        previews,
+        _native_prediction(records, [[1.0, 0.0], [0.0, -1.0]]),
+        adapter,
+    )[0]
+
+    assert diagnostics["eligible_candidate_count"] == 3
+    assert diagnostics["fused_candidate_count"] == 2
+    assert diagnostics["gate_count"] == 2
+    assert diagnostics["raw_wm_cosine_count"] == 2
+    assert diagnostics["fusion_delta_norm_count"] == 2
+    torch.testing.assert_close(
+        diagnostics["gate_sum"], torch.tensor(1.0, dtype=torch.float64)
+    )
+    torch.testing.assert_close(
+        diagnostics["gate_square_sum"],
+        torch.tensor(0.5, dtype=torch.float64),
+    )
+    torch.testing.assert_close(
+        diagnostics["raw_wm_cosine_sum"],
+        torch.tensor(0.0, dtype=torch.float64),
+    )
+    torch.testing.assert_close(
+        diagnostics["raw_wm_cosine_square_sum"],
+        torch.tensor(2.0, dtype=torch.float64),
+    )
+    torch.testing.assert_close(
+        diagnostics["fusion_delta_norm_sum"],
+        torch.tensor(2.0, dtype=torch.float64),
+    )
+    torch.testing.assert_close(
+        diagnostics["fusion_delta_norm_square_sum"],
+        torch.tensor(2.0, dtype=torch.float64),
+    )
 
 
 def test_candidate_clone_keeps_raw_node_panorama_features():

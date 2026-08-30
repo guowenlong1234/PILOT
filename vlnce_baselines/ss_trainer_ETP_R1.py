@@ -126,6 +126,91 @@ import cv2
 from collections import OrderedDict
 
 
+RGB_FUSION_DIAGNOSTIC_TOTAL_NAMES = (
+    "query_requested",
+    "query_success",
+    "eligible_candidates",
+    "fused_candidates",
+    "gate_sum",
+    "gate_square_sum",
+    "gate_count",
+    "cosine_sum",
+    "cosine_square_sum",
+    "cosine_count",
+    "delta_norm_sum",
+    "delta_norm_square_sum",
+    "delta_norm_count",
+    "nwm_seconds",
+    "grad_norm_sum",
+    "grad_norm_count",
+)
+_RGB_FUSION_DIAGNOSTIC_TOTAL_INDEX = {
+    name: index
+    for index, name in enumerate(RGB_FUSION_DIAGNOSTIC_TOTAL_NAMES)
+}
+
+
+def _safe_diagnostic_ratio(numerator, denominator):
+    return float(numerator) / float(denominator) if denominator > 0 else 0.0
+
+
+def _diagnostic_mean_std(value_sum, square_sum, count):
+    if count <= 0:
+        return 0.0, 0.0
+    mean = float(value_sum) / float(count)
+    variance = max(float(square_sum) / float(count) - mean * mean, 0.0)
+    return mean, math.sqrt(variance)
+
+
+def summarize_rgb_fusion_diagnostic_totals(totals, *, world_size=1):
+    """Convert globally summed RGB-fusion counters into training metrics."""
+    gate_mean, gate_std = _diagnostic_mean_std(
+        totals["gate_sum"], totals["gate_square_sum"], totals["gate_count"]
+    )
+    cosine_mean, cosine_std = _diagnostic_mean_std(
+        totals["cosine_sum"],
+        totals["cosine_square_sum"],
+        totals["cosine_count"],
+    )
+    delta_mean, delta_std = _diagnostic_mean_std(
+        totals["delta_norm_sum"],
+        totals["delta_norm_square_sum"],
+        totals["delta_norm_count"],
+    )
+    query_requested = float(totals["query_requested"])
+    query_success = float(totals["query_success"])
+    eligible = float(totals["eligible_candidates"])
+    fused = float(totals["fused_candidates"])
+    nwm_seconds = float(totals["nwm_seconds"])
+    return {
+        "RGB_fusion_query_requested": query_requested,
+        "RGB_fusion_query_success": query_success,
+        "RGB_fusion_query_success_rate": _safe_diagnostic_ratio(
+            query_success, query_requested
+        ),
+        "RGB_fusion_eligible_candidates": eligible,
+        "RGB_fusion_fused_candidates": fused,
+        "RGB_fusion_candidate_coverage": _safe_diagnostic_ratio(
+            fused, eligible
+        ),
+        "RGB_fusion_gate_mean": gate_mean,
+        "RGB_fusion_gate_std": gate_std,
+        "RGB_fusion_cosine_mean": cosine_mean,
+        "RGB_fusion_cosine_std": cosine_std,
+        "RGB_fusion_delta_norm_mean": delta_mean,
+        "RGB_fusion_delta_norm_std": delta_std,
+        "RGB_fusion_nwm_seconds_per_rank": _safe_diagnostic_ratio(
+            nwm_seconds, max(int(world_size), 1)
+        ),
+        "RGB_fusion_nwm_seconds_per_query": _safe_diagnostic_ratio(
+            nwm_seconds, query_requested
+        ),
+        "RGB_fusion_grad_norm": _safe_diagnostic_ratio(
+            totals["grad_norm_sum"], totals["grad_norm_count"]
+        ),
+    }
+
+
 def _load_adamw_optimizer_state(
     optimizer,
     optimizer_state,
@@ -171,6 +256,7 @@ class RLTrainer(BaseVLNCETrainer):
         self.raenwm_rgb_fusion_adapter = None
         self.last_raenwm_prediction = None
         self.last_raenwm_rgb_fusion_diagnostics = None
+        self._rgb_fusion_diagnostic_totals = None
         self._raenwm_head_state_override = None
         self._raenwm_context_source_logged = False
         self.e24_joint_head = None
@@ -692,6 +778,96 @@ class RLTrainer(BaseVLNCETrainer):
         adapter = getattr(self, "raenwm_rgb_fusion_adapter", None)
         return getattr(adapter, "module", adapter) if adapter is not None else None
 
+    def _start_rgb_fusion_diagnostics(self):
+        if not self._raenwm_rgb_fusion_trainable():
+            self._rgb_fusion_diagnostic_totals = None
+            return None
+        self._rgb_fusion_diagnostic_totals = torch.zeros(
+            len(RGB_FUSION_DIAGNOSTIC_TOTAL_NAMES),
+            device=self.device,
+            dtype=torch.float64,
+        )
+        return self._rgb_fusion_diagnostic_totals
+
+    def _accumulate_rgb_fusion_diagnostics(
+        self, query_diagnostics, fusion_diagnostics
+    ):
+        totals = getattr(self, "_rgb_fusion_diagnostic_totals", None)
+        if totals is None:
+            return False
+        index = _RGB_FUSION_DIAGNOSTIC_TOTAL_INDEX
+        query_diagnostics = query_diagnostics or {}
+        query_values = totals.new_tensor(
+            [
+                float(query_diagnostics.get("q0_first_stage_requested", 0.0)),
+                float(query_diagnostics.get("q0_first_stage_success", 0.0)),
+                float(query_diagnostics.get("q0_first_stage_nwm_seconds", 0.0)),
+            ]
+        )
+        totals[index["query_requested"]].add_(query_values[0])
+        totals[index["query_success"]].add_(query_values[1])
+        totals[index["nwm_seconds"]].add_(query_values[2])
+
+        diagnostic_key_map = {
+            "eligible_candidate_count": "eligible_candidates",
+            "fused_candidate_count": "fused_candidates",
+            "gate_sum": "gate_sum",
+            "gate_square_sum": "gate_square_sum",
+            "gate_count": "gate_count",
+            "raw_wm_cosine_sum": "cosine_sum",
+            "raw_wm_cosine_square_sum": "cosine_square_sum",
+            "raw_wm_cosine_count": "cosine_count",
+            "fusion_delta_norm_sum": "delta_norm_sum",
+            "fusion_delta_norm_square_sum": "delta_norm_square_sum",
+            "fusion_delta_norm_count": "delta_norm_count",
+        }
+        for item in fusion_diagnostics or ():
+            for source_name, total_name in diagnostic_key_map.items():
+                value = (item or {}).get(source_name, 0.0)
+                if torch.is_tensor(value):
+                    value = value.detach().to(
+                        device=totals.device, dtype=totals.dtype
+                    )
+                totals[index[total_name]].add_(value)
+        return True
+
+    def _rgb_fusion_grad_norm(self, *, gradients_unscaled):
+        adapter = self._raenwm_rgb_fusion_state_module()
+        if adapter is None:
+            return 0.0
+        grad_norm = self._joint_parameter_grad_norm(adapter.parameters())
+        if not gradients_unscaled:
+            grad_norm /= float(self.scaler.get_scale())
+        return grad_norm
+
+    def _finish_rgb_fusion_diagnostics(self, *, gradients_unscaled):
+        totals = getattr(self, "_rgb_fusion_diagnostic_totals", None)
+        if totals is None:
+            return None
+        index = _RGB_FUSION_DIAGNOSTIC_TOTAL_INDEX
+        totals[index["grad_norm_sum"]].add_(
+            self._rgb_fusion_grad_norm(
+                gradients_unscaled=gradients_unscaled
+            )
+        )
+        totals[index["grad_norm_count"]].add_(1.0)
+        if int(getattr(self, "world_size", 1)) > 1:
+            if not distr.is_available() or not distr.is_initialized():
+                raise RuntimeError(
+                    "distributed RGB-fusion diagnostics require torch.distributed"
+                )
+            distr.all_reduce(totals, op=distr.ReduceOp.SUM)
+        raw_totals = dict(
+            zip(RGB_FUSION_DIAGNOSTIC_TOTAL_NAMES, totals.tolist())
+        )
+        summary = summarize_rgb_fusion_diagnostic_totals(
+            raw_totals, world_size=int(getattr(self, "world_size", 1))
+        )
+        for name, value in summary.items():
+            self.logs[name].append(value)
+        self._rgb_fusion_diagnostic_totals = None
+        return summary
+
     def _raenwm_heads_state_dict(self):
         runtime = getattr(self, "raenwm_runtime", None)
         predictor = getattr(runtime, "predictor", None)
@@ -807,6 +983,10 @@ class RLTrainer(BaseVLNCETrainer):
                 prediction,
                 self.raenwm_rgb_fusion_adapter,
             )
+        )
+        self._accumulate_rgb_fusion_diagnostics(
+            self.last_candidate_q0_prediction_diagnostics,
+            self.last_raenwm_rgb_fusion_diagnostics,
         )
         return prediction
 
@@ -2334,6 +2514,7 @@ class RLTrainer(BaseVLNCETrainer):
             self.optimizer.zero_grad(set_to_none=True)
             self._e24_joint_replay_packs = []
             self._e24_future_diagnostic_totals = defaultdict(float)
+            self._start_rgb_fusion_diagnostics()
             for accumulation_idx in range(accumulation_steps):
                 should_sync = (
                     self.world_size <= 1
@@ -2355,6 +2536,9 @@ class RLTrainer(BaseVLNCETrainer):
             if joint_training:
                 self.scaler.unscale_(self.optimizer)
             self._synchronize_raenwm_rgb_fusion_gradients()
+            self._finish_rgb_fusion_diagnostics(
+                gradients_unscaled=joint_training
+            )
             if joint_training:
                 wrapper = self._e24_joint_wrapper_state_module()
                 e24_grad_norm = torch.nn.utils.clip_grad_norm_(

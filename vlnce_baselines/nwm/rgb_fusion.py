@@ -4,6 +4,11 @@ import torch.nn.functional as F
 
 
 _GHOST_TARGET_KINDS = {"new_ghost", "existing_ghost"}
+_FUSION_DIAGNOSTIC_NAMES = (
+    "gate",
+    "raw_wm_cosine",
+    "fusion_delta_norm",
+)
 
 
 def clone_wp_outputs_candidate_rgb(wp_outputs):
@@ -177,10 +182,20 @@ def apply_rgb_fusion_to_current_candidates(
             )
 
         fused_cand_rgb = cand_rgb.clone()
+        zero = torch.zeros((), device=cand_rgb.device, dtype=torch.float64)
+        env_diagnostics = {
+            "eligible_candidate_count": 0,
+            "fused_candidate_count": 0,
+        }
+        for name in _FUSION_DIAGNOSTIC_NAMES:
+            env_diagnostics[f"{name}_sum"] = zero.clone()
+            env_diagnostics[f"{name}_square_sum"] = zero.clone()
+            env_diagnostics[f"{name}_count"] = 0
         fused_count = 0
         for cand_index, preview in enumerate(previews):
             if preview.target_kind not in _GHOST_TARGET_KINDS:
                 continue
+            env_diagnostics["eligible_candidate_count"] += 1
             key = (env_index, str(preview.target_vp))
             if key not in lookup:
                 continue
@@ -199,6 +214,19 @@ def apply_rgb_fusion_to_current_candidates(
             )
             fused_cand_rgb[cand_index] = fused_rgb[0]
             fused_count += 1
+            for name in _FUSION_DIAGNOSTIC_NAMES:
+                value = (fusion_diagnostics or {}).get(name)
+                if value is None:
+                    continue
+                value = _as_tensor_like(value, cand_rgb).detach().to(
+                    dtype=torch.float64
+                ).reshape(-1)
+                env_diagnostics[f"{name}_sum"].add_(value.sum())
+                env_diagnostics[f"{name}_square_sum"].add_(
+                    value.square().sum()
+                )
+                env_diagnostics[f"{name}_count"] += int(value.numel())
         wp_outputs["cand_rgb"][env_index] = fused_cand_rgb
-        diagnostics.append({"fused_candidate_count": fused_count})
+        env_diagnostics["fused_candidate_count"] = fused_count
+        diagnostics.append(env_diagnostics)
     return diagnostics
