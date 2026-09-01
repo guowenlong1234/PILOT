@@ -2711,6 +2711,31 @@ class RLTrainer(BaseVLNCETrainer):
             squared = value if squared is None else squared + value
         return 0.0 if squared is None else float(squared.sqrt().cpu())
 
+    def _attach_rgb_cls_residual_ddp_anchor(self, loss):
+        """Keep the dynamic navigation CLS branch visible to DDP.
+
+        Some rollout batches do not route the navigation loss through the
+        trainable CLS residual MLP.  Referencing one scalar from each of its
+        parameters with a zero coefficient preserves the exact objective and
+        gradients while still letting DDP finish those reductions.
+        """
+
+        if int(getattr(self, "world_size", 1)) <= 1:
+            return loss
+        policy_net = getattr(self.policy.net, "module", self.policy.net)
+        rgb_encoder = getattr(policy_net, "rgb_encoder", None)
+        residual_mlp = getattr(rgb_encoder, "cls_residual_mlp", None)
+        if residual_mlp is None:
+            return loss
+
+        anchor = None
+        for parameter in residual_mlp.parameters():
+            if not parameter.requires_grad:
+                continue
+            term = parameter.reshape(-1)[0] * 0.0
+            anchor = term if anchor is None else anchor + term
+        return loss if anchor is None else loss + anchor
+
 
     def _train_interval(self, interval, ml_weight, sample_ratio):
         self.policy.train()
@@ -2763,6 +2788,9 @@ class RLTrainer(BaseVLNCETrainer):
                     self.loss = 0.
                     with autocast():
                         self.rollout('train', ml_weight, sample_ratio)
+                    self.loss = self._attach_rgb_cls_residual_ddp_anchor(
+                        self.loss
+                    )
                     self.scaler.scale(
                         self.loss / accumulation_steps
                     ).backward()

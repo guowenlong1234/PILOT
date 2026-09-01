@@ -510,6 +510,35 @@ class _FakeScaler:
         return None
 
 
+def test_sft_ddp_anchor_supplies_zero_cls_residual_gradients():
+    trainer = object.__new__(RLTrainer)
+    residual_mlp = torch.nn.Sequential(
+        torch.nn.Linear(3, 4),
+        torch.nn.GELU(),
+        torch.nn.Linear(4, 3),
+    )
+    trainer.world_size = 2
+    trainer.policy = _FakePolicy(
+        SimpleNamespace(
+            module=SimpleNamespace(
+                rgb_encoder=SimpleNamespace(
+                    cls_residual_mlp=residual_mlp,
+                )
+            )
+        )
+    )
+    original = torch.tensor(2.5, requires_grad=True)
+
+    anchored = trainer._attach_rgb_cls_residual_ddp_anchor(original)
+    anchored.backward()
+
+    assert anchored.item() == original.item()
+    assert original.grad.item() == 1.0
+    for parameter in residual_mlp.parameters():
+        assert parameter.grad is not None
+        assert torch.count_nonzero(parameter.grad).item() == 0
+
+
 def test_sft_gradient_accumulation_only_syncs_final_microbatch(monkeypatch):
     trainer = object.__new__(RLTrainer)
     net = _RecordingDdpNet()
