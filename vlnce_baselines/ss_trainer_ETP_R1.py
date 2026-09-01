@@ -3189,6 +3189,7 @@ class RLTrainer(BaseVLNCETrainer):
             if (
                 mode == 'train'
                 or self.config.VIDEO_OPTION
+                or self._active_lookahead_enabled()
             ):
                 navigation_states = self.envs.call(
                     ["get_navigation_state"] * self.envs.num_envs,

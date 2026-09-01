@@ -91,6 +91,16 @@ def test_native_cls_smoke_and_single_episode_wrappers_are_isolated():
         assert contract in single
 
 
+def test_active_lookahead_eval_queries_real_candidate_positions():
+    source = (ROOT / "vlnce_baselines/ss_trainer_ETP_R1.py").read_text()
+    condition = """if (
+                mode == 'train'
+                or self.config.VIDEO_OPTION
+                or self._active_lookahead_enabled()
+            ):"""
+    assert condition in source
+
+
 def test_native_cls_formal_eval_wrapper_uses_isolated_atomic_sync_directory():
     wrapper = (
         ROOT / "scripts/manage_rae_r2r_native_cls_e24_eval_watch_host.sh"
