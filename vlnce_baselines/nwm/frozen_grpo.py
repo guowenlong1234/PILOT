@@ -36,6 +36,12 @@ from vlnce_baselines.nwm.active_lookahead.candidate_q0 import (
     build_candidate_q0_queries,
     commit_candidate_q0_cache,
 )
+from vlnce_baselines.nwm.low_level_context import (
+    LOW_LEVEL_CONTEXT_SOURCE,
+    LowLevelContextSynchronizer,
+    context_metadata_from_config,
+    normalize_context_source,
+)
 
 
 class FrozenLookaheadController:
@@ -49,6 +55,8 @@ class FrozenLookaheadController:
         self.last_prediction = None
         self.last_rgb_diagnostics = None
         self.last_candidate_q0_prediction_diagnostics = None
+        self.low_level_synchronizer = None
+        self.last_context_diagnostics = None
         self._pending_generator_state = None
         self._frozen_manifest = None
 
@@ -102,6 +110,28 @@ class FrozenLookaheadController:
             raise ValueError("frozen GRPO lookahead requires RGB NWM fusion")
         if not bool(nwm.predict_cls_token) or int(nwm.token_count) != 257:
             raise ValueError("frozen GRPO lookahead requires native 257-token NWM")
+        if normalize_context_source(
+            getattr(nwm, "context_source", None)
+        ) == LOW_LEVEL_CONTEXT_SOURCE:
+            rgb = self.config.MODEL.RGB_ENCODER
+            if str(rgb.type).strip().lower() != "rae_dinov2" or int(
+                rgb.output_size
+            ) != 768:
+                raise ValueError(
+                    "low-level frozen GRPO requires the 768-dimensional RAE/DINOv2 encoder"
+                )
+            sensors = {
+                str(sensor).upper()
+                for sensor in self.config.TASK_CONFIG.SIMULATOR.AGENT_0.SENSORS
+            }
+            if "RGB_SENSOR" not in sensors:
+                raise ValueError(
+                    "low-level frozen GRPO requires the front RGB_SENSOR"
+                )
+            if int(nwm.low_level_encode_batch_size) <= 0:
+                raise ValueError(
+                    "low-level frozen GRPO encode batch size must be positive"
+                )
         for name in ("train_rgb_fusion", "train_top5_e24"):
             if bool(getattr(self.config.GRPO, name, False)):
                 raise ValueError(f"first-stage frozen GRPO requires GRPO.{name}=False")
@@ -166,6 +196,25 @@ class FrozenLookaheadController:
             "q0_cache_precision": "cpu_fp16",
             "q0_recompute_forbidden": True,
         }
+        context_metadata = context_metadata_from_config(
+            self.config.MODEL.RAENWM
+        )
+        if context_metadata["context_source"] == LOW_LEVEL_CONTEXT_SOURCE:
+            expected.update(
+                {
+                    "context_source": context_metadata["context_source"],
+                    "context_contract": context_metadata["context_contract"],
+                    "context_sampling_action": context_metadata[
+                        "sampling_action"
+                    ],
+                    "context_teleport_anchor_policy": context_metadata[
+                        "teleport_anchor_policy"
+                    ],
+                    "low_level_encode_batch_size": context_metadata[
+                        "encode_batch_size"
+                    ],
+                }
+            )
         mismatches = {
             key: (provenance.get(key), value)
             for key, value in expected.items()
@@ -175,6 +224,22 @@ class FrozenLookaheadController:
             raise ValueError(
                 f"frozen GRPO source provenance mismatch: {mismatches}"
             )
+        saved_context_metadata = checkpoint.get("raenwm_context_metadata")
+        if context_metadata["context_source"] == LOW_LEVEL_CONTEXT_SOURCE:
+            if not isinstance(saved_context_metadata, Mapping):
+                raise ValueError(
+                    "low-level frozen GRPO source lacks NWM context metadata"
+                )
+            context_mismatches = {
+                key: (saved_context_metadata.get(key), value)
+                for key, value in context_metadata.items()
+                if saved_context_metadata.get(key) != value
+            }
+            if context_mismatches:
+                raise ValueError(
+                    "frozen GRPO source context mismatch: "
+                    f"{context_mismatches}"
+                )
         saved_config = checkpoint.get("config")
         saved_task = str(
             getattr(getattr(saved_config, "MODEL", None), "task_type", "")
@@ -251,7 +316,34 @@ class FrozenLookaheadController:
         self.last_prediction = None
         self.last_rgb_diagnostics = None
         self.last_candidate_q0_prediction_diagnostics = None
+        self.last_context_diagnostics = None
+        if normalize_context_source(
+            getattr(self.config.MODEL.RAENWM, "context_source", None)
+        ) == LOW_LEVEL_CONTEXT_SOURCE:
+            policy_net = getattr(
+                self.trainer.policy.net,
+                "module",
+                self.trainer.policy.net,
+            )
+            self.low_level_synchronizer = LowLevelContextSynchronizer(
+                runtime=self.raenwm_runtime,
+                encoder=policy_net.rgb_encoder,
+                device=self.device,
+                batch_size=int(
+                    self.config.MODEL.RAENWM.low_level_encode_batch_size
+                ),
+            )
+        else:
+            self.low_level_synchronizer = None
         return self.raenwm_runtime
+
+    def sync_context_events(self):
+        if self.low_level_synchronizer is None:
+            return None
+        self.last_context_diagnostics = self.low_level_synchronizer.drain(
+            self.envs
+        )
+        return self.last_context_diagnostics
 
     def set_pending_generator_state(self, state):
         self._pending_generator_state = state
@@ -302,15 +394,20 @@ class FrozenLookaheadController:
     ):
         if self.raenwm_runtime is None:
             raise RuntimeError("frozen GRPO NWM runtime is not initialized")
-        if front_latents is None or front_cls is None:
-            raise RuntimeError("frozen GRPO native NWM requires front CLS and patch")
         yaws = [heading_from_quaternion(value) for value in cur_ori]
-        self.raenwm_runtime.update_contexts(
-            front_latents,
-            cur_pos,
-            yaws,
-            raw_front_cls=front_cls,
-        )
+        if normalize_context_source(
+            getattr(self.config.MODEL.RAENWM, "context_source", None)
+        ) != LOW_LEVEL_CONTEXT_SOURCE:
+            if front_latents is None or front_cls is None:
+                raise RuntimeError(
+                    "frozen GRPO native NWM requires front CLS and patch"
+                )
+            self.raenwm_runtime.update_contexts(
+                front_latents,
+                cur_pos,
+                yaws,
+                raw_front_cls=front_cls,
+            )
         queries = self._build_preview_queries(
             cur_pos, cur_ori, candidate_previews
         )
@@ -370,6 +467,9 @@ class FrozenLookaheadController:
             "e24_joint_provenance": dict(self.e24_joint_provenance),
             "raenwm_rgb_fusion_adapter_state_dict": (
                 self.rgb_fusion_adapter.state_dict()
+            ),
+            "raenwm_context_metadata": context_metadata_from_config(
+                self.config.MODEL.RAENWM
             ),
         }
 

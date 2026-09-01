@@ -97,6 +97,8 @@ MODEL:
     stat_sha256: 84ede66def5e6e3f25679334dc89cf63b12aacb99cbf0f5ae7ed4ad3187f7e59
     context_size: 4
     max_buffer_size: 64
+    context_source: low_level_move_rgb_anchor
+    low_level_encode_batch_size: 64
     metric_waypoint_spacing: 0.24975892673356762
     pos_eps: 1.0e-3
     yaw_eps: 1.0e-3
@@ -141,8 +143,9 @@ MODEL:
     dino_cwp_heading_policy: face_motion
     warm_start_checkpoint_path: ''
     warm_start_checkpoint_sha256: ''
+    warm_start_source_context_contract: ''
     warm_start_expected_q0_contract: temporary_action_same_island_navmesh
-    checkpoint_format_version: etpr1-native-cls-e24-joint-q0-cache-v3
+    checkpoint_format_version: etpr1-native-cls-e24-joint-q0-cache-v4
     smoke_freeze_check: False
     diagnostics_enabled: True
   DEPTH_ENCODER:

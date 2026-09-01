@@ -1,5 +1,22 @@
 # ETP-R1 Top-5 前瞻与 E24 联合 SFT 操作说明
 
+## 2026-09-01：低级移动观测上下文
+
+原生 CLS 的 R2R/RxR joint SFT 和 R2R RGB-only 配置统一使用
+`r1_low_level_move_rgb_anchor_v1`。episode reset 先清空旧轨迹并记录初始正前方
+RGB；teleport 同样清空，并记录落点锚帧；以后只记录 `MOVE_FORWARD` 后的
+正前方 RGB。转向不记录，碰撞产生的静止帧去重，teleport 前的帧不会残留。
+
+Habitat worker 只保存原始 RGB、位置和朝向。每次高层 `envs.step()` 返回后，
+trainer 在暂停完成 episode 之前一次取出全部环境事件，跨环境展平并以最多 64
+帧为一批交给冻结 DINO/RAE 编码器，写入原生 `[CLS+256 patch]` 上下文。
+不足四帧时不填充，Q0 与后续槽位继续按局部无效规则处理。训练日志中的
+`nwm_context_*` 记录每次高层动作的帧数、reset、ready 比例、编码耗时和静止帧。
+
+旧实验复现可显式把 `MODEL.RAENWM.context_source` 改回
+`high_level_nav_latent`。低级模式不会再调用高层 `update_contexts`，并拒绝把缺少
+上下文 metadata 的旧权重当作断点恢复。
+
 ## 2026-08-30：统一 Q0 缓存链路
 
 原生 CLS 配置现使用 `r1_post_update_ghost_mean_cached_v1`。第一阶段先按
@@ -11,22 +28,31 @@ Q1 查询。缓存缺失或过期时只让对应槽无效，不允许重新预�
 日志中 `q0_first_stage_*` 记录共享 Q0，`q0_requested` 与
 `q0_nwm_seconds` 专指 Top-5 重算，正常情况下必须始终为 0。
 
-新实验从普通导航基座启动，并显式指定旧 joint checkpoint 作为权重初始化：
+新实验默认从普通导航基座、离线 E24、恒等 Top-5 adapter 和新 RGB fusion
+启动，不需要 warm start：
+
+```bash
+bash scripts/manage_rae_r2r_native_cls_e24_joint_server.sh start
+```
+
+只有明确做旧高层权重迁移对照时，才同时提供旧 checkpoint、SHA-256 和源上下文
+合同：
 
 ```bash
 export ETPR1_E24_WARM_START_CHECKPOINT=/absolute/path/to/old/ckpt.iterN.pth
 export ETPR1_E24_WARM_START_SHA256=<64位小写SHA-256>
+export ETPR1_E24_WARM_START_SOURCE_CONTEXT_CONTRACT=r1_high_level_nav_latent_v1
 bash scripts/manage_rae_r2r_native_cls_e24_joint_server.sh start
 ```
 
 只加载旧 checkpoint 中的 RGB 融合层、E24 残差头和 Top-5 CLS 适配层。
 导航策略仍来自 `base_checkpoint_path`，优化器、调度器、迭代号、随机状态和
 episode 队列全部重新建立，训练从 iteration 0 开始。旧格式 checkpoint 不能
-直接 resume；只有 `etpr1-native-cls-e24-joint-q0-cache-v3`（RxR 对应
-`etpr1-rxr-native-cls-e24-joint-q0-cache-v2`）才能恢复并进入冻结 GRPO。
+直接 resume；低级模式只有 `etpr1-native-cls-e24-joint-q0-cache-v4`（RxR 对应
+`etpr1-rxr-native-cls-e24-joint-q0-cache-v3`）才能恢复并进入冻结 GRPO。
 
 启动器会在加载前后核验热启动文件 SHA。新 checkpoint 的 provenance 会记录
-热启动文件名、SHA、旧 Q0 契约、实际加载的三组权重，并明确
+热启动文件名、SHA、旧 Q0 契约、源上下文合同、实际加载的三组权重，并明确
 `training_state_loaded: false`。
 
 ## 固定实验

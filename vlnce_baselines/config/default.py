@@ -227,6 +227,8 @@ _C.MODEL.RAENWM.stat_sha256 = (
 )
 _C.MODEL.RAENWM.context_size = 4
 _C.MODEL.RAENWM.max_buffer_size = 64
+_C.MODEL.RAENWM.context_source = "high_level_nav_latent"
+_C.MODEL.RAENWM.low_level_encode_batch_size = 64
 _C.MODEL.RAENWM.metric_waypoint_spacing = 0.24975892673356762
 _C.MODEL.RAENWM.pos_eps = 1.0e-3
 _C.MODEL.RAENWM.yaw_eps = 1.0e-3
@@ -275,6 +277,7 @@ _C.MODEL.ACTIVE_LOOKAHEAD.dino_cwp_context_strategy = "fixed_initial"
 _C.MODEL.ACTIVE_LOOKAHEAD.dino_cwp_heading_policy = "face_motion"
 _C.MODEL.ACTIVE_LOOKAHEAD.warm_start_checkpoint_path = ""
 _C.MODEL.ACTIVE_LOOKAHEAD.warm_start_checkpoint_sha256 = ""
+_C.MODEL.ACTIVE_LOOKAHEAD.warm_start_source_context_contract = ""
 _C.MODEL.ACTIVE_LOOKAHEAD.warm_start_expected_q0_contract = (
     "temporary_action_same_island_navmesh"
 )

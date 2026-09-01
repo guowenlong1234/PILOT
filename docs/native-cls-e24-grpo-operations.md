@@ -10,6 +10,13 @@ Top-5 CLS adapter、E24、NWM、DINO-CWP、DINOv2 和 waypoint predictor 全部
 不变，Top-5 residual 只重新分配 MOVE 条件概率。rollout 保存调整后的完整
 概率和冻结 residual；current/reference update 使用同一份 residual。
 
+SFT、评测和冻结 GRPO 还必须共享
+`r1_low_level_move_rgb_anchor_v1`：reset/teleport 清空轨迹并记录落点锚帧，之后
+只接收 `MOVE_FORWARD` 后的非静止正前方 RGB。GRPO 在每次 `envs.step()` 后、
+暂停环境前复用和 SFT 相同的批量编码同步器；低级模式禁止写入当前高层全景。
+源 checkpoint 必须同时带有完全匹配的 `raenwm_context_metadata` 和 joint
+provenance。旧高层 checkpoint 不能直接进入这个低级冻结 GRPO 流程。
+
 ## 训练机入口
 
 先选择已经完成技术验收的 joint SFT checkpoint，并通过环境变量显式传入：
@@ -56,6 +63,10 @@ rollout context 做多轮参数更新。
 - `q0_contract: r1_post_update_ghost_mean_cached_v1`；
 - `q0_cache_precision: cpu_fp16`；
 - `q0_recompute_forbidden: true`。
+- `context_contract: r1_low_level_move_rgb_anchor_v1`；
+- `context_sampling_action: MOVE_FORWARD`；
+- `context_teleport_anchor_policy: clear_then_record_landing_rgb`；
+- `low_level_encode_batch_size: 64`。
 
 GRPO rollout 继续执行一次第一阶段 Q0，并把同一缓存交给 Top-5；日志中的
 `lookahead_q0_requested` 必须为 0。保存后应逐张量比较源 SFT 与 GRPO

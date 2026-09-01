@@ -159,6 +159,24 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 
 ## Last Reviewed
 
+2026-09-01，任务上下文：把原生 CLS 主链路的 RAE-NWM 上下文从“每个高层决策
+写入当前全景正前方特征”改为低级移动观测。新合同为
+`r1_low_level_move_rgb_anchor_v1`：episode reset 与 teleport 清空旧轨迹并记录
+落点锚帧，之后只记录 `MOVE_FORWARD` 后的正前方 RGB，转向忽略、碰撞静止帧
+去重。Habitat worker 不运行 DINO；SFT、评测和冻结 GRPO 在 `envs.step()` 后、
+暂停环境前共用跨环境批量编码器，最多 64 帧一批，按原事件顺序写入原生
+`[CLS+256 patch]` buffer，不足四帧不填充。R2R/RxR joint checkpoint 格式分别
+升为 `etpr1-native-cls-e24-joint-q0-cache-v4` 与
+`etpr1-rxr-native-cls-e24-joint-q0-cache-v3`，并在 source snapshot、RGB-only
+metadata 和 joint provenance 中绑定上下文合同；低级模式拒绝旧高层断点。
+全局默认仍是 `high_level_nav_latent`，用于历史复现；native 主配置显式切到低级
+模式。启动器默认从导航基座、离线 E24、恒等 Top-5 adapter 和新 RGB fusion
+开始；旧权重只允许在同时提供 checkpoint、SHA-256 和源上下文合同后做
+weights-only 迁移，不恢复训练状态。实现主要涉及
+`vlnce_baselines/nwm/low_level_context.py`、`common/environments.py`、
+`nwm/runtime.py`、两个 trainer 与 `nwm/frozen_grpo.py`；本地静态配置/脚本测试
+为 29 项通过，正式环境定向测试与短 smoke 结果待补。
+
 2026-08-31，任务上下文：只依据代码与方法逻辑修订论文主线，不使用尚未完成的训练结果判断方法是否成立。统一以大写 \(K\) 表示 Top-\(K\) 候选预算，以小写 \(k\geq1\) 表示从 \(q_0\) 开始的前瞻展开步数；方法公式和统一描述采用一般 \(q_0\rightarrow\cdots\rightarrow q_k\) 形式，默认 \(k=1\)。一次 \(q_0\rightarrow q_1\) 已构成完整双阶段主方法，但正式投稿必须完成 \(k=1,2,3\) 的视野长度消融。论文同时把“世界模型”收紧为冻结的动作条件表征世界模型，把 STOP 表述限定为残差不直接修改停止分数，并按实际代码将决策不变性写为查询候选上界为 \(\Delta\)、未查询候选上界为 0 的候选级证明。该证明只用于计划中的第二阶段深层查询链跳过，不能推出第一阶段 \(q_0\) 可跳过或性能不会下降。决策不变性触发、\(k>1\) 实现和 50/10/4步正式对照仍未接入完整论文方法链路，必须保持计划时态。
 
 2026-08-30，任务上下文：只读诊断刚完成的 R2R 原生 CLS E24 联合 SFT。训练与评测均使用提交 `116510e`；训练从 `iter14200` 基座运行 10,000 次、退出码 0，50 个 checkpoint 与 50 份完整 1,839 episode `val_unseen` 结果全部有效。按 `SR+SPL` 选择的最佳点是联合第 7,800 次，SR/SPL 为 `0.6318651441/0.5488278347`，仍低于起点的 `0.6373028820/0.5560538836`；50 个点没有任何一个超过起点的 SR 或 SPL。最佳点与起点逐 episode 对比为成功新增 136、丢失 146，差异没有显示稳定收益。

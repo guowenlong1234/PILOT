@@ -19,6 +19,12 @@ from vlnce_baselines.common.episode_iterator_state import (
     capture_episode_iterator_state,
     restore_episode_iterator_state,
 )
+from vlnce_baselines.nwm.low_level_context import (
+    LOW_LEVEL_CONTEXT_SOURCE,
+    LOW_LEVEL_RGB_SENSOR_UUID,
+    LowLevelContextEventBuffer,
+    normalize_context_source,
+)
 
 
 class _LegacyRootDictConfig(DictConfig):
@@ -409,6 +415,29 @@ class VLNCEDaggerEnv(habitat.RLEnv):
         self.video_dir = config.VIDEO_DIR
         self.video_frames = []
         self.plan_frames = []
+        raenwm_config = getattr(getattr(config, "MODEL", None), "RAENWM", None)
+        self.raenwm_context_source = normalize_context_source(
+            getattr(raenwm_config, "context_source", None)
+        )
+        self.raenwm_context_events = None
+        if self.raenwm_context_source == LOW_LEVEL_CONTEXT_SOURCE:
+            if not bool(getattr(raenwm_config, "enabled", False)):
+                raise ValueError(
+                    "low-level NWM context requires MODEL.RAENWM.enabled=True"
+                )
+            configured_sensors = {
+                str(sensor).upper()
+                for sensor in config.TASK_CONFIG.SIMULATOR.AGENT_0.SENSORS
+            }
+            if "RGB_SENSOR" not in configured_sensors:
+                raise ValueError(
+                    "low-level NWM context requires the front RGB_SENSOR"
+                )
+            self.raenwm_context_events = LowLevelContextEventBuffer(
+                pos_eps=float(getattr(raenwm_config, "pos_eps", 1.0e-3)),
+                yaw_eps=float(getattr(raenwm_config, "yaw_eps", 1.0e-3)),
+                rgb_key=LOW_LEVEL_RGB_SENSOR_UUID,
+            )
 
     @property
     def original_action_space(self):
@@ -455,6 +484,45 @@ class VLNCEDaggerEnv(habitat.RLEnv):
         pos = agent_state.position
         ori = np.array([*(agent_state.rotation.imag), agent_state.rotation.real])
         return (pos, ori)
+
+    def _low_level_context_enabled(self):
+        return self.raenwm_context_events is not None
+
+    def _record_raenwm_context_observation(
+        self,
+        observations,
+        *,
+        movement_frame=False,
+    ):
+        if not self._low_level_context_enabled():
+            return False
+        agent_state = self._env.sim.get_agent_state()
+        return self.raenwm_context_events.append_observation(
+            observations,
+            agent_state.position,
+            heading_from_quaternion(agent_state.rotation),
+            movement_frame=bool(movement_frame),
+        )
+
+    def _current_pose_rgb_observation(self):
+        if not self._low_level_context_enabled():
+            return None
+        agent_state = self._env.sim.get_agent_state()
+        rgb = self._env.sim.get_sensor_observation_at(
+            agent_state.position,
+            agent_state.rotation,
+            sensor_uuid=LOW_LEVEL_RGB_SENSOR_UUID,
+        )
+        if rgb is None:
+            raise RuntimeError("front RGB sensor returned no low-level observation")
+        return {LOW_LEVEL_RGB_SENSOR_UUID: rgb}
+
+    def pop_raenwm_context_events(self):
+        if not self._low_level_context_enabled():
+            raise RuntimeError(
+                "low-level context events requested while high-level mode is active"
+            )
+        return self.raenwm_context_events.pop_payload()
 
     def _normalize_candidate_q0_trajectory(self, trajectory):
         """Normalize each temporary action endpoint on the start navmesh island."""
@@ -868,6 +936,9 @@ class VLNCEDaggerEnv(habitat.RLEnv):
     
     def reset(self):
         observations = self._env.reset()
+        if self._low_level_context_enabled():
+            self.raenwm_context_events.reset_trace()
+            self._record_raenwm_context_observation(observations)
         if self.video_option:
             info = self.get_info(observations)
             self.video_frames = [
@@ -893,6 +964,9 @@ class VLNCEDaggerEnv(habitat.RLEnv):
         self._env._task.measurements.reset_measures(
             episode=self._env.current_episode, task=self._env.task
         )
+        if self._low_level_context_enabled():
+            self.raenwm_context_events.reset_trace()
+            self._record_raenwm_context_observation(observations)
         return observations
 
     # def wrap_act(self, act, ang, dis, cand_wp, action_wp, oracle_wp, start_p, start_h):
@@ -913,6 +987,19 @@ class VLNCEDaggerEnv(habitat.RLEnv):
             self._env.sim.step_without_obs(act)
             self._env._task.measurements.update_measures(
                 episode=self._env.current_episode, action=act, task=self._env.task 
+            )
+            if (
+                self._low_level_context_enabled()
+                and act == habitat_sim_action("MOVE_FORWARD")
+            ):
+                observations = self._current_pose_rgb_observation()
+        if (
+            self._low_level_context_enabled()
+            and act == habitat_sim_action("MOVE_FORWARD")
+        ):
+            self._record_raenwm_context_observation(
+                observations,
+                movement_frame=True,
             )
         return observations
 
@@ -938,6 +1025,8 @@ class VLNCEDaggerEnv(habitat.RLEnv):
 
     def teleport(self, pos):
         self._env.sim.set_agent_state(pos, quat_from_heading(0))
+        if self._low_level_context_enabled():
+            self.raenwm_context_events.reset_trace()
 
     def single_step_control(self, pos, tryout, vis_info):
         act_f = habitat_sim_action("MOVE_FORWARD")
@@ -1031,12 +1120,23 @@ class VLNCEDaggerEnv(habitat.RLEnv):
                 self.get_plan_frame(vis_info)
 
             # 1. back to front node
+            teleported = action['back_path'] is None
             if action['back_path'] is None:
                 self.teleport(action['front_pos'])
             else:
                 self.multi_step_control(action['back_path'], action['tryout'], vis_info)
             agent_state = self._env.sim.get_agent_state()
-            observations = self.get_observation_at(agent_state.position, agent_state.rotation)
+            if self.video_option:
+                observations = self.get_observation_at(
+                    agent_state.position,
+                    agent_state.rotation,
+                )
+            elif teleported and self._low_level_context_enabled():
+                observations = self._current_pose_rgb_observation()
+            else:
+                observations = None
+            if teleported and self._low_level_context_enabled():
+                self._record_raenwm_context_observation(observations)
 
             # 2. forward to ghost node
             self.single_step_control(action['ghost_pos'], action['tryout'], vis_info)
@@ -1048,6 +1148,7 @@ class VLNCEDaggerEnv(habitat.RLEnv):
                 self.get_plan_frame(vis_info)
 
             # 1. back to stop node
+            teleported = action['back_path'] is None
             if action['back_path'] is None:
                 self.teleport(action['stop_pos'])
             else:
@@ -1055,6 +1156,8 @@ class VLNCEDaggerEnv(habitat.RLEnv):
 
             # 2. stop
             observations = self._env.step(act) 
+            if teleported and self._low_level_context_enabled():
+                self._record_raenwm_context_observation(observations)
             if self.video_option:
                 info = self.get_info(observations)
                 self.video_frames.append(

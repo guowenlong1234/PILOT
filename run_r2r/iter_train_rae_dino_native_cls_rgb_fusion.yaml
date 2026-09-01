@@ -97,6 +97,8 @@ MODEL:
     stat_sha256: 84ede66def5e6e3f25679334dc89cf63b12aacb99cbf0f5ae7ed4ad3187f7e59
     context_size: 4
     max_buffer_size: 64
+    context_source: low_level_move_rgb_anchor
+    low_level_encode_batch_size: 64
     metric_waypoint_spacing: 0.24975892673356762
     pos_eps: 1.0e-3
     yaw_eps: 1.0e-3

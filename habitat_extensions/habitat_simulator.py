@@ -59,6 +59,49 @@ class Simulator(HabitatSim):
     def __init__(self, config: Config) -> None:
         super().__init__(config)
 
+    def get_sensor_observation_at(
+        self,
+        position: Optional[List[float]] = None,
+        rotation: Optional[List[float]] = None,
+        sensor_uuid: str = "rgb",
+        keep_agent_at_new_pose: bool = False,
+    ) -> Optional[VisualObservation]:
+        """Render one named sensor without evaluating the full sensor suite."""
+
+        if self.config.enable_batch_renderer:
+            raise RuntimeError(
+                "single-sensor low-level context rendering is not supported "
+                "with Habitat's batch renderer"
+            )
+
+        if sensor_uuid not in self._sensors:
+            raise KeyError(f"Simulator has no sensor with UUID {sensor_uuid!r}")
+        current_state = self.get_agent_state()
+        if position is None or rotation is None:
+            success = True
+        else:
+            success = self.set_agent_state(
+                position,
+                rotation,
+                reset_sensors=False,
+            )
+        if not success:
+            return None
+
+        sensor = self._sensors[sensor_uuid]
+        sensor.draw_observation()
+        sim_obs = {sensor_uuid: sensor.get_observation()}
+        self._prev_sim_obs = sim_obs
+        observation = self._sensor_suite.get(sensor_uuid).get_observation(sim_obs)
+
+        if not keep_agent_at_new_pose:
+            self.set_agent_state(
+                current_state.position,
+                current_state.rotation,
+                reset_sensors=False,
+            )
+        return observation
+
     def step_without_obs(self,
         action: Union[str, int, MutableMapping_T[int, Union[str, int]]],
         dt: float = 1.0 / 60.0,):

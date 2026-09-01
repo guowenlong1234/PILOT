@@ -81,6 +81,8 @@ export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:Tr
     echo "source_commit=$(git rev-parse HEAD)"
     echo "source_checkpoint=$SOURCE_CHECKPOINT"
     echo "source_checkpoint_sha256=$SOURCE_SHA"
+    echo "nwm_context_contract=r1_low_level_move_rgb_anchor_v1"
+    echo "nwm_context_encode_batch_size=64"
     "$PYTHON_BIN" -c 'import sys, torch, transformers, habitat, habitat_sim; print(f"versions=python:{sys.version.split()[0]} torch:{torch.__version__} cuda:{torch.version.cuda} transformers:{transformers.__version__} habitat:{habitat.__version__} habitat_sim:{habitat_sim.__version__}")'
 } >>"$LOG_FILE"
 

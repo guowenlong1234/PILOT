@@ -52,12 +52,15 @@ def test_rxr_baseline_and_joint_configs_preserve_task_contract():
     assert joint["IL"]["gradient_accumulation_steps"] == 2
     assert joint["IL"]["iters"] == 10000
     assert joint["IL"]["sample_ratio_zero_threshold"] == 0.15
-    assert joint["MODEL"]["RAENWM"]["predict_cls_token"] is True
-    assert joint["MODEL"]["RAENWM"]["token_count"] == 257
+    nwm = joint["MODEL"]["RAENWM"]
+    assert nwm["predict_cls_token"] is True
+    assert nwm["token_count"] == 257
     active = joint["MODEL"]["ACTIVE_LOOKAHEAD"]
     assert active["checkpoint_format_version"] == (
-        "etpr1-rxr-native-cls-e24-joint-q0-cache-v2"
+        "etpr1-rxr-native-cls-e24-joint-q0-cache-v3"
     )
+    assert nwm["context_source"] == "low_level_move_rgb_anchor"
+    assert nwm["low_level_encode_batch_size"] == 64
     assert active["warm_start_expected_q0_contract"] == (
         "temporary_action_same_island_navmesh"
     )

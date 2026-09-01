@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 import numpy as np
 import torch
@@ -18,6 +18,11 @@ from vlnce_baselines.nwm.raenwm_core.models import (
     unpack_cls_patch,
 )
 from vlnce_baselines.nwm.types import NwmPrediction
+from vlnce_baselines.nwm.low_level_context import (
+    LOW_LEVEL_CONTEXT_SOURCE,
+    context_metadata_from_config,
+    normalize_context_source,
+)
 
 
 def _load_tensor_dict(path):
@@ -204,6 +209,17 @@ class NwmPredictionRuntime:
         self.predict_cls_token = bool(
             getattr(config, "predict_cls_token", False)
         )
+        self.context_source = normalize_context_source(
+            getattr(config, "context_source", None)
+        )
+        self.context_metadata = context_metadata_from_config(config)
+        if (
+            self.context_source == LOW_LEVEL_CONTEXT_SOURCE
+            and not self.predict_cls_token
+        ):
+            raise ValueError(
+                "low-level movement context currently requires native CLS NWM"
+            )
         if int(config.context_size) != 4:
             raise ValueError("Stage-0 RAE-NWM requires context_size=4")
         if int(config.num_steps) != 10:
@@ -328,6 +344,10 @@ class NwmPredictionRuntime:
         yaws,
         raw_front_cls=None,
     ) -> None:
+        if self.context_source == LOW_LEVEL_CONTEXT_SOURCE:
+            raise RuntimeError(
+                "low-level movement context forbids high-level update_contexts"
+            )
         if len(raw_front_latents) != len(positions) or len(positions) != len(yaws):
             raise ValueError("front latent, position, and yaw counts must match")
         if len(self.adapter.buffers) != len(positions):
@@ -353,6 +373,57 @@ class NwmPredictionRuntime:
                 latent=normalized[env_index],
             )
 
+    def apply_low_level_context_events(
+        self,
+        events,
+        *,
+        raw_patch_latents: torch.Tensor,
+        raw_cls: torch.Tensor,
+    ) -> None:
+        if self.context_source != LOW_LEVEL_CONTEXT_SOURCE:
+            raise RuntimeError(
+                "low-level context events cannot be applied in high-level mode"
+            )
+        if not isinstance(events, (list, tuple)):
+            raise TypeError("low-level context events must be a sequence")
+        frame_events = [
+            event for event in events
+            if isinstance(event, Mapping) and event.get("type") == "frame"
+        ]
+        if int(raw_patch_latents.shape[0]) != len(frame_events):
+            raise ValueError("low-level patch count does not match frame events")
+        if int(raw_cls.shape[0]) != len(frame_events):
+            raise ValueError("low-level CLS count does not match frame events")
+        normalized_patch = self.normalizer.normalize_patch(raw_patch_latents)
+        normalized_cls = self.normalizer.normalize_cls(raw_cls)
+        normalized_tokens = pack_cls_patch(normalized_cls, normalized_patch)
+        if tuple(normalized_tokens.shape[1:]) != (257, 768):
+            raise ValueError(
+                "low-level native context must encode as [N,257,768]"
+            )
+        for event in events:
+            if not isinstance(event, Mapping):
+                raise ValueError("low-level context event must be a mapping")
+            event_type = event.get("type")
+            env_index = int(event.get("env_index", -1))
+            if event_type == "reset":
+                self.adapter.clear_at(env_index)
+            elif event_type == "frame":
+                frame_index = int(event.get("frame_index", -1))
+                if frame_index < 0 or frame_index >= len(frame_events):
+                    raise ValueError("low-level frame_index is out of range")
+                self.adapter.update_context(
+                    env_index=env_index,
+                    rgb=None,
+                    position=event.get("position"),
+                    yaw=float(event.get("yaw")),
+                    latent=normalized_tokens[frame_index],
+                )
+            else:
+                raise ValueError(
+                    f"Unknown low-level context event type: {event_type!r}"
+                )
+
     def source_context_snapshot(
         self,
         env_index: int,
@@ -366,6 +437,7 @@ class NwmPredictionRuntime:
             env_index,
             source_front_vp=source_front_vp,
             source_high_level_step=source_high_level_step,
+            context_metadata=self.context_metadata,
         )
 
     def predict_latent_targets(

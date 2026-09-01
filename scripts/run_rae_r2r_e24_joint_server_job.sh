@@ -17,6 +17,7 @@ RXR_BASE_CHECKPOINT=${ETPR1_RXR_BASE_CHECKPOINT:-}
 RXR_ALLOW_SMOKE_BASE=${ETPR1_RXR_ALLOW_SMOKE_BASE:-False}
 WARM_START_CKPT=${ETPR1_E24_WARM_START_CHECKPOINT:-}
 WARM_START_SHA=${ETPR1_E24_WARM_START_SHA256:-}
+WARM_START_SOURCE_CONTEXT_CONTRACT=${ETPR1_E24_WARM_START_SOURCE_CONTEXT_CONTRACT:-}
 PRETRAIN_PATH=${ETPR1_E24_JOINT_PRETRAIN_PATH:-${REPO_ROOT}/pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768_eval_final_best/model_best_step_465000.pt}
 CHECKPOINT_SYNC_DESTINATION=${ETPR1_E24_JOINT_SYNC_DESTINATION:-a6000@10.10.10.2:/home/a6000/gwl/ETP-R1/data/logs/active_lookahead/e24_joint_sft/checkpoints/etpr1_e24_joint_sft}
 CHECKPOINT_SYNC_ENABLED=${ETPR1_E24_JOINT_SYNC_ENABLED:-True}
@@ -84,9 +85,11 @@ case "$MODE" in
     *) echo "Unknown mode: $MODE" >&2; exit 2 ;;
 esac
 
-if [[ "$CONFIG_FILE" == *native_cls* ]]; then
-    [ -n "$WARM_START_CKPT" ] && [ -n "$WARM_START_SHA" ] || {
-        echo "Native Q0-cache training requires ETPR1_E24_WARM_START_CHECKPOINT and ETPR1_E24_WARM_START_SHA256" >&2
+if [ -n "$WARM_START_CKPT$WARM_START_SHA$WARM_START_SOURCE_CONTEXT_CONTRACT" ]; then
+    [ -n "$WARM_START_CKPT" ] \
+        && [ -n "$WARM_START_SHA" ] \
+        && [ -n "$WARM_START_SOURCE_CONTEXT_CONTRACT" ] || {
+        echo "Weights-only migration requires checkpoint, SHA256, and source context contract" >&2
         exit 2
     }
 fi
@@ -192,6 +195,8 @@ esac
     echo "base_selection_manifest_sha256=${BASE_SELECTION_MANIFEST_SHA:-none}"
     echo "warm_start_checkpoint=${WARM_START_CKPT:-none}"
     echo "warm_start_checkpoint_sha256=${WARM_START_SHA:-none}"
+    echo "warm_start_source_context_contract=${WARM_START_SOURCE_CONTEXT_CONTRACT:-none}"
+    echo "context_contract=r1_low_level_move_rgb_anchor_v1"
     echo "pretrain_path=$PRETRAIN_PATH"
     echo "checkpoint_sync_destination=$CHECKPOINT_SYNC_DESTINATION"
     echo "checkpoint_sync_enabled=$CHECKPOINT_SYNC_ENABLED"
@@ -240,6 +245,7 @@ fi
     MODEL.ACTIVE_LOOKAHEAD.base_iteration "$BASE_ITERATION" \
     MODEL.ACTIVE_LOOKAHEAD.warm_start_checkpoint_path "$WARM_START_CKPT" \
     MODEL.ACTIVE_LOOKAHEAD.warm_start_checkpoint_sha256 "$WARM_START_SHA" \
+    MODEL.ACTIVE_LOOKAHEAD.warm_start_source_context_contract "$WARM_START_SOURCE_CONTEXT_CONTRACT" \
     MODEL.ACTIVE_LOOKAHEAD.base_selection_manifest_sha256 "$BASE_SELECTION_MANIFEST_SHA" \
     IL.sample_ratio_iteration_offset "$BASE_ITERATION" \
     MODEL.ACTIVE_LOOKAHEAD.smoke_freeze_check "$SMOKE_FREEZE_CHECK" \

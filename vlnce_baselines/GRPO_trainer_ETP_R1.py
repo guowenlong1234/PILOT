@@ -44,6 +44,9 @@ from vlnce_baselines.nwm.active_lookahead.grpo_policy import (
 )
 from vlnce_baselines.nwm.frozen_grpo import FrozenLookaheadController
 from vlnce_baselines.nwm.rgb_fusion import clone_wp_outputs_candidate_rgb
+from vlnce_baselines.nwm.low_level_context import (
+    LOW_LEVEL_CONTEXT_DIAGNOSTIC_NAMES,
+)
 from vlnce_baselines.nwm.active_lookahead.offline_checkpoint import sha256_file
 from vlnce_baselines.nwm.active_lookahead.dino_cwp_future import (
     PREDICTED_FUTURE_DIAGNOSTIC_NAMES,
@@ -1141,6 +1144,28 @@ class RLTrainer(BaseVLNCETrainer):
             self.logs["lookahead_rgb_fused_candidates"].append(
                 float(rgb_fused.item())
             )
+            context_values = torch.tensor(
+                [
+                    self._lookahead_diagnostic_totals[
+                        f"nwm_context_{name}"
+                    ]
+                    for name in LOW_LEVEL_CONTEXT_DIAGNOSTIC_NAMES
+                ],
+                dtype=torch.float64,
+                device=self.device,
+            )
+            if self.world_size > 1:
+                distr.all_reduce(context_values, op=distr.ReduceOp.SUM)
+            context_totals = dict(
+                zip(LOW_LEVEL_CONTEXT_DIAGNOSTIC_NAMES, context_values.tolist())
+            )
+            drain_count = max(context_totals["drain_count"], 1.0)
+            for name, value in context_totals.items():
+                if name in {"context_ready_ratio", "environment_count"}:
+                    value = value / drain_count
+                self.logs[f"lookahead_nwm_context_{name}"].append(
+                    float(value)
+                )
             self.frozen_lookahead.assert_frozen()
 
         return deepcopy(self.logs)
@@ -1502,6 +1527,11 @@ class RLTrainer(BaseVLNCETrainer):
         prev_vp = [None] * self.envs.num_envs
         if self._frozen_lookahead_enabled():
             self.frozen_lookahead.initialize_runtime(self.envs.num_envs)
+            context_diagnostics = self.frozen_lookahead.sync_context_events()
+            for name, value in (context_diagnostics or {}).items():
+                self._lookahead_diagnostic_totals[
+                    f"nwm_context_{name}"
+                ] += float(value)
             if (
                 bool(self.config.MODEL.ACTIVE_LOOKAHEAD.smoke_freeze_check)
                 and self.frozen_lookahead._frozen_manifest is None
@@ -1530,6 +1560,9 @@ class RLTrainer(BaseVLNCETrainer):
                     )
                 front_latents = pano_latents[:, 0].detach()
                 front_cls = pano_raw_cls[:, 0].detach()
+                if self.frozen_lookahead.low_level_synchronizer is not None:
+                    front_latents = None
+                    front_cls = None
 
             if self._frozen_lookahead_enabled():
                 navigation_states = self.envs.call(
@@ -1777,6 +1810,14 @@ class RLTrainer(BaseVLNCETrainer):
 
             outputs = self.envs.step(env_actions)
             observations, _, dones, infos = [list(x) for x in zip(*outputs)]
+            if self._frozen_lookahead_enabled():
+                context_diagnostics = (
+                    self.frozen_lookahead.sync_context_events()
+                )
+                for name, value in (context_diagnostics or {}).items():
+                    self._lookahead_diagnostic_totals[
+                        f"nwm_context_{name}"
+                    ] += float(value)
 
             # calculate metric
             curr_eps = self.envs.current_episodes()

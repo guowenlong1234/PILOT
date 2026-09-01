@@ -23,14 +23,17 @@ def test_native_cls_config_uses_reusable_q0_cache_contract():
     assert "head_checkpoint_path" not in nwm
     assert "head_checkpoint_sha256" not in nwm
     assert nwm["rgb_fusion_gate_bias_init"] == 0.0
+    assert nwm["context_source"] == "low_level_move_rgb_anchor"
+    assert nwm["low_level_encode_batch_size"] == 64
     assert config["IL"]["checkpoint_sync_destination"].endswith(
         "native_cls_e24_joint_sft/checkpoints/etpr1_native_cls_e24_joint_sft"
     )
     assert active["checkpoint_format_version"] == (
-        "etpr1-native-cls-e24-joint-q0-cache-v3"
+        "etpr1-native-cls-e24-joint-q0-cache-v4"
     )
     assert active["warm_start_checkpoint_path"] == ""
     assert active["warm_start_checkpoint_sha256"] == ""
+    assert active["warm_start_source_context_contract"] == ""
     assert active["warm_start_expected_q0_contract"] == (
         "temporary_action_same_island_navmesh"
     )
@@ -54,6 +57,8 @@ def test_native_cls_smoke_and_single_episode_wrappers_are_isolated():
     assert "38b24af13b76ba8faef367559244c3a0401e0557e7c299870c273cbee8a07064" in launcher
     assert "ETPR1_E24_WARM_START_CHECKPOINT" in launcher
     assert "ETPR1_E24_WARM_START_SHA256" in launcher
+    assert "ETPR1_E24_WARM_START_SOURCE_CONTEXT_CONTRACT" in launcher
+    assert "Weights-only migration requires checkpoint, SHA256, and source context contract" in launcher
 
     smoke = (
         ROOT / "scripts/manage_rae_r2r_native_cls_e24_joint_server.sh"

@@ -49,6 +49,12 @@ from vlnce_baselines.nwm.rgb_fusion import (
     apply_rgb_fusion_to_current_candidates,
     clone_wp_outputs_candidate_rgb,
 )
+from vlnce_baselines.nwm.low_level_context import (
+    LOW_LEVEL_CONTEXT_SOURCE,
+    LowLevelContextSynchronizer,
+    context_metadata_from_config,
+    normalize_context_source,
+)
 from vlnce_baselines.nwm.active_lookahead.base_freeze import (
     capture_base_tensor_manifest,
     compare_base_tensor_manifests,
@@ -259,6 +265,8 @@ class RLTrainer(BaseVLNCETrainer):
         self._rgb_fusion_diagnostic_totals = None
         self._raenwm_head_state_override = None
         self._raenwm_context_source_logged = False
+        self.raenwm_low_level_synchronizer = None
+        self.last_raenwm_context_diagnostics = None
         self.e24_joint_head = None
         self.e24_joint_metadata = None
         self.dino_cwp_future_predictor = None
@@ -308,6 +316,7 @@ class RLTrainer(BaseVLNCETrainer):
         ) in {
             "etpr1-rxr-native-cls-e24-joint-v1",
             "etpr1-rxr-native-cls-e24-joint-q0-cache-v2",
+            "etpr1-rxr-native-cls-e24-joint-q0-cache-v3",
         }
 
     def _e24_joint_head_state_module(self):
@@ -490,7 +499,10 @@ class RLTrainer(BaseVLNCETrainer):
                 "temporary_action_same_island_navmesh",
             )
         )
-        if not path and not sha:
+        source_context_contract = str(
+            getattr(cfg, "warm_start_source_context_contract", "")
+        ).strip()
+        if not path and not sha and not source_context_contract:
             return None
         if not path or len(sha) != 64 or any(
             character not in "0123456789abcdef" for character in sha
@@ -498,10 +510,15 @@ class RLTrainer(BaseVLNCETrainer):
             raise ValueError(
                 "active-lookahead warm start requires a path and valid SHA256"
             )
+        if not source_context_contract:
+            raise ValueError(
+                "active-lookahead warm start requires the source context contract"
+            )
         return {
             "checkpoint_name": Path(path).name,
             "checkpoint_sha256": sha,
             "source_q0_contract": old_contract,
+            "source_context_contract": source_context_contract,
             "weights": [
                 "raenwm_rgb_fusion_adapter",
                 "e24_residual_head",
@@ -537,6 +554,18 @@ class RLTrainer(BaseVLNCETrainer):
                 "lookahead warm-start Q0 contract mismatch: "
                 f"expected={provenance['source_q0_contract']} actual={actual_contract}"
             )
+        actual_context_contract = str(
+            source_provenance.get("context_contract", "")
+        )
+        if (
+            actual_context_contract
+            and actual_context_contract != provenance["source_context_contract"]
+        ):
+            raise ValueError(
+                "lookahead warm-start context contract mismatch: "
+                f"expected={provenance['source_context_contract']} "
+                f"actual={actual_context_contract}"
+            )
         e24_state = checkpoint.get("e24_joint_state_dict")
         fusion_state = checkpoint.get("raenwm_rgb_fusion_adapter_state_dict")
         if not isinstance(e24_state, Mapping) or not isinstance(fusion_state, Mapping):
@@ -560,7 +589,8 @@ class RLTrainer(BaseVLNCETrainer):
     def _native_cls_provenance_fields(self):
         cfg = self._active_lookahead_config()
         nwm_cfg = self.config.MODEL.RAENWM
-        return {
+        context_metadata = self._raenwm_context_metadata()
+        fields = {
             "predict_cls_token": True,
             "token_count": 257,
             "nwm_inference_config_sha256": sha256_file(nwm_cfg.config_path),
@@ -582,6 +612,23 @@ class RLTrainer(BaseVLNCETrainer):
             "base_loss_weight": 1.0,
             "adjusted_loss_weight": float(cfg.e24_loss_weight),
         }
+        if context_metadata["context_source"] == LOW_LEVEL_CONTEXT_SOURCE:
+            fields.update(
+                {
+                    "context_source": context_metadata["context_source"],
+                    "context_contract": context_metadata["context_contract"],
+                    "context_sampling_action": context_metadata[
+                        "sampling_action"
+                    ],
+                    "context_teleport_anchor_policy": context_metadata[
+                        "teleport_anchor_policy"
+                    ],
+                    "low_level_encode_batch_size": context_metadata[
+                        "encode_batch_size"
+                    ],
+                }
+            )
+        return fields
 
     def _rxr_native_cls_provenance_fields(self):
         dataset = self.config.TASK_CONFIG.DATASET
@@ -685,9 +732,113 @@ class RLTrainer(BaseVLNCETrainer):
         return wrapper
 
     def _raenwm_enabled(self):
-        model_config = getattr(self.config, "MODEL", None)
+        model_config = getattr(getattr(self, "config", None), "MODEL", None)
         raenwm_config = getattr(model_config, "RAENWM", None)
         return bool(getattr(raenwm_config, "enabled", False))
+
+    def _raenwm_context_source(self):
+        raenwm_config = getattr(
+            getattr(getattr(self, "config", None), "MODEL", None),
+            "RAENWM",
+            None,
+        )
+        return normalize_context_source(
+            getattr(raenwm_config, "context_source", None)
+        )
+
+    def _raenwm_low_level_context_enabled(self):
+        return (
+            self._raenwm_enabled()
+            and self._raenwm_context_source() == LOW_LEVEL_CONTEXT_SOURCE
+        )
+
+    def _raenwm_context_metadata(self):
+        return context_metadata_from_config(self.config.MODEL.RAENWM)
+
+    def _validate_raenwm_context_checkpoint_metadata(
+        self,
+        checkpoint,
+        *,
+        allow_missing,
+    ):
+        if not self._raenwm_enabled():
+            return None
+        expected = self._raenwm_context_metadata()
+        saved = checkpoint.get("raenwm_context_metadata")
+        if saved is None:
+            has_context_weights = any(
+                checkpoint.get(name) is not None
+                for name in (
+                    "raenwm_rgb_fusion_adapter_state_dict",
+                    "e24_joint_state_dict",
+                    "raenwm_heads_state_dict",
+                )
+            )
+            if (
+                expected["context_source"] == LOW_LEVEL_CONTEXT_SOURCE
+                and has_context_weights
+            ):
+                raise ValueError(
+                    "low-level mode refuses context-dependent weights without "
+                    "raenwm_context_metadata; use the explicit weights-only "
+                    "migration contract"
+                )
+            if allow_missing or expected["context_source"] != LOW_LEVEL_CONTEXT_SOURCE:
+                return None
+            raise ValueError(
+                "low-level NWM checkpoint is missing raenwm_context_metadata"
+            )
+        if not isinstance(saved, Mapping):
+            raise ValueError("raenwm_context_metadata must be a mapping")
+        mismatches = {
+            key: (saved.get(key), value)
+            for key, value in expected.items()
+            if saved.get(key) != value
+        }
+        if mismatches:
+            raise ValueError(
+                f"NWM context checkpoint metadata mismatch: {mismatches}"
+            )
+        return dict(saved)
+
+    def _validate_raenwm_context_config(self):
+        if not self._raenwm_enabled():
+            return
+        nwm = self.config.MODEL.RAENWM
+        metadata = context_metadata_from_config(nwm)
+        if metadata["context_source"] != LOW_LEVEL_CONTEXT_SOURCE:
+            return
+        rgb = self.config.MODEL.RGB_ENCODER
+        if str(rgb.type).strip().lower() != "rae_dinov2" or int(
+            rgb.output_size
+        ) != 768:
+            raise ValueError(
+                "low-level context requires the 768-dimensional RAE/DINOv2 encoder"
+            )
+        if not bool(nwm.predict_cls_token) or int(nwm.token_count) != 257:
+            raise ValueError(
+                "low-level context requires native CLS+256-patch NWM"
+            )
+        sensors = {
+            str(sensor).upper()
+            for sensor in self.config.TASK_CONFIG.SIMULATOR.AGENT_0.SENSORS
+        }
+        if "RGB_SENSOR" not in sensors:
+            raise ValueError("low-level context requires the front RGB_SENSOR")
+
+    def _sync_raenwm_low_level_contexts(self):
+        if not self._raenwm_low_level_context_enabled():
+            return None
+        synchronizer = self.raenwm_low_level_synchronizer
+        if synchronizer is None:
+            raise RuntimeError("low-level context synchronizer is not initialized")
+        diagnostics = synchronizer.drain(self.envs)
+        self.last_raenwm_context_diagnostics = diagnostics
+        logs = getattr(self, "logs", None)
+        if logs is not None:
+            for name, value in diagnostics.items():
+                logs[f"nwm_context_{name}"].append(float(value))
+        return diagnostics
 
     def _raenwm_rgb_fusion_enabled(self):
         return self._raenwm_enabled() and bool(
@@ -879,6 +1030,10 @@ class RLTrainer(BaseVLNCETrainer):
     def _load_raenwm_rgb_fusion_from_checkpoint(
         self, checkpoint, *, allow_missing
     ):
+        self._validate_raenwm_context_checkpoint_metadata(
+            checkpoint,
+            allow_missing=bool(allow_missing),
+        )
         adapter = self._raenwm_rgb_fusion_state_module()
         if adapter is None:
             return None
@@ -899,8 +1054,10 @@ class RLTrainer(BaseVLNCETrainer):
     def _initialize_raenwm_runtime(self, num_envs):
         if not self._raenwm_enabled():
             self.raenwm_runtime = None
+            self.raenwm_low_level_synchronizer = None
             self.last_raenwm_prediction = None
             return None
+        self._validate_raenwm_context_config()
         if self.raenwm_runtime is None:
             from vlnce_baselines.nwm.runtime import NwmPredictionRuntime
 
@@ -920,6 +1077,19 @@ class RLTrainer(BaseVLNCETrainer):
         self.last_raenwm_prediction = None
         self.last_candidate_q0_prediction_diagnostics = None
         self._raenwm_context_source_logged = False
+        self.last_raenwm_context_diagnostics = None
+        if self._raenwm_low_level_context_enabled():
+            policy_net = getattr(self.policy.net, "module", self.policy.net)
+            self.raenwm_low_level_synchronizer = LowLevelContextSynchronizer(
+                runtime=self.raenwm_runtime,
+                encoder=policy_net.rgb_encoder,
+                device=self.device,
+                batch_size=int(
+                    self.config.MODEL.RAENWM.low_level_encode_batch_size
+                ),
+            )
+        else:
+            self.raenwm_low_level_synchronizer = None
         return self.raenwm_runtime
 
     def _build_raenwm_preview_queries(
@@ -945,24 +1115,25 @@ class RLTrainer(BaseVLNCETrainer):
         self.last_raenwm_rgb_fusion_diagnostics = None
         if runtime is None:
             return None
-        if front_latents is None:
-            raise RuntimeError(
-                "RAE-NWM is enabled but waypoint output has no pano_rae_latents"
-            )
         yaws = [heading_from_quaternion(value) for value in cur_ori]
-        if bool(getattr(runtime, "predict_cls_token", False)):
-            if front_cls is None:
+        if not self._raenwm_low_level_context_enabled():
+            if front_latents is None:
                 raise RuntimeError(
-                    "native CLS NWM requires pano_rae_raw_cls"
+                    "RAE-NWM is enabled but waypoint output has no pano_rae_latents"
                 )
-            runtime.update_contexts(
-                front_latents,
-                cur_pos,
-                yaws,
-                raw_front_cls=front_cls,
-            )
-        else:
-            runtime.update_contexts(front_latents, cur_pos, yaws)
+            if bool(getattr(runtime, "predict_cls_token", False)):
+                if front_cls is None:
+                    raise RuntimeError(
+                        "native CLS NWM requires pano_rae_raw_cls"
+                    )
+                runtime.update_contexts(
+                    front_latents,
+                    cur_pos,
+                    yaws,
+                    raw_front_cls=front_cls,
+                )
+            else:
+                runtime.update_contexts(front_latents, cur_pos, yaws)
         queries = self._build_raenwm_preview_queries(
             cur_pos, cur_ori, candidate_previews
         )
@@ -1009,24 +1180,25 @@ class RLTrainer(BaseVLNCETrainer):
         runtime = self.raenwm_runtime
         if runtime is None:
             return None
-        if front_latents is None:
-            raise RuntimeError(
-                "RAE-NWM is enabled but waypoint output has no pano_rae_latents"
-            )
         yaws = [heading_from_quaternion(orientation) for orientation in cur_ori]
-        if bool(getattr(runtime, "predict_cls_token", False)):
-            if front_cls is None:
+        if not self._raenwm_low_level_context_enabled():
+            if front_latents is None:
                 raise RuntimeError(
-                    "native CLS NWM requires pano_rae_raw_cls"
+                    "RAE-NWM is enabled but waypoint output has no pano_rae_latents"
                 )
-            runtime.update_contexts(
-                front_latents,
-                cur_pos,
-                yaws,
-                raw_front_cls=front_cls,
-            )
-        else:
-            runtime.update_contexts(front_latents, cur_pos, yaws)
+            if bool(getattr(runtime, "predict_cls_token", False)):
+                if front_cls is None:
+                    raise RuntimeError(
+                        "native CLS NWM requires pano_rae_raw_cls"
+                    )
+                runtime.update_contexts(
+                    front_latents,
+                    cur_pos,
+                    yaws,
+                    raw_front_cls=front_cls,
+                )
+            else:
+                runtime.update_contexts(front_latents, cur_pos, yaws)
 
         from vlnce_baselines.nwm.runtime import NwmQuery
 
@@ -1136,6 +1308,10 @@ class RLTrainer(BaseVLNCETrainer):
             "config": self.config,
             "iteration": iteration,
         }
+        if self._raenwm_enabled():
+            checkpoint["raenwm_context_metadata"] = (
+                self._raenwm_context_metadata()
+            )
         if self._active_lookahead_enabled():
             e24_wrapper = self._e24_joint_wrapper_state_module()
             if e24_wrapper is None:
@@ -2951,6 +3127,7 @@ class RLTrainer(BaseVLNCETrainer):
                                ghost_aug) for _ in range(self.envs.num_envs)]
         prev_vp = [None] * self.envs.num_envs
         self._initialize_raenwm_runtime(self.envs.num_envs)
+        self._sync_raenwm_low_level_contexts()
         if (
             self._active_lookahead_enabled()
             and bool(self._active_lookahead_config().smoke_freeze_check)
@@ -2991,6 +3168,11 @@ class RLTrainer(BaseVLNCETrainer):
                             "no pano_rae_raw_cls"
                         )
                     raenwm_front_cls = pano_raw_cls[:, 0].detach()
+                if self._raenwm_low_level_context_enabled():
+                    # The panorama is still used by navigation, but it must not
+                    # enter the world-model context in low-level mode.
+                    raenwm_front_latents = None
+                    raenwm_front_cls = None
 
             fusion_enabled = self._raenwm_rgb_fusion_enabled()
             if not fusion_enabled:
@@ -3309,6 +3491,9 @@ class RLTrainer(BaseVLNCETrainer):
 
             outputs = self.envs.step(env_actions)
             observations, _, dones, infos = [list(x) for x in zip(*outputs)]
+            # Drain before pausing completed environments so worker indices and
+            # NWM buffers still refer to the same episodes.
+            self._sync_raenwm_low_level_contexts()
 
             # calculate metric
             if mode == 'eval':

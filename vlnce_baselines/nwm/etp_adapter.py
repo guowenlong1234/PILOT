@@ -7,6 +7,10 @@ import torch
 from PIL import Image
 
 from vlnce_baselines.nwm.types import NwmCondition
+from vlnce_baselines.nwm.low_level_context import (
+    HIGH_LEVEL_CONTEXT_CONTRACT,
+    HIGH_LEVEL_CONTEXT_SOURCE,
+)
 
 _RAE_IMAGE_TRANSFORM = None
 _OPTIONAL_RAE_TRANSFORM_DEPS = {"torchvision", "matplotlib"}
@@ -188,6 +192,11 @@ class RaeSourceContextSnapshot:
     context_latents: torch.Tensor
     source_position: np.ndarray
     source_yaw: float
+    context_source: str = HIGH_LEVEL_CONTEXT_SOURCE
+    context_contract: str = HIGH_LEVEL_CONTEXT_CONTRACT
+    sampling_action: str = "HIGH_LEVEL_DECISION"
+    teleport_anchor_policy: str = "not_applicable"
+    encode_batch_size: int = 64
 
 
 @dataclass(frozen=True)
@@ -371,6 +380,9 @@ class NwmEtpAdapter:
     def pause_at(self, env_index: int) -> None:
         del self.buffers[self._require_env_index(env_index)]
 
+    def clear_at(self, env_index: int) -> None:
+        self.buffers[self._require_env_index(env_index)].clear()
+
     def update_context(self, env_index: int, rgb, position, yaw: float, latent=None) -> bool:
         index = self._require_env_index(env_index)
         return self.buffers[index].push(
@@ -386,6 +398,7 @@ class NwmEtpAdapter:
         *,
         source_front_vp: str,
         source_high_level_step: int,
+        context_metadata=None,
     ) -> Optional[RaeSourceContextSnapshot]:
         """Copy four normalized latent frames to immutable CPU storage."""
 
@@ -407,12 +420,26 @@ class NwmEtpAdapter:
         if not bool(torch.isfinite(context).all()):
             return None
         latest = frames[-1]
+        metadata = dict(context_metadata or {})
         return RaeSourceContextSnapshot(
             source_front_vp=str(source_front_vp),
             source_high_level_step=int(source_high_level_step),
             context_latents=context,
             source_position=_as_position3(latest.position),
             source_yaw=_wrap_to_pi(float(latest.yaw)),
+            context_source=str(
+                metadata.get("context_source", HIGH_LEVEL_CONTEXT_SOURCE)
+            ),
+            context_contract=str(
+                metadata.get("context_contract", HIGH_LEVEL_CONTEXT_CONTRACT)
+            ),
+            sampling_action=str(
+                metadata.get("sampling_action", "HIGH_LEVEL_DECISION")
+            ),
+            teleport_anchor_policy=str(
+                metadata.get("teleport_anchor_policy", "not_applicable")
+            ),
+            encode_batch_size=int(metadata.get("encode_batch_size", 64)),
         )
 
     def _local_displacement_m(self, current_position, current_yaw: float, ghost_position):
