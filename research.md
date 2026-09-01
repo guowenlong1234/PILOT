@@ -159,6 +159,48 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 
 ## Last Reviewed
 
+2026-09-01，任务上下文：在不改变 `r1_low_level_move_rgb_anchor_v1`、checkpoint
+格式和 trainer 事件接口的前提下，把低级上下文从“每个成功前进小步立即渲染”
+优化为延迟渲染。Habitat worker 现在只记录成功移动后的完整位姿，每次 drain
+最多保留最后 4 个；碰撞静止帧在渲染前丢弃。高层动作结束后，最后一帧复用
+完整导航观测中的正前方 RGB，其余最多 3 帧才用单 RGB 传感器回放。teleport
+清空旧队列并记录落点位姿；视频模式复用已经生成的逐步 RGB。回放会恢复最终
+agent 位姿、`_prev_sim_obs` 和碰撞状态，不改变下一步导航与测量。实现提交为
+`f2c1d58`，测试替身修正为 `273ee4b`。
+
+训练机正式环境版本仍为 Python 3.10.14、PyTorch 2.2.2+cu121、Transformers
+4.49.0、CUDA 12.1、Habitat/Habitat-Sim 0.3.3。延迟渲染相关定向测试为
+`70 passed, 2 warnings`；排除明确只适用于测评机专用容器的三个运行时测试文件
+后，可收集完整测试为 `495 passed, 2 warnings`。未排除时为
+`542 passed, 3 failed, 2 warnings`，三个失败均是训练机不具备测评机固定的
+`/home/a6000/...` runtime 与包装器，不涉及本次改动。
+
+R2R/RxR 两次 SFT 更新和一次冻结 R2R GRPO 更新均退出 0。R2R 每个高层边界
+的有效位姿均值保持旧基线 `4.529`，实际 frame/encoded frame 降为 `3.235`，
+其中单传感器回放 `2.235`、复用已有 RGB `1.000`、裁剪 `1.294`；上下文就绪
+比例仍为 `0.706`。RxR 有效位姿均值保持 `6.083`，实际 frame 降为 `3.458`，
+其中回放 `2.458`、复用 `1.000`、裁剪 `2.625`；就绪比例仍为 `0.792`，碰撞
+静止去重仍为 `0.188`。两者 NWM 均 `314/314` 匹配，Q0/Q1 成功率均为 1，
+Oracle q1 为 0。冻结 GRPO 的 29 次 drain 共记录 177 个有效位姿，只输出 102
+帧：回放 73、复用 29、裁剪 75；future-valid 为 104，无批次/行失败。保存后的
+E24 135 个张量和 RGB fusion 10 个张量与源 SFT checkpoint 逐项完全一致。
+产物位于训练机
+`data/logs/active_lookahead/native_cls_e24_joint_single_smoke/20260901_delayed_r2r/`、
+`data/logs/active_lookahead/rxr_native_cls_e24_joint_smoke/20260901_delayed_rxr/`
+和 `data/logs/active_lookahead/r2r_delayed_frozen_grpo_smoke/20260901/`。
+
+R2R/RxR 单 episode 评测均退出 0，NWM `314/314`、Oracle q1 为 0且无失败。
+R2R 的 SR/SPL 为 `1/1`、NDTW/SDTW 均为 `0.900898`；旧即时链路记录并编码
+66 帧，新链路记录同样 66 个有效位姿，但只编码 42 帧，其中回放 30、末帧复用
+12、裁剪 24。DINO 总编码时间从 `0.331270` 秒降为 `0.258732` 秒，回放渲染
+耗时 `0.020720` 秒；单 episode 墙钟为旧 `17.9803` 秒、新 `18.0569` 秒。
+RxR 新链路记录 15 个有效位姿并编码 15 帧，其中回放 9、复用 6；新旧全部导航
+统计逐项相同，墙钟为旧 `9.3739` 秒、新 `9.4104` 秒。单样本墙钟只记录、不设
+硬性能门槛；确定性验收以渲染次数下降、导航结果相同和单元测试中的最终四帧
+RGB/latent 完全一致为准。结果位于训练机
+`data/logs/active_lookahead/native_cls_e24_single_episode_eval/20260901_delayed_r2r/`
+和 `data/logs/active_lookahead/rxr_delayed_single_episode_eval/20260901/`。
+
 2026-09-01，任务上下文：把原生 CLS 主链路的 RAE-NWM 上下文从“每个高层决策
 写入当前全景正前方特征”改为低级移动观测。新合同为
 `r1_low_level_move_rgb_anchor_v1`：episode reset 与 teleport 清空旧轨迹并记录
