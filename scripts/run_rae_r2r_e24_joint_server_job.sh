@@ -28,6 +28,7 @@ SMOKE_FREEZE_CHECK=${ETPR1_E24_JOINT_SMOKE_FREEZE_CHECK:-False}
 NPROC_PER_NODE=${ETPR1_E24_JOINT_NPROC_PER_NODE:-2}
 NUM_ENVIRONMENTS=${ETPR1_E24_JOINT_NUM_ENVIRONMENTS:-4}
 BATCH_SIZE=${ETPR1_E24_JOINT_BATCH_SIZE:-4}
+GRADIENT_ACCUMULATION_STEPS=${ETPR1_E24_JOINT_GRADIENT_ACCUMULATION_STEPS:-1}
 CUDA_DEVICES=${ETPR1_E24_JOINT_CUDA_VISIBLE_DEVICES:-0,1}
 RUNTIME_ROOT=${ETPR1_SERVER_RUNTIME_ROOT:-${REPO_ROOT}/.runtime/server_sft}
 PYTHON_BIN=${ETPR1_SERVER_PYTHON:-/home/gwl/miniconda3/envs/etpnav_unified/bin/python}
@@ -104,7 +105,11 @@ done
     echo "Missing lookahead warm-start checkpoint: $WARM_START_CKPT" >&2
     exit 1
 }
-for integer_setting in "$NPROC_PER_NODE" "$NUM_ENVIRONMENTS" "$BATCH_SIZE"; do
+for integer_setting in \
+    "$NPROC_PER_NODE" \
+    "$NUM_ENVIRONMENTS" \
+    "$BATCH_SIZE" \
+    "$GRADIENT_ACCUMULATION_STEPS"; do
     [[ "$integer_setting" =~ ^[1-9][0-9]*$ ]] || {
         echo "Distributed and batch settings must be positive integers: $integer_setting" >&2
         exit 2
@@ -205,6 +210,8 @@ esac
     echo "nproc_per_node=$NPROC_PER_NODE"
     echo "num_environments=$NUM_ENVIRONMENTS"
     echo "batch_size=$BATCH_SIZE"
+    echo "gradient_accumulation_steps=$GRADIENT_ACCUMULATION_STEPS"
+    echo "global_batch_size=$((NPROC_PER_NODE * NUM_ENVIRONMENTS * GRADIENT_ACCUMULATION_STEPS))"
     echo "task_seed=${TASK_SEED:-config_default}"
     "$PYTHON_BIN" -c 'import sys, torch, transformers, habitat, habitat_sim; habitat_version=getattr(habitat, "__version__", "unknown"); habitat_sim_version=getattr(habitat_sim, "__version__", "unknown"); print(f"versions=python:{sys.version.split()[0]} torch:{torch.__version__} cuda:{torch.version.cuda} transformers:{transformers.__version__} habitat:{habitat_version} habitat_sim:{habitat_sim_version}")'
     nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu --format=csv,noheader
@@ -229,6 +236,7 @@ fi
     GPU_NUMBERS "$NPROC_PER_NODE" \
     NUM_ENVIRONMENTS "$NUM_ENVIRONMENTS" \
     IL.batch_size "$BATCH_SIZE" \
+    IL.gradient_accumulation_steps "$GRADIENT_ACCUMULATION_STEPS" \
     IL.checkpoint_sync_enabled "$CHECKPOINT_SYNC_ENABLED" \
     IL.checkpoint_sync_destination "$CHECKPOINT_SYNC_DESTINATION" \
     "${seed_args[@]}" \

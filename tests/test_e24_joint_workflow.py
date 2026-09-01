@@ -58,6 +58,9 @@ def test_native_cls_smoke_and_single_episode_wrappers_are_isolated():
     assert "ETPR1_E24_WARM_START_CHECKPOINT" in launcher
     assert "ETPR1_E24_WARM_START_SHA256" in launcher
     assert "ETPR1_E24_WARM_START_SOURCE_CONTEXT_CONTRACT" in launcher
+    assert "ETPR1_E24_JOINT_GRADIENT_ACCUMULATION_STEPS:-1" in launcher
+    assert 'IL.gradient_accumulation_steps "$GRADIENT_ACCUMULATION_STEPS"' in launcher
+    assert 'global_batch_size=$((NPROC_PER_NODE * NUM_ENVIRONMENTS * GRADIENT_ACCUMULATION_STEPS))' in launcher
     assert "Weights-only migration requires checkpoint, SHA256, and source context contract" in launcher
 
     smoke = (
