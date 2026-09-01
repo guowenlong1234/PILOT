@@ -5,6 +5,7 @@
 .runtime/
 .task2_logs/
 .git.training-worktree-pointer.before-central-*
+/tmp/
 
 # Byte-compiled / optimized / DLL files
 .ipynb_checkpoints/

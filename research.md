@@ -159,6 +159,8 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 
 ## Last Reviewed
 
+2026-08-31，任务上下文：只依据代码与方法逻辑修订论文主线，不使用尚未完成的训练结果判断方法是否成立。统一以大写 \(K\) 表示 Top-\(K\) 候选预算，以小写 \(k\geq1\) 表示从 \(q_0\) 开始的前瞻展开步数；方法公式和统一描述采用一般 \(q_0\rightarrow\cdots\rightarrow q_k\) 形式，默认 \(k=1\)。一次 \(q_0\rightarrow q_1\) 已构成完整双阶段主方法，但正式投稿必须完成 \(k=1,2,3\) 的视野长度消融。论文同时把“世界模型”收紧为冻结的动作条件表征世界模型，把 STOP 表述限定为残差不直接修改停止分数，并按实际代码将决策不变性写为查询候选上界为 \(\Delta\)、未查询候选上界为 0 的候选级证明。该证明只用于计划中的第二阶段深层查询链跳过，不能推出第一阶段 \(q_0\) 可跳过或性能不会下降。决策不变性触发、\(k>1\) 实现和 50/10/4步正式对照仍未接入完整论文方法链路，必须保持计划时态。
+
 2026-08-30，任务上下文：只读诊断刚完成的 R2R 原生 CLS E24 联合 SFT。训练与评测均使用提交 `116510e`；训练从 `iter14200` 基座运行 10,000 次、退出码 0，50 个 checkpoint 与 50 份完整 1,839 episode `val_unseen` 结果全部有效。按 `SR+SPL` 选择的最佳点是联合第 7,800 次，SR/SPL 为 `0.6318651441/0.5488278347`，仍低于起点的 `0.6373028820/0.5560538836`；50 个点没有任何一个超过起点的 SR 或 SPL。最佳点与起点逐 episode 对比为成功新增 136、丢失 146，差异没有显示稳定收益。
 
 直接证据表明 E24 在线退化为近似 no-op：离线 oracle-future 验证曾有 `12.95%` 动作翻转率和 `+2.14` 个百分点决策准确率，但本轮完整在线评测除第 200 次为 `1.78%` 外，之后通常只有约 `0.1%--0.4%`；训练中的残差绝对均值从第 200 次 `0.592` 降到第 600 次 `0.045`，Top-5 CLS adapter 梯度范数从 `0.239` 降到最终 `0.004`。主要结构性原因是：离线 E24 使用 oracle future 且有效 future 覆盖率 `87.2%`，在线串联预测只有约 `47%`；DINO-CWP 自身 `val_unseen` 的 waypoint `top1_cwp_success` 只有 `27.06%`，且本轮使用的旧 Q0 合同与 R1 实际 `ghost_mean_pos` 不一致；adjusted CE 训练完整 logits，但部署的 `stop_isolated_e24_actions()` 固定基础 STOP/MOVE 边界，只允许 ghost 间重排；基础策略又同时用原始 logits 的 CE 继续训练，容易吸收同一教师信号并让残差收缩。次要因素是起点本身是 75 个验证点中的孤立峰值，联合阶段把全局 batch 从 16 降到 8、仍以恒定 `1e-5` 继续训练。现有结果足以判定本轮没有端到端增益；Q0 修复、预测 future 质量、STOP 口径和冻结基座/残差的单变量贡献仍需消融确认。本次未修改训练代码、远端任务或实验产物。
@@ -260,3 +262,5 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 2026-07-10，在设计获批后编写 RAE/DINOv2 实施计划。计划位于 `docs/superpowers/plans/2026-07-10-rae-dinov2-visual-encoder.md`，依次覆盖测评机隔离环境、现代 Habitat 兼容、三层投影、冻结编码器、离线预训练、在线 SFT/GRPO、checkpoint 过滤、全量 HDF5、CLIP 回归和最终冒烟。本阶段只形成计划，尚未创建 `gwl-etpr1-rae`、`etpr1_rae` 或开始模型实现。
 
 2026-07-10，为 Task2 现代运行兼容复查。检查了 Python 3.11.15、NumPy 1.26.4、Habitat/Habitat-Sim/Habitat-Baselines 0.3.3、Transformers 4.49.0 的导入链，补齐旧配置与入口兼容，并确认 `run.py`、两个 R1 trainer、`habitat_extensions.task` 和 trainer 注册可用。代码审查后又补充了 R2R/RxR 旧配置到现代 OmegaConf 的桥接、原生配置入口幂等保护、动作编号保护和实际 `R1Env` 配置边界测试；真实 R2R/RxR 转换配置也已覆盖同进程与新进程 `pickle` 往返、深复制兼容，并确认不会遮蔽普通 OmegaConf 的同名数据字段。测评机最终运行 Task1+Task2 共 35 项测试通过，`python run.py --help` 退出码为 0。
+
+2026-09-01，排查测评机 RGB-fusion R2R `val_unseen` 测评停止。根分区当时为 100%、可用空间 0，`native_cls_eval/watch.log` 在 `iter8000` 起明确报 `OSError: [Errno 28] No space left on device`。按用户授权停止该评测 watcher，并从测评机 `data/logs` 删除 186 个检查点文件及未完成传输片段，共 311,873,764,749 字节；训练机原件和已有评测结果保留。磁盘恢复到 68%、约 291 GB 可用。完整结果截至 `iter7400`，`iter7600` 的 episode 文件为 0 字节，因此从训练机经 2.5 GbE 直连原子同步 `iter7600` 至 `iter10000` 共 13 个待测检查点并重启 `scripts/manage_rae_r2r_native_cls_rgb_fusion_eval_watch_host.sh`。启动验收时 `iter7600` 已推进到 47/1839，GPU 利用率约 85%、显存约 13.1 GiB，根盘在同步后仍有约 272 GB 可用。
