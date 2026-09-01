@@ -201,6 +201,23 @@ RGB/latent 完全一致为准。结果位于训练机
 `data/logs/active_lookahead/native_cls_e24_single_episode_eval/20260901_delayed_r2r/`
 和 `data/logs/active_lookahead/rxr_delayed_single_episode_eval/20260901/`。
 
+同日完成测评机条件步骤。旧 RGB-fusion 全量评测自然完成全部 50 个 checkpoint；
+最后 `iter10000` 的 1,839 个 episode 完整退出并写入结果。其常驻 watcher 仍按
+设计每 30 秒空轮询，但没有 `run.py` 子进程，GPU 已释放。测评机工作树干净后
+以 `ff-only` 更新到 `5520dd1`，专用 `gwl-etpr1-rae` 容器和 `etpr1_rae`
+环境版本为 Python 3.11.15、PyTorch 2.2.2+cu121、Transformers 4.49.0、
+CUDA 12.1、Habitat/Habitat-Sim 0.3.3；定向测试为 `70 passed, 3 warnings`。
+训练机到测评机只通过 2.5 GbE 直连传输两份单回合所需 checkpoint，大小和
+SHA-256 均逐项一致，没有传输训练状态或日志。
+
+测评机 R2R/RxR 单 episode 均退出 0，NWM `314/314`、Oracle q1 为 0且无
+批次/行失败。R2R 导航和上下文计数与训练机一致：SR/SPL `1/1`、NDTW/SDTW
+`0.900898`，66 个有效位姿输出 42 帧，其中回放 30、复用 12、裁剪 24；评测
+耗时 `12.1103` 秒。RxR 的全部导航统计也与训练机逐项一致，15 个有效位姿输出
+15 帧，其中回放 9、复用 6；评测耗时 `7.9883` 秒。结果位于测评机
+`data/logs/active_lookahead/native_cls_e24_single_episode_eval/20260901_delayed_r2r_eval4090/`
+和 `data/logs/active_lookahead/rxr_delayed_single_episode_eval/20260901_eval4090_fix2/`。
+
 2026-09-01，任务上下文：把原生 CLS 主链路的 RAE-NWM 上下文从“每个高层决策
 写入当前全景正前方特征”改为低级移动观测。新合同为
 `r1_low_level_move_rgb_anchor_v1`：episode reset 与 teleport 清空旧轨迹并记录
