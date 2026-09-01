@@ -159,6 +159,29 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 
 ## Last Reviewed
 
+2026-09-01，使用当前低级移动上下文、延迟渲染和 Q0 缓存逻辑启动正式
+R2R 原生 CLS E24 joint SFT。目标为 10,000 次优化器更新，双卡、每 rank 8 个
+Habitat 环境、梯度累积 1，因此全局有效 batch 为 16；每 200 次保存并经训练机
+到测评机的 2.5 GbE 直连原子同步。首次同配置冒烟在第 2 次更新前发现两个 rank
+均有 6 个 `rgb_encoder.cls_residual_mlp` 参数未进入首轮损失，显存并未不足。
+提交 `e46832d` 为这组动态参数增加数值为零的 DDP 梯度锚点，保持损失和真实
+梯度不变；训练机针对性测试为 `26 passed, 2 warnings`。修复后的 8×2、无累积
+两次更新冒烟退出 0，NWM `314/314`，Q0 缓存与 Q1 成功率均为 1，设备显存
+占用约 21 GiB，日志位于
+`data/logs/active_lookahead/native_cls_e24_joint_smoke/20260901_bs16_ddp_anchor/`。
+
+正式任务源提交为 `e46832d`，从 `base_iter14200.pth` weights-only 启动，不热启
+旧高层上下文 joint 权重；实验名为
+`etpr1_native_cls_e24_joint_sft_lowlevel_bs16`，输出目录为训练机
+`data/logs/active_lookahead/native_cls_e24_joint_sft_lowlevel_bs16_20260901/`，
+启动 supervisor PID 为 `2835202`。交接检查时已跨过第 2 次更新，两张 A6000
+持续计算、没有 traceback 或 DDP 错误。测评机同时启动独立升序 watcher，PID
+`256545`，等待 50 个 checkpoint 并逐个完成全部 1,839 个 R2R `val_unseen`
+episode；输出根为
+`data/logs/active_lookahead/native_cls_e24_joint_eval_lowlevel_bs16_20260901/`。
+启动时受保护的 `gwl-etpnav` 容器未运行，4090 仅有约 142 MiB 桌面占用；尚无
+第 200 次 checkpoint，因此 watcher 正常处于 `reason=no_checkpoints`。
+
 2026-09-01，任务上下文：在不改变 `r1_low_level_move_rgb_anchor_v1`、checkpoint
 格式和 trainer 事件接口的前提下，把低级上下文从“每个成功前进小步立即渲染”
 优化为延迟渲染。Habitat worker 现在只记录成功移动后的完整位姿，每次 drain
