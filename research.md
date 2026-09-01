@@ -175,7 +175,38 @@ metadata 和 joint provenance 中绑定上下文合同；低级模式拒绝旧�
 weights-only 迁移，不恢复训练状态。实现主要涉及
 `vlnce_baselines/nwm/low_level_context.py`、`common/environments.py`、
 `nwm/runtime.py`、两个 trainer 与 `nwm/frozen_grpo.py`；本地静态配置/脚本测试
-为 29 项通过，正式环境定向测试与短 smoke 结果待补。
+为 30 项通过。训练机正式环境为 Python 3.10.14、PyTorch 2.2.2+cu121、
+Transformers 4.49.0、CUDA 12.1、Habitat/Habitat-Sim 0.3.3；初版定向测试
+`73 passed`，可收集完整测试 `481 passed, 2 warnings`。RAE/ETPNav 同一输入的
+数值一致性为 `max_abs=0`、cosine `0.9999999404`。
+
+低级合同的真实短测均已完成。R2R 与 RxR 各做两次 SFT 更新，均退出 0；R2R
+上下文就绪比例约 `0.706`、每个高层动作约 4.529 帧，RxR 分别约 `0.792` 和
+6.083 帧，并实际观察到碰撞静止帧去重。两者 Q0/Q1 请求成功率均为 1，Oracle
+q1 均为 0。冻结 R2R GRPO 一次更新退出 0，future-valid 为 104、上下文就绪
+比例约 `0.793`；保存前后 E24/Top-5 的 135 个张量及 RGB fusion 的 10 个张量
+与源 SFT checkpoint 逐张量完全相同。结束时 VectorEnv 打印过
+`BrokenPipeError` 清理提示，但训练、checkpoint 保存和主进程退出码均正常。
+对应产物在训练机
+`data/logs/active_lookahead/native_cls_e24_joint_single_smoke/20260901_lowlevel_r2r/`、
+`data/logs/active_lookahead/rxr_native_cls_e24_joint_smoke/20260901_lowlevel_rxr/`
+和
+`data/logs/active_lookahead/r2r_lowlevel_frozen_grpo_smoke/20260901/`。
+
+单 episode 在线评测也已覆盖 R2R 与 RxR。RxR 首次评测发现活动候选未保存真实
+位置，提交 `6792ac7` 修复后退出 0，NWM `314/314` 匹配且无批次/行失败，结果
+在训练机
+`data/logs/active_lookahead/rxr_lowlevel_single_episode_eval/20260901_fix1/`。
+R2R 使用同一低级合同于提交 `41e9085` 退出 0，SR/SPL 为 `1/1`，NDTW/SDTW
+均为 `0.900898`，NWM `314/314` 匹配、Oracle q1 为 0、无批次/行失败；新增的
+`lookahead_ckpt_*.json` 低级上下文段记录 12 次 drain、12 个 reset、66 个
+frame/encoded frame、就绪比例 `0.833333`，编码总耗时 `0.331270` 秒、约
+`0.005019` 秒/帧。结果在训练机
+`data/logs/active_lookahead/native_cls_e24_single_episode_eval/20260901_lowlevel_r2r_diag/`。
+诊断追加提交的相邻定向测试为 `59 passed, 2 warnings`。测评机仍在执行旧
+RGB-fusion 全量评测；2026-09-01 12:32 检查时已完成 42/50 个 checkpoint，
+正在启动第 8,600 次迭代评测。故尚未更新到低级合同提交，也没有在该机并行
+补跑。
 
 2026-08-31，任务上下文：只依据代码与方法逻辑修订论文主线，不使用尚未完成的训练结果判断方法是否成立。统一以大写 \(K\) 表示 Top-\(K\) 候选预算，以小写 \(k\geq1\) 表示从 \(q_0\) 开始的前瞻展开步数；方法公式和统一描述采用一般 \(q_0\rightarrow\cdots\rightarrow q_k\) 形式，默认 \(k=1\)。一次 \(q_0\rightarrow q_1\) 已构成完整双阶段主方法，但正式投稿必须完成 \(k=1,2,3\) 的视野长度消融。论文同时把“世界模型”收紧为冻结的动作条件表征世界模型，把 STOP 表述限定为残差不直接修改停止分数，并按实际代码将决策不变性写为查询候选上界为 \(\Delta\)、未查询候选上界为 0 的候选级证明。该证明只用于计划中的第二阶段深层查询链跳过，不能推出第一阶段 \(q_0\) 可跳过或性能不会下降。决策不变性触发、\(k>1\) 实现和 50/10/4步正式对照仍未接入完整论文方法链路，必须保持计划时态。
 
