@@ -159,6 +159,18 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 
 ## Last Reviewed
 
+2026-09-01，将本轮低级上下文 batch-16 joint SFT 的增量评测接入笔记本
+`http://127.0.0.1:6008/`。该端口继续由用户级 SSH 隧道映射到测评容器 6009，
+TensorBoard 读取联合目录
+`data/logs/active_lookahead/native_cls_e24_joint_eval/metrics_tensorboard_20260828/`。
+容器内新增 tmux 会话 `etpr1-lowlevel-bs16-eval-tb-normalizer`，每 10 秒扫描
+`native_cls_e24_joint_eval_lowlevel_bs16_20260901` 的完整结果，并以独立 run
+`native_cls_e24_lowlevel_bs16` 写入相同的 `eval_*` 标签，后续 checkpoint 会自动
+追加。首个 `iter200` 已完成全部 1,839 个 `val_unseen` episode，11 项指标已由
+TensorBoard 数据接口和浏览器页面共同确认；其中 SR 为 `0.6275149584`，SPL
+为 `0.5338301659`。页面刷新后新 run 已出现在 run 列表并默认勾选，旧 joint、
+RGB-fusion 和起点曲线均保留，可直接叠图比较。
+
 2026-09-01，使用当前低级移动上下文、延迟渲染和 Q0 缓存逻辑启动正式
 R2R 原生 CLS E24 joint SFT。目标为 10,000 次优化器更新，双卡、每 rank 8 个
 Habitat 环境、梯度累积 1，因此全局有效 batch 为 16；每 200 次保存并经训练机
