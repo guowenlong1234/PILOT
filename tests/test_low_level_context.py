@@ -286,6 +286,11 @@ def test_wrap_act_records_pose_without_render_and_drops_collision(monkeypatch):
         "habitat_sim_action",
         lambda name: name.lower().replace("move_", ""),
     )
+    monkeypatch.setattr(
+        environments_module,
+        "heading_from_quaternion",
+        lambda _rotation: 0.0,
+    )
     simulator = FakeSimulator()
     env = object.__new__(VLNCEDaggerEnv)
     env.video_option = []
@@ -293,6 +298,7 @@ def test_wrap_act_records_pose_without_render_and_drops_collision(monkeypatch):
     env._env = SimpleNamespace(
         sim=simulator,
         current_episode=object(),
+        task=object(),
         _task=SimpleNamespace(
             measurements=SimpleNamespace(update_measures=lambda **_kwargs: None)
         ),
@@ -352,8 +358,15 @@ def _bare_delayed_env(position=None):
     return env
 
 
-def test_back_path_materializes_only_latest_four_and_reuses_endpoint_rgb():
+def test_back_path_materializes_only_latest_four_and_reuses_endpoint_rgb(
+    monkeypatch,
+):
     env = _bare_delayed_env()
+    monkeypatch.setattr(
+        environments_module,
+        "heading_from_quaternion",
+        lambda _rotation: 0.0,
+    )
     replay_positions = []
     env._render_raenwm_context_rgb = lambda position, _rotation: (
         replay_positions.append(position.copy())
@@ -406,6 +419,11 @@ def test_stop_after_teleport_reuses_stop_observation_without_replay(monkeypatch)
         environments_module,
         "quat_from_heading",
         lambda _heading: env._env.sim.rotation,
+    )
+    monkeypatch.setattr(
+        environments_module,
+        "heading_from_quaternion",
+        lambda _rotation: 0.0,
     )
     replay_calls = []
     env._render_raenwm_context_rgb = lambda *_args: replay_calls.append(True)
