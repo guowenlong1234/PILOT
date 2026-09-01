@@ -77,30 +77,34 @@ class Simulator(HabitatSim):
         if sensor_uuid not in self._sensors:
             raise KeyError(f"Simulator has no sensor with UUID {sensor_uuid!r}")
         current_state = self.get_agent_state()
-        if position is None or rotation is None:
-            success = True
-        else:
-            success = self.set_agent_state(
-                position,
-                rotation,
-                reset_sensors=False,
-            )
-        if not success:
-            return None
+        previous_sim_obs = self._prev_sim_obs
+        try:
+            if position is None or rotation is None:
+                success = True
+            else:
+                success = self.set_agent_state(
+                    position,
+                    rotation,
+                    reset_sensors=False,
+                )
+            if not success:
+                return None
 
-        sensor = self._sensors[sensor_uuid]
-        sensor.draw_observation()
-        sim_obs = {sensor_uuid: sensor.get_observation()}
-        self._prev_sim_obs = sim_obs
-        observation = self._sensor_suite.get(sensor_uuid).get_observation(sim_obs)
-
-        if not keep_agent_at_new_pose:
-            self.set_agent_state(
-                current_state.position,
-                current_state.rotation,
-                reset_sensors=False,
-            )
-        return observation
+            sensor = self._sensors[sensor_uuid]
+            sensor.draw_observation()
+            sim_obs = {sensor_uuid: sensor.get_observation()}
+            self._prev_sim_obs = sim_obs
+            return self._sensor_suite.get(sensor_uuid).get_observation(sim_obs)
+        finally:
+            if not keep_agent_at_new_pose:
+                self.set_agent_state(
+                    current_state.position,
+                    current_state.rotation,
+                    reset_sensors=False,
+                )
+                # previous_step_collided is derived from _prev_sim_obs.  Replay
+                # rendering must not change collision handling or task state.
+                self._prev_sim_obs = previous_sim_obs
 
     def step_without_obs(self,
         action: Union[str, int, MutableMapping_T[int, Union[str, int]]],

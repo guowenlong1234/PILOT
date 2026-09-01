@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 import numpy as np
 import torch
@@ -34,6 +34,11 @@ LOW_LEVEL_CONTEXT_DIAGNOSTIC_NAMES = (
     "context_ready",
     "context_ready_ratio",
     "dropped_static_frames",
+    "valid_poses",
+    "trimmed_poses",
+    "single_sensor_renders",
+    "reused_rgb_frames",
+    "replay_render_seconds",
 )
 
 
@@ -74,6 +79,11 @@ def summarize_low_level_context_diagnostics(
             values["context_ready_ratio"], drains
         ),
         "dropped_static_frames": values["dropped_static_frames"],
+        "valid_poses": values["valid_poses"],
+        "trimmed_poses": values["trimmed_poses"],
+        "single_sensor_renders": values["single_sensor_renders"],
+        "reused_rgb_frames": values["reused_rgb_frames"],
+        "replay_render_seconds": values["replay_render_seconds"],
         "frames_per_drain": _diagnostic_ratio(frames, drains),
         "frames_per_environment": _diagnostic_ratio(
             frames, environments
@@ -83,6 +93,10 @@ def summarize_low_level_context_diagnostics(
         ),
         "encode_seconds_per_batch": _diagnostic_ratio(
             values["encode_seconds"], batches
+        ),
+        "replay_render_seconds_per_frame": _diagnostic_ratio(
+            values["replay_render_seconds"],
+            values["single_sensor_renders"],
         ),
     }
 
@@ -177,15 +191,55 @@ def _as_rgb_uint8(rgb: Any) -> np.ndarray:
     return np.ascontiguousarray(np.clip(array, 0, 255).astype(np.uint8))
 
 
+def _as_rotation4(rotation: Any) -> np.ndarray:
+    quaternion_imag = (
+        np.asarray(rotation.imag).reshape(-1)
+        if hasattr(rotation, "imag") and hasattr(rotation, "real")
+        else np.empty((0,), dtype=np.float64)
+    )
+    quaternion_real = (
+        np.asarray(rotation.real).reshape(-1)
+        if hasattr(rotation, "imag") and hasattr(rotation, "real")
+        else np.empty((0,), dtype=np.float64)
+    )
+    if quaternion_imag.shape == (3,) and quaternion_real.shape == (1,):
+        array = np.asarray(
+            [*quaternion_imag, quaternion_real[0]],
+            dtype=np.float64,
+        )
+    else:
+        array = np.asarray(rotation, dtype=np.float64).reshape(-1)
+    if array.shape != (4,):
+        raise ValueError(
+            "low-level context rotation must have four quaternion values "
+            f"[x,y,z,w], got {array.shape}"
+        )
+    if not np.isfinite(array).all():
+        raise ValueError("low-level context rotation must be finite")
+    norm = float(np.linalg.norm(array))
+    if norm <= 0.0:
+        raise ValueError("low-level context rotation quaternion must be non-zero")
+    return np.ascontiguousarray(array / norm)
+
+
+def _rotation_matches(left: np.ndarray, right: np.ndarray, eps: float) -> bool:
+    # q and -q encode the same rotation.
+    return min(
+        float(np.linalg.norm(left - right)),
+        float(np.linalg.norm(left + right)),
+    ) <= float(eps)
+
+
 @dataclass(frozen=True)
 class LowLevelContextFrame:
-    rgb: np.ndarray
+    rgb: Optional[np.ndarray]
     position: np.ndarray
+    rotation: np.ndarray
     yaw: float
 
 
 class LowLevelContextEventBuffer:
-    """Episode-local raw RGB event buffer owned by one Habitat worker."""
+    """Episode-local delayed-render event buffer owned by one Habitat worker."""
 
     def __init__(
         self,
@@ -193,26 +247,103 @@ class LowLevelContextEventBuffer:
         pos_eps: float = 1.0e-3,
         yaw_eps: float = 1.0e-3,
         rgb_key: str = LOW_LEVEL_RGB_SENSOR_UUID,
+        context_size: int = 4,
     ):
         self.pos_eps = float(pos_eps)
         self.yaw_eps = float(yaw_eps)
         self.rgb_key = str(rgb_key)
+        self.context_size = int(context_size)
+        if self.context_size <= 0:
+            raise ValueError("low-level context_size must be positive")
         self._last_raw_frame: Optional[LowLevelContextFrame] = None
+        self._pending_poses: List[LowLevelContextFrame] = []
         self._pending_events: List[Dict[str, Any]] = []
         self._pending_stats = self._empty_stats()
 
     @staticmethod
-    def _empty_stats() -> Dict[str, int]:
+    def _empty_stats() -> Dict[str, float]:
         return {
             "reset_events": 0,
             "frame_events": 0,
             "dropped_static_frames": 0,
+            "valid_poses": 0,
+            "trimmed_poses": 0,
+            "single_sensor_renders": 0,
+            "reused_rgb_frames": 0,
+            "replay_render_seconds": 0.0,
         }
 
     def reset_trace(self) -> None:
         self._last_raw_frame = None
+        self._pending_poses.clear()
         self._pending_events.append({"type": "reset"})
         self._pending_stats["reset_events"] += 1
+
+    @property
+    def pending_pose_count(self) -> int:
+        return len(self._pending_poses)
+
+    def append_pose(
+        self,
+        position: Any,
+        rotation: Any,
+        yaw: float,
+        *,
+        observations: Optional[Mapping[str, Any]] = None,
+        movement_frame: bool = False,
+        previous_position: Any = None,
+    ) -> bool:
+        rgb = None
+        if observations is not None:
+            if not isinstance(observations, Mapping):
+                raise ValueError("low-level context observation must be a mapping")
+            if self.rgb_key not in observations:
+                raise ValueError(
+                    f"low-level context observation is missing {self.rgb_key!r}"
+                )
+            rgb = _as_rgb_uint8(observations[self.rgb_key])
+
+        frame = LowLevelContextFrame(
+            rgb=rgb,
+            position=_as_position3(position),
+            rotation=_as_rotation4(rotation),
+            yaw=_wrap_to_pi(float(yaw)),
+        )
+        is_static = False
+        if movement_frame:
+            previous = (
+                _as_position3(previous_position)
+                if previous_position is not None
+                else (
+                    None
+                    if self._last_raw_frame is None
+                    else self._last_raw_frame.position
+                )
+            )
+            if previous is not None:
+                delta_pos = float(
+                    np.linalg.norm(frame.position[[0, 2]] - previous[[0, 2]])
+                )
+                is_static = delta_pos < self.pos_eps
+        elif self._last_raw_frame is not None:
+            previous = self._last_raw_frame
+            delta_pos = float(
+                np.linalg.norm(frame.position[[0, 2]] - previous.position[[0, 2]])
+            )
+            delta_yaw = abs(_wrap_to_pi(frame.yaw - previous.yaw))
+            is_static = delta_pos < self.pos_eps and delta_yaw < self.yaw_eps
+        self._last_raw_frame = frame
+        if is_static:
+            self._pending_stats["dropped_static_frames"] += 1
+            return False
+
+        self._pending_poses.append(frame)
+        self._pending_stats["valid_poses"] += 1
+        if len(self._pending_poses) > self.context_size:
+            trimmed = len(self._pending_poses) - self.context_size
+            del self._pending_poses[:trimmed]
+            self._pending_stats["trimmed_poses"] += trimmed
+        return True
 
     def append_observation(
         self,
@@ -220,47 +351,142 @@ class LowLevelContextEventBuffer:
         position: Any,
         yaw: float,
         *,
+        rotation: Any = None,
         movement_frame: bool = False,
+        previous_position: Any = None,
     ) -> bool:
-        if not isinstance(observations, Mapping):
-            raise ValueError("low-level context observation must be a mapping")
-        if self.rgb_key not in observations:
-            raise ValueError(
-                f"low-level context observation is missing {self.rgb_key!r}"
-            )
-        frame = LowLevelContextFrame(
-            rgb=_as_rgb_uint8(observations[self.rgb_key]),
-            position=_as_position3(position),
-            yaw=_wrap_to_pi(float(yaw)),
+        if rotation is None:
+            half_yaw = 0.5 * float(yaw)
+            rotation = [0.0, math.sin(half_yaw), 0.0, math.cos(half_yaw)]
+        return self.append_pose(
+            position,
+            rotation,
+            yaw,
+            observations=observations,
+            movement_frame=movement_frame,
+            previous_position=previous_position,
         )
-        previous = self._last_raw_frame
-        is_static = False
-        if previous is not None:
-            delta_pos = float(
-                np.linalg.norm(frame.position[[0, 2]] - previous.position[[0, 2]])
-            )
-            delta_yaw = abs(_wrap_to_pi(frame.yaw - previous.yaw))
-            # A MOVE_FORWARD event represents translation.  A collision is
-            # therefore static even if turns changed the camera yaw first.
-            is_static = delta_pos < self.pos_eps and (
-                movement_frame or delta_yaw < self.yaw_eps
-            )
-        self._last_raw_frame = frame
-        if is_static:
-            self._pending_stats["dropped_static_frames"] += 1
+
+    def attach_latest_observation(
+        self,
+        observations: Mapping[str, Any],
+        position: Any,
+        rotation: Any,
+    ) -> bool:
+        """Attach an RGB already rendered for the newest queued pose."""
+
+        if not self._pending_poses:
             return False
-        self._pending_events.append(
-            {
-                "type": "frame",
-                "rgb": frame.rgb,
-                "position": frame.position,
-                "yaw": float(frame.yaw),
-            }
+        if not isinstance(observations, Mapping) or self.rgb_key not in observations:
+            return False
+        normalized_position = _as_position3(position)
+        normalized_rotation = _as_rotation4(rotation)
+        frame = self._pending_poses[-1]
+        if float(np.linalg.norm(frame.position - normalized_position)) >= self.pos_eps:
+            return False
+        if not _rotation_matches(
+            frame.rotation,
+            normalized_rotation,
+            max(0.5 * self.yaw_eps, 1.0e-6),
+        ):
+            return False
+        self._pending_poses[-1] = LowLevelContextFrame(
+            rgb=_as_rgb_uint8(observations[self.rgb_key]),
+            position=frame.position,
+            rotation=frame.rotation,
+            yaw=frame.yaw,
         )
-        self._pending_stats["frame_events"] += 1
         return True
 
+    def materialize_pending(
+        self,
+        *,
+        render_rgb: Optional[Callable[[np.ndarray, np.ndarray], Any]],
+        final_observations: Optional[Mapping[str, Any]] = None,
+        final_position: Any = None,
+        final_rotation: Any = None,
+    ) -> int:
+        if not self._pending_poses:
+            return 0
+
+        final_rgb = None
+        if isinstance(final_observations, Mapping) and (
+            self.rgb_key in final_observations
+        ):
+            final_rgb = _as_rgb_uint8(final_observations[self.rgb_key])
+        normalized_final_position = (
+            None if final_position is None else _as_position3(final_position)
+        )
+        normalized_final_rotation = (
+            None if final_rotation is None else _as_rotation4(final_rotation)
+        )
+
+        materialized = []
+        single_sensor_renders = 0
+        reused_rgb_frames = 0
+        replay_render_seconds = 0.0
+        last_index = len(self._pending_poses) - 1
+        for index, frame in enumerate(self._pending_poses):
+            rgb = frame.rgb
+            if rgb is not None:
+                reused_rgb_frames += 1
+            elif (
+                index == last_index
+                and final_rgb is not None
+                and normalized_final_position is not None
+                and normalized_final_rotation is not None
+                and float(
+                    np.linalg.norm(frame.position - normalized_final_position)
+                )
+                < self.pos_eps
+                and _rotation_matches(
+                    frame.rotation,
+                    normalized_final_rotation,
+                    max(0.5 * self.yaw_eps, 1.0e-6),
+                )
+            ):
+                rgb = final_rgb
+                reused_rgb_frames += 1
+            else:
+                if render_rgb is None:
+                    raise RuntimeError(
+                        "low-level context pose requires a replay RGB renderer"
+                    )
+                started = time.perf_counter()
+                rendered = render_rgb(frame.position, frame.rotation)
+                replay_render_seconds += time.perf_counter() - started
+                if isinstance(rendered, Mapping):
+                    if self.rgb_key not in rendered:
+                        raise ValueError(
+                            "low-level replay observation is missing "
+                            f"{self.rgb_key!r}"
+                        )
+                    rendered = rendered[self.rgb_key]
+                rgb = _as_rgb_uint8(rendered)
+                single_sensor_renders += 1
+
+            materialized.append(
+                {
+                    "type": "frame",
+                    "rgb": rgb,
+                    "position": frame.position,
+                    "yaw": float(frame.yaw),
+                }
+            )
+
+        self._pending_events.extend(materialized)
+        self._pending_poses.clear()
+        self._pending_stats["frame_events"] += len(materialized)
+        self._pending_stats["single_sensor_renders"] += single_sensor_renders
+        self._pending_stats["reused_rgb_frames"] += reused_rgb_frames
+        self._pending_stats["replay_render_seconds"] += replay_render_seconds
+        return len(materialized)
+
     def pop_payload(self) -> Dict[str, Any]:
+        if self._pending_poses:
+            raise RuntimeError(
+                "low-level context poses must be materialized before drain"
+            )
         payload = {
             "format": LOW_LEVEL_EVENT_PAYLOAD_FORMAT,
             "contract": LOW_LEVEL_CONTEXT_CONTRACT,
@@ -356,16 +582,7 @@ class LowLevelContextSynchronizer:
         num_envs = int(getattr(envs, "num_envs", 0))
         if num_envs <= 0:
             return {
-                "drain_count": 0.0,
-                "environment_count": 0.0,
-                "reset_events": 0.0,
-                "frame_events": 0.0,
-                "encoded_frames": 0.0,
-                "encode_batches": 0.0,
-                "encode_seconds": 0.0,
-                "context_ready": 0.0,
-                "context_ready_ratio": 0.0,
-                "dropped_static_frames": 0.0,
+                name: 0.0 for name in LOW_LEVEL_CONTEXT_DIAGNOSTIC_NAMES
             }
         if len(self.runtime.adapter.buffers) != num_envs:
             raise RuntimeError(
@@ -378,7 +595,15 @@ class LowLevelContextSynchronizer:
         event_sequence: List[Dict[str, Any]] = []
         frames: List[np.ndarray] = []
         reset_events = 0
-        dropped_static_frames = 0
+        worker_stats = {
+            "dropped_static_frames": 0.0,
+            "valid_poses": 0.0,
+            "trimmed_poses": 0.0,
+            "single_sensor_renders": 0.0,
+            "reused_rgb_frames": 0.0,
+            "replay_render_seconds": 0.0,
+        }
+        context_size = int(self.runtime.adapter.config.context_size)
         for env_index, payload in enumerate(payloads):
             events, stats = self._validate_payload(payload, env_index)
             payload_reset_count = sum(
@@ -395,7 +620,24 @@ class LowLevelContextSynchronizer:
                 raise ValueError(
                     f"environment {env_index} low-level event stats do not match events"
                 )
-            dropped_static_frames += int(stats.get("dropped_static_frames", 0))
+            if payload_frame_count > context_size:
+                raise ValueError(
+                    f"environment {env_index} returned {payload_frame_count} "
+                    f"low-level frames, exceeding context_size={context_size}"
+                )
+            for name in worker_stats:
+                worker_stats[name] += float(stats.get(name, 0.0))
+            render_count = stats.get("single_sensor_renders")
+            reuse_count = stats.get("reused_rgb_frames")
+            if (
+                render_count is not None
+                and reuse_count is not None
+                and int(render_count) + int(reuse_count) != payload_frame_count
+            ):
+                raise ValueError(
+                    f"environment {env_index} low-level render stats do not "
+                    "match frame events"
+                )
             for event in events:
                 if not isinstance(event, Mapping):
                     raise ValueError("low-level context event must be a mapping")
@@ -450,6 +692,11 @@ class LowLevelContextSynchronizer:
             "context_ready": float(ready),
             "context_ready_ratio": float(ready) / float(num_envs),
             "dropped_static_frames": float(
-                dropped_static_frames + runtime_static
+                worker_stats["dropped_static_frames"] + runtime_static
             ),
+            "valid_poses": worker_stats["valid_poses"],
+            "trimmed_poses": worker_stats["trimmed_poses"],
+            "single_sensor_renders": worker_stats["single_sensor_renders"],
+            "reused_rgb_frames": worker_stats["reused_rgb_frames"],
+            "replay_render_seconds": worker_stats["replay_render_seconds"],
         }
