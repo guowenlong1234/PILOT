@@ -7,11 +7,13 @@ import torch
 from habitat_extensions.habitat_simulator import Simulator
 from vlnce_baselines.nwm.etp_adapter import NwmEtpAdapter, RaeEtpAdapterConfig
 from vlnce_baselines.nwm.low_level_context import (
+    LOW_LEVEL_CONTEXT_DIAGNOSTIC_FORMAT,
     LOW_LEVEL_CONTEXT_CONTRACT,
     LOW_LEVEL_CONTEXT_SOURCE,
     LOW_LEVEL_EVENT_PAYLOAD_FORMAT,
     LowLevelContextEventBuffer,
     LowLevelContextSynchronizer,
+    summarize_low_level_context_diagnostics,
 )
 from vlnce_baselines.nwm.runtime import NwmPredictionRuntime
 from vlnce_baselines.nwm.types import NwmPrediction
@@ -171,6 +173,60 @@ def test_low_level_batch_encoding_builds_native_four_by_257_context():
     assert snapshot.sampling_action == "MOVE_FORWARD"
     assert snapshot.teleport_anchor_policy == "clear_then_record_landing_rgb"
     assert snapshot.encode_batch_size == 64
+
+
+def test_low_level_eval_diagnostics_summarize_counts_readiness_and_timing():
+    summary = summarize_low_level_context_diagnostics(
+        {
+            "drain_count": 4,
+            "environment_count": 10,
+            "reset_events": 3,
+            "frame_events": 20,
+            "encoded_frames": 20,
+            "encode_batches": 5,
+            "encode_seconds": 2.0,
+            "context_ready": 7,
+            "context_ready_ratio": 2.5,
+            "dropped_static_frames": 2,
+        }
+    )
+
+    assert summary["reset_events"] == 3.0
+    assert summary["frame_events"] == 20.0
+    assert summary["context_ready_ratio"] == pytest.approx(0.7)
+    assert summary["mean_drain_context_ready_ratio"] == pytest.approx(0.625)
+    assert summary["frames_per_drain"] == 5.0
+    assert summary["encode_seconds_per_frame"] == pytest.approx(0.1)
+
+
+def test_eval_lookahead_payload_embeds_low_level_context_contract_and_metrics():
+    trainer = object.__new__(SftTrainer)
+    trainer.config = SimpleNamespace(
+        MODEL=SimpleNamespace(
+            RAENWM=SimpleNamespace(
+                context_source=LOW_LEVEL_CONTEXT_SOURCE,
+                context_size=4,
+                low_level_encode_batch_size=64,
+            )
+        )
+    )
+    context_metrics = {"reset_events": 1.0, "frame_events": 6.0}
+
+    payload = trainer._build_eval_lookahead_diagnostic_payload(
+        checkpoint_path="ckpt.iter2.pth",
+        checkpoint_index=2,
+        split="val_unseen",
+        episodes=1,
+        elapsed_seconds=3.5,
+        lookahead_diagnostics={"oracle_q1_requested": 0.0},
+        low_level_context_diagnostics=context_metrics,
+    )
+
+    context = payload["low_level_context"]
+    assert context["format_version"] == LOW_LEVEL_CONTEXT_DIAGNOSTIC_FORMAT
+    assert context["metadata"]["context_contract"] == LOW_LEVEL_CONTEXT_CONTRACT
+    assert context["metadata"]["encode_batch_size"] == 64
+    assert context["metrics"] == context_metrics
 
 
 def test_chunked_encoding_matches_whole_batch_and_distributes_by_environment():

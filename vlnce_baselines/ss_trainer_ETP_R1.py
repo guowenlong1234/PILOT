@@ -50,10 +50,13 @@ from vlnce_baselines.nwm.rgb_fusion import (
     clone_wp_outputs_candidate_rgb,
 )
 from vlnce_baselines.nwm.low_level_context import (
+    LOW_LEVEL_CONTEXT_DIAGNOSTIC_FORMAT,
+    LOW_LEVEL_CONTEXT_DIAGNOSTIC_NAMES,
     LOW_LEVEL_CONTEXT_SOURCE,
     LowLevelContextSynchronizer,
     context_metadata_from_config,
     normalize_context_source,
+    summarize_low_level_context_diagnostics,
 )
 from vlnce_baselines.nwm.active_lookahead.base_freeze import (
     capture_base_tensor_manifest,
@@ -267,6 +270,7 @@ class RLTrainer(BaseVLNCETrainer):
         self._raenwm_context_source_logged = False
         self.raenwm_low_level_synchronizer = None
         self.last_raenwm_context_diagnostics = None
+        self._eval_low_level_context_diagnostic_totals = None
         self.e24_joint_head = None
         self.e24_joint_metadata = None
         self.dino_cwp_future_predictor = None
@@ -834,6 +838,12 @@ class RLTrainer(BaseVLNCETrainer):
             raise RuntimeError("low-level context synchronizer is not initialized")
         diagnostics = synchronizer.drain(self.envs)
         self.last_raenwm_context_diagnostics = diagnostics
+        eval_totals = getattr(
+            self, "_eval_low_level_context_diagnostic_totals", None
+        )
+        if eval_totals is not None:
+            for name in LOW_LEVEL_CONTEXT_DIAGNOSTIC_NAMES:
+                eval_totals[name] += float(diagnostics.get(name, 0.0))
         logs = getattr(self, "logs", None)
         if logs is not None:
             for name, value in diagnostics.items():
@@ -2368,6 +2378,54 @@ class RLTrainer(BaseVLNCETrainer):
         totals = dict(zip(PREDICTED_FUTURE_DIAGNOSTIC_NAMES, values.tolist()))
         return summarize_predicted_future_diagnostics(totals)
 
+    def _aggregate_eval_low_level_context_diagnostics(self):
+        totals = getattr(
+            self, "_eval_low_level_context_diagnostic_totals", None
+        )
+        if totals is None:
+            return None
+        values = torch.tensor(
+            [totals[name] for name in LOW_LEVEL_CONTEXT_DIAGNOSTIC_NAMES],
+            dtype=torch.float64,
+            device=self.device,
+        )
+        if self.world_size > 1:
+            distr.all_reduce(values, op=distr.ReduceOp.SUM)
+        return summarize_low_level_context_diagnostics(
+            dict(zip(LOW_LEVEL_CONTEXT_DIAGNOSTIC_NAMES, values.tolist()))
+        )
+
+    def _build_eval_lookahead_diagnostic_payload(
+        self,
+        *,
+        checkpoint_path,
+        checkpoint_index,
+        split,
+        episodes,
+        elapsed_seconds,
+        lookahead_diagnostics,
+        low_level_context_diagnostics,
+    ):
+        payload = {
+            "format_version": "etpr1-active-lookahead-diagnostics-v1",
+            "checkpoint_path": str(checkpoint_path),
+            "checkpoint_index": int(checkpoint_index),
+            "split": str(split),
+            "episodes": int(episodes),
+            "elapsed_seconds": float(elapsed_seconds),
+            "oracle_q1_calls": float(
+                lookahead_diagnostics.get("oracle_q1_requested", 0.0)
+            ),
+            "metrics": lookahead_diagnostics,
+        }
+        if low_level_context_diagnostics is not None:
+            payload["low_level_context"] = {
+                "format_version": LOW_LEVEL_CONTEXT_DIAGNOSTIC_FORMAT,
+                "metadata": self._raenwm_context_metadata(),
+                "metrics": low_level_context_diagnostics,
+            }
+        return payload
+
     def _backward_e24_joint_replay(self):
         if not getattr(self, "_e24_joint_training", False):
             return
@@ -2860,6 +2918,11 @@ class RLTrainer(BaseVLNCETrainer):
             eps_to_eval = min(self.config.EVAL.EPISODE_COUNT, sum(self.envs.number_of_episodes))
         self.stat_eps = {}
         self._e24_future_diagnostic_totals = defaultdict(float)
+        self._eval_low_level_context_diagnostic_totals = (
+            defaultdict(float)
+            if self._raenwm_low_level_context_enabled()
+            else None
+        )
         self.pbar = tqdm.tqdm(total=eps_to_eval) if self.config.use_pbar else None
 
         evaluation_started = time.perf_counter()
@@ -2892,6 +2955,9 @@ class RLTrainer(BaseVLNCETrainer):
         
         split = self.config.TASK_CONFIG.DATASET.SPLIT
         lookahead_diagnostics = self._aggregate_e24_future_diagnostics()
+        low_level_context_diagnostics = (
+            self._aggregate_eval_low_level_context_diagnostics()
+        )
         if self.config.EVAL.SAVE_RESULTS:
             fname = os.path.join(
                 self.config.RESULTS_DIR,
@@ -2914,18 +2980,17 @@ class RLTrainer(BaseVLNCETrainer):
                         f"lookahead_ckpt_{checkpoint_index}_{split}.json",
                     )
                     temporary_path = diagnostic_path + ".tmp"
-                    payload = {
-                        "format_version": "etpr1-active-lookahead-diagnostics-v1",
-                        "checkpoint_path": str(checkpoint_path),
-                        "checkpoint_index": int(checkpoint_index),
-                        "split": str(split),
-                        "episodes": int(total),
-                        "elapsed_seconds": float(evaluation_elapsed_seconds),
-                        "oracle_q1_calls": float(
-                            lookahead_diagnostics.get("oracle_q1_requested", 0.0)
+                    payload = self._build_eval_lookahead_diagnostic_payload(
+                        checkpoint_path=checkpoint_path,
+                        checkpoint_index=checkpoint_index,
+                        split=split,
+                        episodes=total,
+                        elapsed_seconds=evaluation_elapsed_seconds,
+                        lookahead_diagnostics=lookahead_diagnostics,
+                        low_level_context_diagnostics=(
+                            low_level_context_diagnostics
                         ),
-                        "metrics": lookahead_diagnostics,
-                    }
+                    )
                     with open(temporary_path, "w") as f:
                         json.dump(payload, f, indent=2, sort_keys=True)
                     os.replace(temporary_path, diagnostic_path)

@@ -20,6 +20,9 @@ LOW_LEVEL_SAMPLING_ACTION = "MOVE_FORWARD"
 LOW_LEVEL_TELEPORT_ANCHOR_POLICY = "clear_then_record_landing_rgb"
 LOW_LEVEL_RGB_SENSOR_UUID = "rgb"
 CONTEXT_METADATA_FORMAT = "r1_nwm_context_metadata_v1"
+LOW_LEVEL_CONTEXT_DIAGNOSTIC_FORMAT = (
+    "r1_low_level_context_diagnostics_v1"
+)
 LOW_LEVEL_CONTEXT_DIAGNOSTIC_NAMES = (
     "drain_count",
     "environment_count",
@@ -32,6 +35,56 @@ LOW_LEVEL_CONTEXT_DIAGNOSTIC_NAMES = (
     "context_ready_ratio",
     "dropped_static_frames",
 )
+
+
+def _diagnostic_ratio(numerator: float, denominator: float) -> float:
+    if float(denominator) <= 0.0:
+        return 0.0
+    return float(numerator) / float(denominator)
+
+
+def summarize_low_level_context_diagnostics(
+    totals: Mapping[str, Any],
+) -> Dict[str, float]:
+    """Turn cross-drain counter totals into evaluation-friendly metrics."""
+
+    values = {
+        name: float(totals.get(name, 0.0))
+        for name in LOW_LEVEL_CONTEXT_DIAGNOSTIC_NAMES
+    }
+    drains = values["drain_count"]
+    environments = values["environment_count"]
+    frames = values["encoded_frames"]
+    batches = values["encode_batches"]
+    ready = values["context_ready"]
+    return {
+        "drain_count": drains,
+        "environment_count": environments,
+        "mean_active_environments": _diagnostic_ratio(
+            environments, drains
+        ),
+        "reset_events": values["reset_events"],
+        "frame_events": values["frame_events"],
+        "encoded_frames": frames,
+        "encode_batches": batches,
+        "encode_seconds": values["encode_seconds"],
+        "context_ready": ready,
+        "context_ready_ratio": _diagnostic_ratio(ready, environments),
+        "mean_drain_context_ready_ratio": _diagnostic_ratio(
+            values["context_ready_ratio"], drains
+        ),
+        "dropped_static_frames": values["dropped_static_frames"],
+        "frames_per_drain": _diagnostic_ratio(frames, drains),
+        "frames_per_environment": _diagnostic_ratio(
+            frames, environments
+        ),
+        "encode_seconds_per_frame": _diagnostic_ratio(
+            values["encode_seconds"], frames
+        ),
+        "encode_seconds_per_batch": _diagnostic_ratio(
+            values["encode_seconds"], batches
+        ),
+    }
 
 
 def normalize_context_source(value: Any) -> str:
