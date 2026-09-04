@@ -2714,10 +2714,10 @@ class RLTrainer(BaseVLNCETrainer):
     def _attach_rgb_cls_residual_ddp_anchor(self, loss):
         """Keep the dynamic navigation CLS branch visible to DDP.
 
-        Some rollout batches do not route the navigation loss through the
-        trainable CLS residual MLP.  Referencing one scalar from each of its
-        parameters with a zero coefficient preserves the exact objective and
-        gradients while still letting DDP finish those reductions.
+        Referencing one scalar from each parameter with a zero coefficient
+        preserves the exact objective and real gradients while allowing a
+        precise post-backward contract check instead of a delayed DDP reducer
+        error.
         """
 
         if int(getattr(self, "world_size", 1)) <= 1:
@@ -2735,6 +2735,32 @@ class RLTrainer(BaseVLNCETrainer):
             term = parameter.reshape(-1)[0] * 0.0
             anchor = term if anchor is None else anchor + term
         return loss if anchor is None else loss + anchor
+
+    def _assert_rgb_cls_residual_navigation_gradient(self):
+        """Reject an optimizer step backed only by the zero-gradient anchor."""
+
+        policy_net = getattr(self.policy.net, "module", self.policy.net)
+        rgb_encoder = getattr(policy_net, "rgb_encoder", None)
+        residual_mlp = getattr(rgb_encoder, "cls_residual_mlp", None)
+        if residual_mlp is None:
+            return
+        parameters = [
+            parameter
+            for parameter in residual_mlp.parameters()
+            if parameter.requires_grad
+        ]
+        if not parameters:
+            return
+        # Start from the final bias: it is small to inspect and normally gets
+        # a real gradient even when the residual MLP is zero-initialized.
+        for parameter in reversed(parameters):
+            gradient = parameter.grad
+            if gradient is not None and torch.count_nonzero(gradient).item() > 0:
+                return
+        raise RuntimeError(
+            "navigation CLS residual MLP received no real gradient from the "
+            "base navigation loss; refusing an anchor-only optimizer step"
+        )
 
 
     def _train_interval(self, interval, ml_weight, sample_ratio):
@@ -2794,6 +2820,7 @@ class RLTrainer(BaseVLNCETrainer):
                     self.scaler.scale(
                         self.loss / accumulation_steps
                     ).backward()
+            self._assert_rgb_cls_residual_navigation_gradient()
             self._backward_e24_joint_replay()
             if joint_training:
                 self.scaler.unscale_(self.optimizer)

@@ -537,6 +537,33 @@ def test_sft_ddp_anchor_supplies_zero_cls_residual_gradients():
     for parameter in residual_mlp.parameters():
         assert parameter.grad is not None
         assert torch.count_nonzero(parameter.grad).item() == 0
+    with pytest.raises(RuntimeError, match="anchor-only optimizer step"):
+        trainer._assert_rgb_cls_residual_navigation_gradient()
+
+
+def test_sft_cls_residual_gradient_contract_accepts_real_navigation_gradient():
+    trainer = object.__new__(RLTrainer)
+    residual_mlp = torch.nn.Sequential(
+        torch.nn.Linear(3, 4),
+        torch.nn.GELU(),
+        torch.nn.Linear(4, 3),
+    )
+    trainer.world_size = 2
+    trainer.policy = _FakePolicy(
+        SimpleNamespace(
+            module=SimpleNamespace(
+                rgb_encoder=SimpleNamespace(
+                    cls_residual_mlp=residual_mlp,
+                )
+            )
+        )
+    )
+    navigation_features = residual_mlp(torch.ones(2, 3))
+    navigation_loss = navigation_features.square().mean()
+
+    trainer._attach_rgb_cls_residual_ddp_anchor(navigation_loss).backward()
+
+    trainer._assert_rgb_cls_residual_navigation_gradient()
 
 
 def test_sft_gradient_accumulation_only_syncs_final_microbatch(monkeypatch):

@@ -392,11 +392,18 @@ class RaeDinov2RgbEncoder(nn.Module):
         )
         return nav_cls, patch_latents
 
-    def forward_with_raw_cls_and_patch_latents(
+    def forward_raw_cls_and_patch_latents(
         self,
         observations: Mapping[str, torch.Tensor],
     ):
-        """Return frozen raw CLS/patch plus the trainable navigation CLS."""
+        """Return frozen raw CLS/patch without touching the navigation MLP.
+
+        Low-level world-model context collection runs under ``no_grad`` inside
+        the navigation rollout's outer autocast context.  Calling the
+        trainable residual MLP there can populate autocast's weight cache with
+        detached casts and disconnect the later navigation forward.  Keep the
+        raw context contract on an API that cannot execute that MLP.
+        """
 
         if not isinstance(observations, Mapping):
             raise TypeError("RAE/DINOv2 observations must be a mapping")
@@ -432,10 +439,21 @@ class RaeDinov2RgbEncoder(nn.Module):
             )
         if not torch.isfinite(raw_features).all():
             raise FloatingPointError("RAE/DINOv2 raw CLS contains NaN or infinity")
+        return raw_features, patch_latents.float()
+
+    def forward_with_raw_cls_and_patch_latents(
+        self,
+        observations: Mapping[str, torch.Tensor],
+    ):
+        """Return frozen raw CLS/patch plus the trainable navigation CLS."""
+
+        raw_features, patch_latents = self.forward_raw_cls_and_patch_latents(
+            observations
+        )
         nav_features = self._apply_cls_residual_mlp(raw_features)
         if not torch.isfinite(nav_features).all():
             raise FloatingPointError("RAE/DINOv2 CLS contains NaN or infinity")
-        return raw_features, nav_features, patch_latents.float()
+        return raw_features, nav_features, patch_latents
 
 
 # Keep the old import name available for external callers while using the

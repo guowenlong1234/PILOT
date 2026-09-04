@@ -457,7 +457,7 @@ class _FakeEncoder:
     def __init__(self):
         self.batch_sizes = []
 
-    def forward_with_raw_cls_and_patch_latents(self, observations):
+    def forward_raw_cls_and_patch_latents(self, observations):
         rgb = torch.as_tensor(observations["rgb"])
         self.batch_sizes.append(int(rgb.shape[0]))
         values = rgb[:, 0, 0, 0].float()
@@ -465,7 +465,7 @@ class _FakeEncoder:
         patch = values[:, None, None, None].expand(
             -1, 768, 16, 16
         ).contiguous()
-        return raw_cls, raw_cls, patch
+        return raw_cls, patch
 
 
 class _IdentityNormalizer:

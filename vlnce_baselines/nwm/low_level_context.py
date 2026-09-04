@@ -512,9 +512,10 @@ class LowLevelContextSynchronizer:
             LOW_LEVEL_CONTEXT_SOURCE
         ):
             raise ValueError("low-level context synchronizer requires low-level runtime")
-        if not hasattr(encoder, "forward_with_raw_cls_and_patch_latents"):
+        if not hasattr(encoder, "forward_raw_cls_and_patch_latents"):
             raise ValueError(
-                "low-level context requires a RAE/DINOv2 encoder with raw CLS and patch output"
+                "low-level context requires a RAE/DINOv2 encoder with a "
+                "raw-only CLS and patch output"
             )
 
     @staticmethod
@@ -555,8 +556,8 @@ class LowLevelContextSynchronizer:
         for start in range(0, len(frames), self.batch_size):
             rgb_batch = np.stack(frames[start : start + self.batch_size], axis=0)
             with torch.no_grad():
-                raw_cls, _navigation_cls, patch = (
-                    self.encoder.forward_with_raw_cls_and_patch_latents(
+                raw_cls, patch = (
+                    self.encoder.forward_raw_cls_and_patch_latents(
                         {"rgb": rgb_batch}
                     )
                 )

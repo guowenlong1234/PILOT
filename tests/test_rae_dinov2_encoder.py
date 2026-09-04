@@ -54,6 +54,7 @@ def encoder_factory(monkeypatch, tmp_path):
     created = []
 
     def make(**kwargs):
+        device = kwargs.pop("device", torch.device("cpu"))
         backbone = FakeBackbone()
         model_calls = []
         processor_calls = []
@@ -81,7 +82,7 @@ def encoder_factory(monkeypatch, tmp_path):
         )
         encoder = RaeDinov2RgbEncoder(
             model_dir=tmp_path / "model",
-            device=torch.device("cpu"),
+            device=device,
             **kwargs,
         )
         encoder._test_model_calls = model_calls
@@ -165,6 +166,57 @@ def test_encoder_exposes_raw_cls_nav_cls_and_raw_patch_separately(
     assert raw_patch.shape == (2, 768, 16, 16)
     assert raw_cls.requires_grad is False
     assert nav_cls.requires_grad is True
+
+
+def test_raw_cls_and_patch_api_never_runs_navigation_residual_mlp(
+    encoder_factory,
+):
+    encoder = encoder_factory(cls_residual_mlp_enabled=True)
+    calls = []
+    handle = encoder.cls_residual_mlp.register_forward_hook(
+        lambda *_args: calls.append(True)
+    )
+
+    raw_cls, raw_patch = encoder.forward_raw_cls_and_patch_latents(
+        {"rgb": torch.zeros(2, 224, 224, 3, dtype=torch.uint8)}
+    )
+    handle.remove()
+
+    assert calls == []
+    torch.testing.assert_close(raw_cls, torch.full((2, 768), 2.0))
+    assert raw_patch.shape == (2, 768, 16, 16)
+    assert raw_cls.requires_grad is False
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_raw_context_does_not_poison_navigation_autocast_weight_cache(
+    encoder_factory,
+):
+    encoder = encoder_factory(
+        device=torch.device("cuda"),
+        cls_residual_mlp_enabled=True,
+    )
+    observations = {
+        "rgb": torch.zeros(
+            2, 224, 224, 3, dtype=torch.uint8, device="cuda"
+        )
+    }
+
+    with torch.cuda.amp.autocast():
+        with torch.no_grad():
+            encoder.forward_raw_cls_and_patch_latents(observations)
+        _raw_cls, nav_cls, _raw_patch = (
+            encoder.forward_with_raw_cls_and_patch_latents(observations)
+        )
+        loss = nav_cls.square().mean()
+    loss.backward()
+
+    assert nav_cls.requires_grad is True
+    final_layer = encoder.cls_residual_mlp.layers[-1]
+    assert final_layer.weight.grad is not None
+    assert torch.count_nonzero(final_layer.weight.grad) > 0
+    assert final_layer.bias.grad is not None
+    assert torch.count_nonzero(final_layer.bias.grad) > 0
 
 
 def test_prepare_rgb_matches_etpnav_layout_range_and_resize_rules():
