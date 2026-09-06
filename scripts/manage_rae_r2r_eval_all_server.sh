@@ -19,7 +19,9 @@ RUNTIME_ROOT=${ETPR1_SERVER_RUNTIME_ROOT:-${REPO_ROOT}/.runtime/server_sft}
 PRETRAIN_PATH=${ETPR1_R2R_EVAL_PRETRAIN_PATH:-pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768_raw_cls_20260810/best/model_best_step_220000.pt}
 NUM_WORKERS=${ETPR1_R2R_EVAL_WORKERS:-2}
 NUM_ENVIRONMENTS=${ETPR1_R2R_EVAL_NUM_ENVIRONMENTS:-8}
+EPISODE_COUNT=${ETPR1_R2R_EVAL_EPISODE_COUNT:--1}
 CHECKPOINT_ORDER=${ETPR1_R2R_EVAL_CHECKPOINT_ORDER:-$(checkpoint_order_from_config "$CONFIG_FILE")}
+ONLY_ITERS=${ETPR1_R2R_EVAL_ONLY_ITERS:-}
 
 usage() {
     echo "Usage: $0 <start|status|worker> [worker_index]" >&2
@@ -39,6 +41,26 @@ worker_is_running() {
     [[ "$stat" != Z* ]]
 }
 
+iteration_is_requested() {
+    local iteration=$1 normalized
+    [ -n "$ONLY_ITERS" ] || return 0
+    normalized=" ${ONLY_ITERS//,/ } "
+    [[ "$normalized" == *" $iteration "* ]]
+}
+
+requested_checkpoint_count() {
+    local count=0 ckpt base iteration
+    while IFS= read -r ckpt; do
+        base=${ckpt##*/}
+        iteration=${base#ckpt.iter}
+        iteration=${iteration%.pth}
+        if iteration_is_requested "$iteration"; then
+            count=$((count + 1))
+        fi
+    done < <(list_ordered_checkpoints "$CKPT_DIR" "$CHECKPOINT_ORDER")
+    printf '%s\n' "$count"
+}
+
 prepare_runtime() {
     local path
     for path in \
@@ -46,6 +68,7 @@ prepare_runtime() {
         "$RUNTIME_ROOT/habitat-lab/habitat/__init__.py" \
         "$RUNTIME_ROOT/habitat-baselines/habitat_baselines/common/baseline_registry.py" \
         "$RUNTIME_ROOT/python/dtw/__init__.py" \
+        "$CONFIG_FILE" \
         "$PRETRAIN_PATH"; do
         if [ ! -e "$path" ]; then
             echo "Missing evaluation dependency: $path" >&2
@@ -87,18 +110,23 @@ run_worker() {
 
     echo "worker_started_at=$(date --iso-8601=seconds) physical_gpu=$worker_index checkpoint_order=$CHECKPOINT_ORDER"
     echo "source_commit=$(git rev-parse HEAD)"
+    echo "config_file=$CONFIG_FILE"
+    echo "only_iters=${ONLY_ITERS:-all}"
     "$PYTHON_BIN" -c \
         'import sys, torch, transformers, habitat, habitat_sim; print(f"versions=python:{sys.version.split()[0]} torch:{torch.__version__} transformers:{transformers.__version__} cuda:{torch.version.cuda} habitat:{habitat.__version__} habitat_sim:{habitat_sim.__version__}")'
 
     while IFS= read -r ckpt; do
+        base=${ckpt##*/}
+        iteration=${base#ckpt.iter}
+        iteration=${iteration%.pth}
+        if ! iteration_is_requested "$iteration"; then
+            continue
+        fi
         if [ $((record % NUM_WORKERS)) -ne "$worker_index" ]; then
             record=$((record + 1))
             continue
         fi
         record=$((record + 1))
-        base=${ckpt##*/}
-        iteration=${base#ckpt.iter}
-        iteration=${iteration%.pth}
         result=${RESULT_DIR}/stats_ckpt_${iteration}_val_unseen.json
 
         if [ -s "$result" ]; then
@@ -111,14 +139,14 @@ run_worker() {
         "$PYTHON_BIN" run.py \
             --exp_name "$EXP_NAME" \
             --run-type eval \
-            --exp-config run_r2r/iter_train_rae_dino.yaml \
+            --exp-config "$CONFIG_FILE" \
             SIMULATOR_GPU_IDS "[0]" \
             TORCH_GPU_IDS "[0]" \
             TORCH_GPU_ID 0 \
             GPU_NUMBERS 1 \
             NUM_ENVIRONMENTS "$NUM_ENVIRONMENTS" \
             EVAL.CKPT_PATH_DIR "$ckpt" \
-            EVAL.EPISODE_COUNT -1 \
+            EVAL.EPISODE_COUNT "$EPISODE_COUNT" \
             EVAL.SAVE_RESULTS True \
             TASK_CONFIG.SIMULATOR.HABITAT_SIM_V0.ALLOW_SLIDING True \
             CHECKPOINT_FOLDER "$EVAL_ROOT/checkpoints/" \
@@ -152,7 +180,7 @@ run_worker() {
 start_workers() {
     local checkpoint_count worker_index pid_file
     prepare_runtime
-    checkpoint_count=$(find "$CKPT_DIR" -maxdepth 1 -type f -name 'ckpt.iter*.pth' | wc -l)
+    checkpoint_count=$(requested_checkpoint_count)
     if [ "$checkpoint_count" -eq 0 ]; then
         echo "No checkpoints found in $CKPT_DIR" >&2
         exit 1
@@ -187,6 +215,7 @@ show_status() {
     done
     echo "results=$(find "$RESULT_DIR" -maxdepth 1 -type f -name 'stats_ckpt_*_val_unseen.json' 2>/dev/null | wc -l)/$(find "$CKPT_DIR" -maxdepth 1 -type f -name 'ckpt.iter*.pth' 2>/dev/null | wc -l)"
     echo "checkpoint_order=$CHECKPOINT_ORDER config=$CONFIG_FILE"
+    echo "only_iters=${ONLY_ITERS:-all} episode_count=$EPISODE_COUNT"
 }
 
 case "${1:-}" in
