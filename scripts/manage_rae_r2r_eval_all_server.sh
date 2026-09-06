@@ -61,6 +61,19 @@ requested_checkpoint_count() {
     printf '%s\n' "$count"
 }
 
+requested_result_count() {
+    local count=0 result base iteration
+    while IFS= read -r result; do
+        base=${result##*/}
+        iteration=${base#stats_ckpt_}
+        iteration=${iteration%_val_unseen.json}
+        if iteration_is_requested "$iteration"; then
+            count=$((count + 1))
+        fi
+    done < <(find "$RESULT_DIR" -maxdepth 1 -type f -name 'stats_ckpt_*_val_unseen.json' 2>/dev/null | sort -V)
+    printf '%s\n' "$count"
+}
+
 prepare_runtime() {
     local path
     for path in \
@@ -213,7 +226,7 @@ show_status() {
         fi
         echo "worker=$worker_index state=$state pid=$pid log=${EVAL_ROOT}/eval_gpu${worker_index}.log"
     done
-    echo "results=$(find "$RESULT_DIR" -maxdepth 1 -type f -name 'stats_ckpt_*_val_unseen.json' 2>/dev/null | wc -l)/$(find "$CKPT_DIR" -maxdepth 1 -type f -name 'ckpt.iter*.pth' 2>/dev/null | wc -l)"
+    echo "results=$(requested_result_count)/$(requested_checkpoint_count)"
     echo "checkpoint_order=$CHECKPOINT_ORDER config=$CONFIG_FILE"
     echo "only_iters=${ONLY_ITERS:-all} episode_count=$EPISODE_COUNT"
 }
