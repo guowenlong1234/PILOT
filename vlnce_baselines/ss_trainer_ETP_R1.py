@@ -860,6 +860,58 @@ class RLTrainer(BaseVLNCETrainer):
             getattr(self.config.MODEL.RAENWM, "rgb_fusion_trainable", False)
         )
 
+    def _navigation_backbone_frozen(self):
+        return bool(getattr(getattr(self.config, "IL", None), "freeze_navigation_backbone", False))
+
+    def _rgb_fusion_navigation_contract(self):
+        return {
+            "freeze_navigation_backbone": self._navigation_backbone_frozen(),
+            "condition_source_pose": str(getattr(
+                getattr(self.config.MODEL, "RAENWM", None), "condition_source_pose", "context_last"
+            )),
+            "align_navigation_cls": bool(getattr(
+                getattr(self.config.MODEL, "RAENWM", None), "rgb_fusion_align_navigation_cls", False
+            )),
+        }
+
+    def _configure_navigation_backbone_training(self):
+        contract = self._rgb_fusion_navigation_contract()
+        if contract["align_navigation_cls"] and not contract["freeze_navigation_backbone"]:
+            raise ValueError("RGB prediction alignment requires a frozen navigation backbone")
+        if not contract["freeze_navigation_backbone"]:
+            return
+        if not self._raenwm_rgb_fusion_enabled() or self._active_lookahead_enabled():
+            raise ValueError("Frozen navigation training requires RGB-only fusion with E24 disabled")
+        # Do not use no_grad here: navigation must propagate input gradients
+        # all the way back to the external RGB fusion adapter.
+        self.policy.requires_grad_(False)
+        self.policy.eval()
+        logger.info("Navigation backbone frozen; only the RGB fusion adapter is optimized")
+
+    def _validate_rgb_fusion_navigation_contract(self, checkpoint):
+        expected = self._rgb_fusion_navigation_contract()
+        saved = checkpoint.get("rgb_fusion_navigation_contract", {
+            "freeze_navigation_backbone": False,
+            "align_navigation_cls": False,
+            "condition_source_pose": "query_current",
+        })
+        # A clean baseline has no adapter and is the intentional B/C start.
+        if checkpoint.get("raenwm_rgb_fusion_adapter_state_dict") is not None:
+            if saved.get("align_navigation_cls") != expected["align_navigation_cls"]:
+                raise ValueError("RGB fusion checkpoint prediction alignment mismatch")
+        if bool(self.config.IL.is_requeue) and saved != expected:
+            raise ValueError("RGB fusion resume navigation training contract mismatch")
+
+    def _rgb_prediction_navigation_transform(self):
+        if not bool(getattr(self.config.MODEL.RAENWM, "rgb_fusion_align_navigation_cls", False)):
+            return None
+        policy_net = getattr(self.policy.net, "module", self.policy.net)
+        encoder = policy_net.rgb_encoder
+        residual = getattr(encoder, "cls_residual_mlp", None)
+        if residual is None or any(p.requires_grad for p in residual.parameters()):
+            raise ValueError("Prediction alignment requires the existing frozen navigation CLS residual MLP")
+        return encoder._apply_cls_residual_mlp
+
     def _initialize_raenwm_rgb_fusion_adapter(self):
         if not self._raenwm_rgb_fusion_enabled():
             self.raenwm_rgb_fusion_adapter = None
@@ -1163,6 +1215,7 @@ class RLTrainer(BaseVLNCETrainer):
                 candidate_previews,
                 prediction,
                 self.raenwm_rgb_fusion_adapter,
+                prediction_transform=self._rgb_prediction_navigation_transform(),
             )
         )
         self._accumulate_rgb_fusion_diagnostics(
@@ -1317,6 +1370,7 @@ class RLTrainer(BaseVLNCETrainer):
             "rgb_encoder": rgb_encoder_meta,
             "config": self.config,
             "iteration": iteration,
+            "rgb_fusion_navigation_contract": self._rgb_fusion_navigation_contract(),
         }
         if self._raenwm_enabled():
             checkpoint["raenwm_context_metadata"] = (
@@ -1686,6 +1740,7 @@ class RLTrainer(BaseVLNCETrainer):
         self.policy.to(self.device)
         self.waypoint_predictor.to(self.device)
         self._initialize_raenwm_rgb_fusion_adapter()
+        self._configure_navigation_backbone_training()
         if (
             self._raenwm_rgb_fusion_enabled()
             and not load_from_ckpt
@@ -1697,7 +1752,7 @@ class RLTrainer(BaseVLNCETrainer):
             )
         self.num_recurrent_layers = self.policy.net.num_recurrent_layers
 
-        if self.config.GPU_NUMBERS > 1:
+        if self.config.GPU_NUMBERS > 1 and not self._navigation_backbone_frozen():
             print('Using', self.config.GPU_NUMBERS,'GPU!')
             # find_unused_parameters=False fix ddp bug
             device_id = self.device.index
@@ -1718,6 +1773,7 @@ class RLTrainer(BaseVLNCETrainer):
             else:
                 ckpt_path = config.IL.ckpt_to_load
             ckpt_dict = self.load_checkpoint(ckpt_path, map_location="cpu")
+            self._validate_rgb_fusion_navigation_contract(ckpt_dict)
             if self._active_lookahead_enabled():
                 if ckpt_dict.get("e24_joint_state_dict") is None:
                     actual_base_sha = sha256_file(ckpt_path)
@@ -1757,6 +1813,10 @@ class RLTrainer(BaseVLNCETrainer):
             self._initialize_e24_joint_head(ckpt_dict)
         
         param_optimizer = list(self.policy.named_parameters())
+        if self._navigation_backbone_frozen():
+            # Keep historical optimizer layout for legacy resumptions; the
+            # explicit frozen mode never includes frozen policy parameters.
+            param_optimizer = [(name, p) for name, p in param_optimizer if p.requires_grad]
         if self._raenwm_rgb_fusion_trainable():
             param_optimizer.extend(
                 (f"raenwm_rgb_fusion_adapter.{name}", parameter)
@@ -1869,7 +1929,15 @@ class RLTrainer(BaseVLNCETrainer):
             else:
                 start_iter = 0
 
-            if 'module' in list(ckpt_dict['state_dict'].keys())[0] and self.config.GPU_NUMBERS == 1:
+            if self._navigation_backbone_frozen():
+                # Frozen policies are deliberately not wrapped in DDP, even
+                # with multiple ranks; only external adapter gradients sync.
+                unwrapped_state = OrderedDict(
+                    (key.replace("net.module.", "net.", 1) if key.startswith("net.module.") else key, value)
+                    for key, value in ckpt_dict["state_dict"].items()
+                )
+                incompatible_keys = self.policy.load_state_dict(unwrapped_state, strict=False)
+            elif 'module' in list(ckpt_dict['state_dict'].keys())[0] and self.config.GPU_NUMBERS == 1:
                 self.policy.net = torch.nn.DataParallel(self.policy.net.to(self.device),
                     device_ids=[self.device], output_device=self.device)
                 incompatible_keys = self.policy.load_state_dict(ckpt_dict["state_dict"], strict=False)
@@ -2764,16 +2832,16 @@ class RLTrainer(BaseVLNCETrainer):
 
 
     def _train_interval(self, interval, ml_weight, sample_ratio):
-        self.policy.train()
+        if self._navigation_backbone_frozen():
+            self.policy.eval()
+        else:
+            self.policy.train()
         joint_training = getattr(self, "_e24_joint_training", False)
         if joint_training:
             self.e24_joint_head.train()
-        if self.world_size > 1:
-            self.policy.net.module.rgb_encoder.eval()
-            self.policy.net.module.depth_encoder.eval()
-        else:
-            self.policy.net.rgb_encoder.eval()
-            self.policy.net.depth_encoder.eval()
+        policy_net = getattr(self.policy.net, "module", self.policy.net)
+        policy_net.rgb_encoder.eval()
+        policy_net.depth_encoder.eval()
         self.waypoint_predictor.eval()
 
         if self.local_rank < 1:
@@ -2807,7 +2875,7 @@ class RLTrainer(BaseVLNCETrainer):
                 )
                 sync_context = (
                     nullcontext()
-                    if should_sync
+                    if should_sync or self._navigation_backbone_frozen()
                     else self.policy.net.no_sync()
                 )
                 with sync_context:
@@ -2817,6 +2885,13 @@ class RLTrainer(BaseVLNCETrainer):
                     self.loss = self._attach_rgb_cls_residual_ddp_anchor(
                         self.loss
                     )
+                    if self._navigation_backbone_frozen():
+                        # A rank can see no valid WM query in a rollout. Keep
+                        # backward valid; manual all-reduce supplies peers'
+                        # adapter gradients without changing the objective.
+                        for parameter in self.raenwm_rgb_fusion_adapter.parameters():
+                            if parameter.requires_grad:
+                                self.loss = self.loss + parameter.reshape(-1)[0] * 0.0
                     self.scaler.scale(
                         self.loss / accumulation_steps
                     ).backward()
@@ -2890,6 +2965,11 @@ class RLTrainer(BaseVLNCETrainer):
         writer: TensorboardWriter,
         checkpoint_index: int = 0,
     ):
+        source_adapter = getattr(getattr(self, "raenwm_runtime", None), "adapter", None)
+        source_totals = getattr(source_adapter, "source_pose_totals", None)
+        if source_totals is not None:
+            for key in source_totals:
+                source_totals[key] = 0
         if self.local_rank < 1:
             logger.info(f"checkpoint_path: {checkpoint_path}")
         self.config.defrost()
@@ -3014,6 +3094,19 @@ class RLTrainer(BaseVLNCETrainer):
             self._aggregate_eval_low_level_context_diagnostics()
         )
         if self.config.EVAL.SAVE_RESULTS:
+            source_adapter = getattr(getattr(self, "raenwm_runtime", None), "adapter", None)
+            source_totals = getattr(source_adapter, "source_pose_totals", None)
+            if source_totals is not None:
+                source_path = os.path.join(
+                    self.config.RESULTS_DIR,
+                    f"source_pose_ckpt_{checkpoint_index}_{split}_r{self.local_rank}_w{self.world_size}.json",
+                )
+                with open(source_path, "w") as handle:
+                    json.dump({
+                        "checkpoint": checkpoint_path,
+                        "condition_source_pose": str(getattr(self.config.MODEL.RAENWM, "condition_source_pose", "context_last")),
+                        "totals": source_totals,
+                    }, handle, indent=2, sort_keys=True)
             fname = os.path.join(
                 self.config.RESULTS_DIR,
                 f"stats_ep_ckpt_{checkpoint_index}_{split}_r{self.local_rank}_w{self.world_size}.json",

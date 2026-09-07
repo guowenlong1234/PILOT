@@ -96,6 +96,7 @@ _C.IL.ckpt_to_load = "data/checkpoints/ckpt.0.pth"
 # if True, loads the optimizer state, epoch, and step_id from the ckpt dict.
 _C.IL.is_requeue = False
 _C.IL.gradient_accumulation_steps = 1
+_C.IL.freeze_navigation_backbone = False
 _C.IL.use_fused_adamw = False
 _C.IL.cudnn_benchmark = False
 _C.IL.log_cuda_memory = False
@@ -228,6 +229,7 @@ _C.MODEL.RAENWM.stat_sha256 = (
 _C.MODEL.RAENWM.context_size = 4
 _C.MODEL.RAENWM.max_buffer_size = 64
 _C.MODEL.RAENWM.context_source = "high_level_nav_latent"
+_C.MODEL.RAENWM.condition_source_pose = "context_last"
 _C.MODEL.RAENWM.low_level_encode_batch_size = 64
 _C.MODEL.RAENWM.metric_waypoint_spacing = 0.24975892673356762
 _C.MODEL.RAENWM.pos_eps = 1.0e-3
@@ -243,6 +245,7 @@ _C.MODEL.RAENWM.rgb_fusion_alpha = 1.0
 _C.MODEL.RAENWM.rgb_fusion_zero_init = True
 _C.MODEL.RAENWM.rgb_fusion_gate_bias_init = -8.0
 _C.MODEL.RAENWM.rgb_fusion_trainable = False
+_C.MODEL.RAENWM.rgb_fusion_align_navigation_cls = False
 
 # Predicted Top-5 q1 lookahead with a jointly trained E24 residual scorer.
 # Every switch is off by default so legacy R1 behavior is unchanged.

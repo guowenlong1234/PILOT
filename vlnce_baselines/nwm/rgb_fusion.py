@@ -158,7 +158,8 @@ def _prediction_lookup(prediction):
 
 
 def apply_rgb_fusion_to_current_candidates(
-    wp_outputs, candidate_previews, prediction, fusion_adapter
+    wp_outputs, candidate_previews, prediction, fusion_adapter,
+    prediction_transform=None,
 ):
     cand_rgbs = wp_outputs["cand_rgb"]
     if len(candidate_previews) != len(cand_rgbs):
@@ -202,6 +203,10 @@ def apply_rgb_fusion_to_current_candidates(
             wm_rgb, signal, distance_m, native_cls = lookup[key]
             raw_rgb = cand_rgb[cand_index : cand_index + 1]
             wm_rgb = _as_tensor_like(wm_rgb, raw_rgb).reshape_as(raw_rgb)
+            if prediction_transform is not None:
+                if not native_cls:
+                    raise ValueError("Navigation CLS alignment requires raw native CLS predictions")
+                wm_rgb = prediction_transform(wm_rgb)
             if native_cls:
                 signal = (
                     F.cosine_similarity(raw_rgb, wm_rgb, dim=-1) + 1.0
