@@ -29,6 +29,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = "run_r2r/iter_train_rae_dino_native_cls_rgb_fusion.yaml"
 BASE = "pretrained/active_lookahead/base_iter14200.pth"
+BASE_EVAL = "pretrained/active_lookahead/ckpt.iter14200.pth"
 BASE_SHA = "1694b175d913404bfef8a53519d6f405db5de7f8b051e8343700125e43f05c61"
 GRAD = ("data/logs/raenwm_rgb_fusion/native_cls_sft_lowlevel_bs16_gradfix_ea860aa_20260904/"
         "checkpoints/etpr1_native_cls_rgb_fusion_sft_lowlevel_bs16_gradfix_ea860aa/ckpt.iter5200.pth")
@@ -146,7 +147,7 @@ def execute(args, name, overrides, checkpoint, mode, expected_iteration=None):
         print(f"waiting_at={now()} checkpoint={checkpoint}", flush=True)
         time.sleep(30)
     digest = sha(checkpoint)
-    if str(checkpoint).endswith(BASE) and digest != BASE_SHA:
+    if (str(checkpoint).endswith(BASE) or str(checkpoint).endswith(BASE_EVAL)) and digest != BASE_SHA:
         raise RuntimeError("Base checkpoint SHA256 mismatch")
     resume_source = None
     if mode == "dagger" and args.resume:
@@ -269,7 +270,12 @@ def evaluate(args):
                 train_name = f"rgbopt_{case}_alpha1_{'frozen' if frozen else 'full'}_align{int(aligned)}_context_last"
                 checkpoint = f"{args.output}/train/{train_name}/checkpoints/{train_name}/ckpt.iter{iteration}.pth"
             else:
-                checkpoint = BASE if case == "base" else GRAD
+                checkpoint = BASE_EVAL if case == "base" else GRAD
+                if case == "base" and not args.dry_run:
+                    alias = ROOT / BASE_EVAL
+                    if not alias.exists() and not alias.is_symlink():
+                        alias.parent.mkdir(parents=True, exist_ok=True)
+                        alias.symlink_to("base_iter14200.pth")
             checkpoint = args.checkpoint or checkpoint
             opts = common(args.gpus, args.environments or 8)
             opts.update({"EVAL.CKPT_PATH_DIR": str(ROOT / checkpoint), "EVAL.EPISODE_COUNT": args.episodes,
