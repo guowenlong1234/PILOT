@@ -2,6 +2,9 @@
 # Use the already established project runtime without changing either conda env.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+# Each Habitat worker otherwise imports numerical libraries with a large
+# thread pool; two single-GPU jobs can create thousands of idle CPU threads.
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 export GLOG_minloglevel=2 MAGNUM_LOG=quiet HABITAT_SIM_LOG=quiet
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8
 export MPLCONFIGDIR=/tmp/matplotlib-etpr1-rgb-optimization
