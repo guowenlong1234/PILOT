@@ -31,11 +31,11 @@ NAMES = {
     "C": "rgbopt_C_alpha1_frozen_align1_context_last",
 }
 REMOTE_WRITE = r'''
-import getpass, hashlib, json, os, pathlib, socket, sys, tempfile
+import hashlib, json, os, pathlib, socket, sys, tempfile
 root = pathlib.Path('/home/a6000/gwl/ETP-R1')
 destination = pathlib.Path(sys.argv[1])
-if getpass.getuser() != 'a6000' or not root.is_dir():
-    raise RuntimeError('Unexpected evaluation account/project')
+if os.getuid() != 1000 or not root.is_dir():
+    raise RuntimeError('Unexpected evaluation container uid/project')
 destination.resolve().relative_to(root.resolve())
 payload = sys.stdin.buffer.read(2 * 1024 * 1024 + 1)
 if len(payload) > 2 * 1024 * 1024:
@@ -52,7 +52,7 @@ try:
 finally:
     if os.path.exists(temporary):
         os.unlink(temporary)
-print(json.dumps(dict(hostname=socket.gethostname(), user=getpass.getuser(),
+print(json.dumps(dict(hostname=socket.gethostname(), uid=os.getuid(),
                      path=str(destination), sha256=hashlib.sha256(payload).hexdigest())))
 '''
 
@@ -88,7 +88,10 @@ def publish(relative_root, name, payload, deadline):
     destination = EVAL_ROOT / relative_root / "audit/train_completion" / name
     command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
                "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2",
-               "a6000@10.10.10.2", shlex.join(["python3", "-c", REMOTE_WRITE, str(destination)])]
+               "a6000@10.10.10.2", shlex.join([
+                   "docker", "exec", "-i", "-w", str(EVAL_ROOT), "gwl-etpr1-rae",
+                   "/home/a6000/gwl/miniconda3/envs/etpr1_rae/bin/python",
+                   "-c", REMOTE_WRITE, str(destination)])]
     result = subprocess.run(command, input=data, capture_output=True,
                             timeout=time_left(deadline, 60), cwd=ROOT)
     if result.returncode:
