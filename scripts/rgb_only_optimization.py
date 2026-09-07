@@ -246,6 +246,7 @@ def train(args):
                  "IL.load_from_ckpt": True, "IL.is_requeue": args.resume,
                  "IL.ckpt_to_load": BASE, "IL.freeze_navigation_backbone": branch != "A",
                  "MODEL.RAENWM.enabled": branch != "A", "MODEL.RAENWM.rgb_fusion_enabled": branch != "A",
+                 "MODEL.RAENWM.context_source": "high_level_nav_latent" if branch == "A" else "low_level_move_rgb_anchor",
                  "MODEL.RAENWM.rgb_fusion_trainable": branch != "A",
                  "MODEL.RAENWM.rgb_fusion_align_navigation_cls": branch == "C",
                  "MODEL.RAENWM.rgb_fusion_alpha": 1.0, "ONLY_LAST_SAVEALL": True})
@@ -281,6 +282,7 @@ def evaluate(args):
             opts.update({"EVAL.CKPT_PATH_DIR": str(ROOT / checkpoint), "EVAL.EPISODE_COUNT": args.episodes,
                          "EVAL.SAVE_RESULTS": True, "EVAL.USE_CKPT_CONFIG": False, "EVAL.fast_eval": False,
                          "IL.freeze_navigation_backbone": frozen, "MODEL.RAENWM.enabled": enabled,
+                         "MODEL.RAENWM.context_source": "low_level_move_rgb_anchor" if enabled else "high_level_nav_latent",
                          "MODEL.RAENWM.rgb_fusion_enabled": enabled,
                          "MODEL.RAENWM.rgb_fusion_alpha": alpha,
                          "MODEL.RAENWM.rgb_fusion_align_navigation_cls": aligned,
