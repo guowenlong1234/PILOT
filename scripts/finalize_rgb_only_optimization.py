@@ -355,6 +355,24 @@ def render(report):
     return "\n".join(lines)
 
 
+def render_collection(report):
+    lines = [
+        "# RGB-only 自动执行结果汇总", "",
+        "三组训练、12次完整评测和4份冻结审计已全部通过验收。",
+        "每份评测均覆盖相同的1839条任务，E24全部关闭。具体原因分析与模型选择等待用户后续发起。", "",
+        "| 配置 | SR (%) | SPL (%) | 平均路径 (m) |",
+        "|---|---:|---:|---:|",
+    ]
+    for row in report["results"]:
+        metrics = row["metrics"]
+        lines.append(f"| {row['label']} | {100*metrics['success']:.4f} | "
+                     f"{100*metrics['spl']:.4f} | {metrics['path_length']:.4f} |")
+    lines += ["", "完整指标、逐路线配对、源位姿统计、配置、检查点路径及校验值见同目录final_summary.json。",
+              "此文件只记录执行结果，不提供原因判断、模型推荐或稳定提升结论。", "",
+              f"完成时间：{report['finished_at']}。", ""]
+    return "\n".join(lines)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
@@ -363,6 +381,8 @@ def main():
     parser.add_argument("--dataset", type=Path, default=DATASET)
     parser.add_argument("--historical-baseline", help="Optional glob of historical baseline per-episode JSON")
     parser.add_argument("--wait", action="store_true")
+    parser.add_argument("--collect-only", action="store_true",
+                        help="Validate and tabulate results; defer interpretation and model selection")
     args = parser.parse_args()
     args.root = args.root.resolve()
     args.train_manifest_dir = (args.train_manifest_dir or args.root / "audit/train_completion").resolve()
@@ -383,9 +403,14 @@ def main():
                 return 3
             time.sleep(30)
         report = audit(args, records)
-        write_text(report_path, render(report))
+        if args.collect_only:
+            for key in ("recommended", "qualifying_rgb_labels", "selection_rule",
+                        "goal_met_on_this_validation_set"):
+                report.pop(key, None)
+            report["analysis_status"] = "deferred_until_user_request"
+        write_text(report_path, render_collection(report) if args.collect_only else render(report))
         write_json(summary_path, report)
-        print(json.dumps(dict(status="completed", goal_met=report["goal_met_on_this_validation_set"],
+        print(json.dumps(dict(status="completed", goal_met=report.get("goal_met_on_this_validation_set"),
                               report=str(report_path), summary=str(summary_path)), ensure_ascii=False), flush=True)
         return 0
     except Exception as exc:

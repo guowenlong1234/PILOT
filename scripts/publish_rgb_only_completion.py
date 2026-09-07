@@ -115,7 +115,10 @@ def queue_identity(pid_file):
         command = (proc / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
     except FileNotFoundError:
         raise RuntimeError("Training is incomplete but queue PID disappeared: " + raw)
-    if fields[0] in ("Z", "X") or "rgb_only_optimization.py" not in command or "train" not in command:
+    recognized = ("rgb_only_optimization.py" in command and "train" in command) or (
+        "manage_rgb_only_pipeline.py" in command and "worker" in command and pid_file.stem in command
+    )
+    if fields[0] in ("Z", "X") or not recognized:
         raise RuntimeError("Training queue PID is dead or no longer a recognized trainer: " + raw)
     return {"pid": int(raw), "start_ticks": fields[19], "command": command}
 
