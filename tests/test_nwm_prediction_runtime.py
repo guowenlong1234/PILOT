@@ -229,7 +229,9 @@ def test_context_adapter_skips_until_four_frames_and_tracks_query_ids():
     assert not batch.is_empty
     assert batch.context_latent.shape == (1, 4, 768, 16, 16)
     assert batch.records[0].query_id == "0_0"
-    assert batch.records[0].horizon == pytest.approx(1.0 / 0.24975892673356762)
+    # The final context is at z=-3, two metres from the z=-1 target. The
+    # request's stale z=0 position must not define the observation source.
+    assert batch.records[0].horizon == pytest.approx(2.0 / 0.24975892673356762)
     assert batch.records[0].condition.dtheta == pytest.approx(0.0)
     assert batch.records[0].condition.rel_t == pytest.approx(
         batch.records[0].horizon / 128.0

@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+import json
+import logging
 from typing import Mapping, Optional, Sequence
 
 import numpy as np
@@ -331,6 +333,7 @@ class NwmPredictionRuntime:
         self.generator.manual_seed(int(config.noise_seed))
         self.last_batch = None
         self.last_prediction: Optional[NwmPrediction] = None
+        self._source_pose_prediction_calls = 0
 
     def reset(self, num_envs: int) -> None:
         self.adapter.reset(num_envs)
@@ -476,6 +479,11 @@ class NwmPredictionRuntime:
             for query in queries
         ]
         self.last_batch = self.adapter.build_raenwm_batch(requests, device=self.device)
+        self._source_pose_prediction_calls = getattr(self, "_source_pose_prediction_calls", 0) + 1
+        if self._source_pose_prediction_calls % 128 == 0:
+            logging.getLogger(__name__).warning(
+                "NWM_SOURCE_POSE %s", json.dumps(self.adapter.source_pose_totals)
+            )
         self.last_prediction = self._predict_batch(
             self.last_batch, initial_noise=initial_noise
         )
