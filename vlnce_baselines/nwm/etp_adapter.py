@@ -140,8 +140,11 @@ class RaeEtpAdapterConfig:
     static_run_k: int = 3
     min_horizon: float = 1.0
     max_horizon: float = 64.0
+    condition_source_pose: str = "context_last"
 
     def __post_init__(self):
+        if self.condition_source_pose not in {"context_last", "query_current"}:
+            raise ValueError("condition_source_pose must be context_last or query_current")
         for name in ("context_size", "max_buffer_size", "image_size", "static_run_k"):
             if type(getattr(self, name)) is not int:
                 raise TypeError(f"{name} must be an int")
@@ -353,6 +356,11 @@ class NwmEtpAdapter:
         self.config = config or RaeEtpAdapterConfig()
         self.buffers: List[RaeContextBuffer] = []
         self.last_batch: Optional[RaeNwmInputBatch] = None
+        self.source_pose_totals = dict(
+            queries=0, mismatch_queries=0, yaw_mismatch_queries=0,
+            position_mismatch_queries=0, yaw_abs_sum_rad=0.0,
+            position_sum_m=0.0, max_yaw_rad=0.0, max_position_m=0.0,
+        )
 
     def reset(self, num_envs: int) -> None:
         self.buffers = [
@@ -656,6 +664,26 @@ class NwmEtpAdapter:
                 skipped["context_not_ready"] = skipped.get("context_not_ready", 0) + 1
                 continue
 
+            latest = context_frames[-1]
+            position_gap = float(np.linalg.norm(
+                _as_position3(request.current_position) - latest.position
+            ))
+            yaw_gap = abs(_wrap_to_pi(float(request.current_yaw) - latest.yaw))
+            totals = self.source_pose_totals
+            totals["queries"] += 1
+            totals["position_mismatch_queries"] += int(position_gap > self.config.pos_eps)
+            totals["yaw_mismatch_queries"] += int(yaw_gap > self.config.yaw_eps)
+            totals["mismatch_queries"] += int(
+                position_gap > self.config.pos_eps or yaw_gap > self.config.yaw_eps
+            )
+            totals["yaw_abs_sum_rad"] += yaw_gap
+            totals["position_sum_m"] += position_gap
+            totals["max_yaw_rad"] = max(totals["max_yaw_rad"], yaw_gap)
+            totals["max_position_m"] = max(totals["max_position_m"], position_gap)
+
+            # Preserve the requested absolute target view (face the ghost from
+            # the actual query position), while expressing its action relative
+            # to the final image in the context, as in NWM training.
             record = self.build_ghost_condition(
                 env_index=env_index,
                 ghost_vp=request.ghost_vp,
@@ -663,6 +691,18 @@ class NwmEtpAdapter:
                 current_yaw=request.current_yaw,
                 ghost_position=request.ghost_position,
             )
+            if self.config.condition_source_pose == "context_last":
+                target_yaw = _wrap_to_pi(
+                    float(request.current_yaw) + record.condition.dtheta
+                )
+                record = self.build_target_record(
+                    env_index=env_index,
+                    ghost_vp=request.ghost_vp,
+                    source_position=latest.position,
+                    source_yaw=latest.yaw,
+                    target_position=request.ghost_position,
+                    target_yaw=target_yaw,
+                )
             prepared_entries.append((env_index, context_frames, record))
             curr_delta_values.append([record.condition.dx, record.condition.dy, record.condition.dtheta])
             rel_t_values.append(record.condition.rel_t)

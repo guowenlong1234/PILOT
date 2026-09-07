@@ -266,6 +266,9 @@ class NwmPredictionRuntime:
                 static_run_k=int(config.static_run_k),
                 min_horizon=1.0,
                 max_horizon=float(config.max_horizon),
+                condition_source_pose=str(
+                    getattr(config, "condition_source_pose", "context_last")
+                ),
             )
         )
         fork_devices = []
