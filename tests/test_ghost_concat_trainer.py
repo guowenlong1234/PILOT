@@ -105,3 +105,16 @@ def test_legacy_checkpoint_without_type_field_still_resumes():
     obj._validate_rgb_fusion_navigation_contract({
         "raenwm_rgb_fusion_adapter_state_dict": {}, "rgb_fusion_navigation_contract": saved,
     })
+
+
+def test_coverage_includes_queries_without_ready_prediction(monkeypatch):
+    obj = trainer()
+    obj.last_candidate_q0_prediction_diagnostics = {"q0_first_stage_requested": 7}
+    nav_inputs = {"example": True}
+    monkeypatch.setattr(trainer_module, "apply_ghost_concat_to_graph",
+                        lambda *args: (nav_inputs, {"eligible_candidate_count": 2, "fused_candidate_count": 2}))
+    recorded = []
+    obj._accumulate_rgb_fusion_diagnostics = lambda query, rows: recorded.extend(rows)
+    assert obj._apply_ghost_concat_prediction(nav_inputs, None) is nav_inputs
+    assert recorded[0]["eligible_candidate_count"] == 7
+    assert recorded[0]["fused_candidate_count"] == 2

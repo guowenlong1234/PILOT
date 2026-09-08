@@ -1273,6 +1273,12 @@ class RLTrainer(BaseVLNCETrainer):
         fused_inputs, diagnostics = apply_ghost_concat_to_graph(
             nav_inputs, prediction, self.raenwm_rgb_fusion_adapter
         )
+        # Count all current unique ghost queries, including contexts that were
+        # not ready. Counting only successful prediction rows makes coverage
+        # appear to be 100% even when many ghosts received no prediction.
+        diagnostics["eligible_candidate_count"] = float(
+            (self.last_candidate_q0_prediction_diagnostics or {}).get("q0_first_stage_requested", 0.0)
+        )
         self.last_raenwm_rgb_fusion_diagnostics = [diagnostics]
         self._accumulate_rgb_fusion_diagnostics(
             self.last_candidate_q0_prediction_diagnostics, [diagnostics]
