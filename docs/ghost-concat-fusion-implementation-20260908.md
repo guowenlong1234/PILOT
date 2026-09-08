@@ -21,7 +21,7 @@
 
 观测输入是纯观测图中已经全景编码、按历史观测平均的ghost嵌入；预测输入是世界模型反归一化后的原始DINO CLS。两个输入语义不同，由拼接MLP学习融合；此版本不额外使用C组的预测侧导航映射。
 
-导航底座冻结且固定eval行为，世界模型冻结，仅训练拼接MLP；图导航仍保留对输入的梯度。更新ghost之后，图注意力仍可能改变STOP和其他动作分数，不能保证停止概率不变。
+默认模式冻结导航底座且固定eval行为，仅训练拼接MLP；新增`--train-policy`联合模式允许原本可训练的策略参数与MLP同时更新，分别设置学习率。两种模式均冻结世界模型及原本冻结的视觉骨干。图导航保留对输入的梯度；更新ghost之后，图注意力仍可能改变STOP和其他动作分数，不能保证停止概率不变。
 
 ## 批处理与原始图保护
 
@@ -68,7 +68,7 @@ MODEL:
 
 ## 命令
 
-代码已同步到训练机、测评机。以下正式训练命令只是使用说明，本次没有执行长训练：
+代码已同步到训练机、测评机。下面是默认冻结模式的使用说明；当前已启动的联合实验见后面的“联合训练与全部检查点评测”。
 
 ```bash
 ssh server 'cd /home/gwl/project/etpr1/ETP-R1 && python3 scripts/ghost_concat_job.py train --gpus 0,1 --batch 8 --iters 2000 --log-every 200 --sync --output data/logs/ghost_concat_formal_<run_id>'
@@ -132,3 +132,49 @@ bash scripts/rgb_only_optimization_runtime.sh eval -m pytest -q tests/test_ghost
 批量与逐行在FP16容差内一致，最大绝对误差不超过0.0002442。64行时模块批量前向约快59倍，主要减少小算子调用开销；不能把它当成整套导航训练或评测的提速倍数。
 
 这些检查验证的是实现、冻结与批处理行为，不是导航性能提升。是否超过基线仍需后续正式训练和完整对照。
+
+## 联合训练与全部检查点评测
+
+2026-09-08用户批准联合训练并要求每个检查点升序完整评测。正式实验根是两机各自项目下的`data/logs/ghost_concat_joint_bs8_20260908/`。
+
+- 从原始`base_iter14200.pth`只加载模型权重，新建优化器；E24关闭、原生CLS世界模型和低级上下文不变。
+- 双RTX A6000，每卡4环境、batch4、累积1，全局batch8。
+- 策略学习率`2e-6`，拼接MLP学习率`1e-5`；各自再分weight decay与no-decay，共4个优化器组。DINO主干、深度骨干、路点预测器和世界模型沿用冻结规则。
+- 2000次新增更新，每200保存模型与训练状态，模型经专线原子同步。
+- 测评机RTX3090、专用容器/环境、8环境，自动等待并按200/400/600/800/1000/1200/1400/1600/1800/2000完整测评，每份结果检查1839条原始ID。
+- 保留原教师采样偏移14200。恢复检查包含训练模式、学习率、批量/卡数、累积、训练步数、调度参数及优化器组身份。
+
+管理入口（当前已启动，不必重复执行）：
+
+```bash
+ssh server 'cd /home/gwl/project/etpr1/ETP-R1 && python3 scripts/manage_ghost_concat_joint.py start'
+ssh -J server a6000@10.10.10.2 'cd /home/a6000/gwl/ETP-R1 && python3 scripts/manage_ghost_concat_joint.py start'
+```
+
+将`start`换成`status`只检查一次；中断训练经核对后使用`resume`恢复。已有存活进程不会重复启动。测评等待发生在申请GPU资源之前，不会因为等待checkpoint而占用GPU计算；异常会记录为失败，不会标为完成。
+
+具体执行命令由管理器固定：
+
+```bash
+python3 scripts/ghost_concat_job.py train --train-policy --gpus 0,1 --batch 4 --iters 2000 --log-every 200 --policy-lr 2e-6 --fusion-lr 1e-5 --sync --output data/logs/ghost_concat_joint_bs8_20260908
+python3 scripts/ghost_concat_job.py watch --machine eval --train-policy --gpus 0 --environments 8 --output data/logs/ghost_concat_joint_bs8_20260908 --eval-iterations 200,400,600,800,1000,1200,1400,1600,1800,2000
+```
+
+评测命令的`--train-policy`选择联合模型对应的配置，eval本身不反向传播或更新权重。
+
+启动前验收：两机相关测试各113 passed/1 skipped；训练机广泛CPU回归533 passed/2 skipped。真实双卡4步训练保存2/4步；在独立目录保留第2步成对状态，恢复后正常运行至4步。两次训练的策略均有479个张量变化，包括导航CLS适配层与动作头；应冻结的已保存视觉参数未变、编码器元数据一致、融合末层真实更新；优化器所有已初始化状态步数及scheduler epoch分别为2/4，四组学习率为2e-6/2e-6/1e-5/1e-5。测评机自动按顺序接收并完成预检2/4两个检查点的单episode评测。
+
+验收日志和`joint_update_resume_audit.json`位于训练机`data/logs/ghost_concat_joint_validation_20260908/`。恢复沿用普通SFT恢复路径，验证了优化器/调度器/混合精度状态与环境队列恢复，不承诺随机噪声或后续轨迹逐位复现。
+
+正式产物：
+
+```text
+train_supervisor.log / train.pid                  # 训练机后台任务
+train/ghost_concat_v1_joint_train/run.log
+train/ghost_concat_v1_joint_train/checkpoints/ghost_concat_v1_joint_train/
+eval_supervisor.log / eval.pid                    # 测评机监听任务
+eval/ghost_concat_v1_joint_eval_iter<step>/
+eval_summary.json                                 # waiting/running/completed/failed及全部结果
+```
+
+本轮只做启动验收，后续由后台任务执行；性能结论需等待完整结果。
