@@ -224,6 +224,39 @@ def summarize_rgb_fusion_diagnostic_totals(totals, *, world_size=1):
     }
 
 
+def _ghost_concat_optimizer_groups(policy_parameters, fusion_parameters, policy_lr, fusion_lr):
+    """Separate joint policy/fusion learning rates; never optimize frozen encoders."""
+    no_decay = ('bias', 'LayerNorm.bias', 'LayerNorm.weight')
+    groups = []
+    for prefix, parameters, lr in (
+        ('navigation', list(policy_parameters), float(policy_lr)),
+        ('rgb_fusion', list(fusion_parameters), float(fusion_lr)),
+    ):
+        if not math.isfinite(lr) or lr <= 0:
+            raise ValueError('Joint learning rates must be finite and positive')
+        for decay in (True, False):
+            groups.append(dict(
+                params=[p for n, p in parameters if p.requires_grad
+                        and (not any(key in n for key in no_decay)) == decay],
+                weight_decay=0.01 if decay else 0.0, lr=lr,
+                name=prefix + ('_decay' if decay else '_no_decay'),
+            ))
+    return groups
+
+
+def _validate_joint_optimizer_state(optimizer, saved_state):
+    saved = saved_state.get('param_groups', [])
+    current = optimizer.param_groups
+    if len(saved) != len(current):
+        raise ValueError('Joint optimizer group count mismatch')
+    for old, new in zip(saved, current):
+        if (old.get('name') != new.get('name')
+                or len(old.get('params', [])) != len(new['params'])
+                or old.get('initial_lr', old.get('lr')) != new.get('initial_lr', new['lr'])
+                or old.get('weight_decay') != new.get('weight_decay')):
+            raise ValueError('Joint optimizer group identity/base learning rate mismatch')
+
+
 def _load_adamw_optimizer_state(
     optimizer,
     optimizer_state,
@@ -874,6 +907,13 @@ class RLTrainer(BaseVLNCETrainer):
     def _ghost_concat_enabled(self):
         return self._raenwm_rgb_fusion_enabled() and self._rgb_fusion_type() == "ghost_concat"
 
+    def _ghost_concat_joint_enabled(self):
+        return self._ghost_concat_enabled() and not self._navigation_backbone_frozen()
+
+    def _ghost_concat_fusion_lr(self):
+        value = float(getattr(self.config.IL, "rgb_fusion_lr", -1.0))
+        return float(self.config.IL.lr) if value < 0 else value
+
     def _rgb_fusion_navigation_contract(self):
         contract = {
             "freeze_navigation_backbone": self._navigation_backbone_frozen(),
@@ -895,6 +935,20 @@ class RLTrainer(BaseVLNCETrainer):
                 "memory": "current_step_only",
             }
             contract["fusion_alpha"] = float(self.config.MODEL.RAENWM.rgb_fusion_alpha)
+            if not self._navigation_backbone_frozen():
+                il = self.config.IL
+                contract["optimization"] = {
+                    "format": "ghost_concat_joint_adamw_v1",
+                    "policy_lr": float(il.lr), "fusion_lr": self._ghost_concat_fusion_lr(),
+                    "world_size": int(self.config.GPU_NUMBERS),
+                    "batch_per_rank": int(il.batch_size),
+                    "environments_per_rank": int(self.config.NUM_ENVIRONMENTS),
+                    "gradient_accumulation_steps": int(il.gradient_accumulation_steps),
+                    "warmup_iters": int(il.warmup_iters), "min_lr_ratio": float(il.min_lr_ratio),
+                    "iters": int(il.iters), "sample_ratio": float(il.sample_ratio),
+                    "sample_ratio_iteration_offset": int(il.sample_ratio_iteration_offset),
+                    "decay_interval": int(il.decay_interval),
+                }
         return contract
 
     def _configure_navigation_backbone_training(self):
@@ -960,8 +1014,8 @@ class RLTrainer(BaseVLNCETrainer):
                 "rae_dinov2 and output_size=768"
             )
         if fusion_type == "ghost_concat":
-            if self._active_lookahead_enabled() or not self._navigation_backbone_frozen():
-                raise ValueError("Ghost concat requires a frozen navigation backbone and E24 disabled")
+            if self._active_lookahead_enabled():
+                raise ValueError("Ghost concat requires E24 disabled")
             if not bool(getattr(raenwm_config, "predict_cls_token", False)):
                 raise ValueError("Ghost concat requires native raw CLS predictions")
             if bool(getattr(raenwm_config, "rgb_fusion_align_navigation_cls", False)):
@@ -1894,6 +1948,15 @@ class RLTrainer(BaseVLNCETrainer):
             'weight_decay': 0.0, 'lr': float(self.config.IL.lr),
             'name': 'navigation_no_decay'}
         ]
+        if self._ghost_concat_joint_enabled():
+            optimizer_grouped_parameters = _ghost_concat_optimizer_groups(
+                self.policy.named_parameters(), self.raenwm_rgb_fusion_adapter.named_parameters(),
+                self.config.IL.lr, self._ghost_concat_fusion_lr(),
+            )
+            logger.info("Joint ghost concat optimizer: %s", [
+                (g['name'], g['lr'], sum(p.numel() for p in g['params']))
+                for g in optimizer_grouped_parameters
+            ])
         if self._active_lookahead_enabled() and self._e24_joint_training:
             active_cfg = self._active_lookahead_config()
             wrapper = self._e24_joint_wrapper_state_module()
@@ -2030,6 +2093,8 @@ class RLTrainer(BaseVLNCETrainer):
                 )
 
             if config.IL.is_requeue:
+                if self._ghost_concat_joint_enabled():
+                    _validate_joint_optimizer_state(self.optimizer, training_state["optim_state"])
                 migrated_optimizer_tensors = _load_adamw_optimizer_state(
                     self.optimizer,
                     training_state["optim_state"],
@@ -2467,6 +2532,9 @@ class RLTrainer(BaseVLNCETrainer):
                     writer.add_scalar(f'loss/{k}', logs[k], cur_iter)
                 current_lr = self.optimizer.param_groups[0]['lr']
                 writer.add_scalar('train/lr', current_lr, cur_iter)
+                if self._ghost_concat_joint_enabled():
+                    for group in self.optimizer.param_groups:
+                        writer.add_scalar('train/lr_' + group['name'], group['lr'], cur_iter)
                 logger.info(loss_str)
                 logger.info(f"lr: {current_lr}")
                 self.save_checkpoint(

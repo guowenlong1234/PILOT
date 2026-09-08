@@ -39,7 +39,7 @@ def test_factory_builds_exact_three_layer_no_bottleneck_mlp():
 
 
 @pytest.mark.parametrize("field,value", [
-    ("frozen", False), ("active", True), ("native", False), ("align", True),
+    ("active", True), ("native", False), ("align", True),
 ])
 def test_factory_rejects_unsupported_training_and_prediction_contract(field, value):
     obj = trainer()

@@ -97,6 +97,7 @@ _C.IL.ckpt_to_load = "data/checkpoints/ckpt.0.pth"
 _C.IL.is_requeue = False
 _C.IL.gradient_accumulation_steps = 1
 _C.IL.freeze_navigation_backbone = False
+_C.IL.rgb_fusion_lr = -1.0  # Joint ghost-concat: negative inherits IL.lr.
 _C.IL.use_fused_adamw = False
 _C.IL.cudnn_benchmark = False
 _C.IL.log_cuda_memory = False
