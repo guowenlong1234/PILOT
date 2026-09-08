@@ -868,7 +868,8 @@ class RLTrainer(BaseVLNCETrainer):
         return bool(getattr(getattr(self.config, "IL", None), "freeze_navigation_backbone", False))
 
     def _rgb_fusion_type(self):
-        return str(getattr(self.config.MODEL.RAENWM, "rgb_fusion_type", "residual_gate")).strip().lower()
+        nwm = getattr(self.config.MODEL, "RAENWM", None)
+        return str(getattr(nwm, "rgb_fusion_type", "residual_gate")).strip().lower()
 
     def _ghost_concat_enabled(self):
         return self._raenwm_rgb_fusion_enabled() and self._rgb_fusion_type() == "ghost_concat"
