@@ -17,13 +17,15 @@
 ## 测评机身份约定
 
 - 用户提到“4090”或“测评机”时，固定指主机 `eval-4090`。
-- 从笔记本访问测评机统一使用 `ssh eval`；从训练机访问测评机使用 `ssh eval-4090`。
+- 测评机当前平台只有用于 2.5 GbE 专线的物理网卡 `enp6s0`，固定地址为 `10.10.10.2/24`；没有独立互联网、默认路由或可用的 Tailscale 入口。
+- 从笔记本访问测评机统一通过训练机跳板，使用 `ssh -J server a6000@10.10.10.2`；从训练机访问测评机直接使用 `ssh a6000@10.10.10.2`。
 - 从笔记本访问训练机统一使用 `ssh server`。
-- SSH 别名负责在局域网与 Tailscale 之间选择稳定入口，不硬编码或猜测动态 IP。
-- 本文件中的 `ssh eval` 命令按笔记本入口书写；如果当前已经在训练机上，将入口替换为 `ssh eval-4090`。
+- `server` 别名负责笔记本到训练机的稳定入口；`10.10.10.2` 是训练机—测评机专线固定地址，不是需要猜测的动态 IP。不得再使用旧的 `ssh eval` 或 `ssh eval-4090` Tailscale 入口。
+- 本文件中的测评机 SSH 命令按笔记本入口 `ssh -J server a6000@10.10.10.2` 书写；如果当前已经在训练机上，去掉 `-J server`，直接连接 `a6000@10.10.10.2`。
 - 测评机 SSH 用户、主机名都可能显示为 `a6000`，不能仅凭提示符判断机器身份。
 - 每次连接后先运行 `hostname` 和 `whoami` 确认机器身份。
 - 测评机工作根固定为 `/home/a6000/gwl`。
+- 测评机不能直接访问公网、外部 DNS、软件源或 GitHub；需要联网下载或外部查询时，在笔记本或训练机完成，再按本项目同步规则交付到测评机。
 
 ## 本工程的测评机容器
 
@@ -34,13 +36,13 @@
 - 非交互检查优先使用：
 
 ```bash
-ssh eval 'docker exec gwl-etpr1-rae bash -lc "<command>"'
+ssh -J server a6000@10.10.10.2 'docker exec gwl-etpr1-rae bash -lc "<command>"'
 ```
 
 - 需要交互终端时使用：
 
 ```bash
-ssh eval 'docker exec -it gwl-etpr1-rae bash'
+ssh -t -J server a6000@10.10.10.2 'docker exec -it gwl-etpr1-rae bash'
 ```
 
 - 只有安装系统包等确实需要管理员权限时，才临时使用 `docker exec -u root`。
@@ -75,13 +77,13 @@ cd /home/a6000/gwl/ETP-R1
 - 测评机只有一张 RTX 4090 24GB。运行任何 GPU 命令前先检查：
 
 ```bash
-ssh eval 'nvidia-smi; docker ps --format "{{.Names}}|{{.Status}}"'
+ssh -J server a6000@10.10.10.2 'nvidia-smi; docker ps --format "{{.Names}}|{{.Status}}"'
 ```
 
 - 同时检查 `gwl-etpnav` 中是否仍有 ETPNav 任务：
 
 ```bash
-ssh eval 'docker exec gwl-etpnav bash -lc "ps -eo pid,ppid,stat,etime,cmd | grep -E '\''torchrun|run.py|train.py'\'' | grep -v grep || true"'
+ssh -J server a6000@10.10.10.2 'docker exec gwl-etpnav bash -lc "ps -eo pid,ppid,stat,etime,cmd | grep -E '\''torchrun|run.py|train.py'\'' | grep -v grep || true"'
 ```
 
 - 如果 ETPNav 正在占用 GPU，不并行启动本项目的全量特征生成、预训练、SFT、GRPO 或完整评测，也不得擅自结束 ETPNav；应等待资源释放或向用户说明现场情况。只有用户明确授权停止该具体任务时，才能按上一节的授权边界处理。
@@ -91,7 +93,7 @@ ssh eval 'docker exec gwl-etpnav bash -lc "ps -eo pid,ppid,stat,etime,cmd | grep
 
 - 本工程中央裸仓库固定为训练机的 `/home/gwl/git/ETP-R1.git`。
 - 三个工作目录分别是：训练机 `/home/gwl/project/etpr1/ETP-R1`、笔记本 `/home/sia/project/ETP-R1`、测评机 `/home/a6000/gwl/ETP-R1`。
-- 笔记本通过 `origin = server:/home/gwl/git/ETP-R1.git` 访问中央仓库；训练机和测评机也以该中央仓库为 `origin`。原 GitHub 仓库保留为 `upstream`，只用于获取上游历史。
+- 笔记本通过 `origin = server:/home/gwl/git/ETP-R1.git` 访问中央仓库；训练机也以该中央仓库为 `origin`。测评机没有互联网，其 `origin` 必须通过专线指向 `ssh://gwl@10.10.10.1/home/gwl/git/ETP-R1.git`；现有受限部署密钥已验证可从该地址读取中央仓库。原 GitHub 仓库保留为 `upstream`，只允许笔记本或训练机用于获取上游历史，测评机不得直接访问。
 - 常规同步先检查 `git status --short --branch`，提交后使用 `git push origin HEAD`。推送只更新中央裸仓库，不会自动更新其他工作目录。
 - 更新目标工作目录前必须确认没有未提交修改，再执行 `git fetch origin --prune --tags` 和 `git pull --ff-only`。如果目录有改动、分支分叉或无法快进，立即停止并说明，不得强制覆盖。
 - 同步全部本地分支和标签只在用户明确要求时使用 `git push origin --all` 和 `git push origin --tags`。

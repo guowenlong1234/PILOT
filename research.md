@@ -18,7 +18,7 @@ README 原始说明要求创建 `etpr1` conda 环境，核心环境为 Python 3.
 
 本次 RAE/DINOv2 替换的正式运行位置是测评机，不是本机：
 
-- 笔记本 SSH 入口：`ssh eval`；训练机到测评机使用项目约定的直连入口；GPU 为 RTX 4090 24GB；工作根为 `/home/a6000/gwl`。
+- 测评机当前没有独立互联网或 Tailscale 入口。笔记本统一经训练机跳板访问：`ssh -J server a6000@10.10.10.2`；训练机通过 2.5 GbE 专线直接访问 `a6000@10.10.10.2`。2026-09-02 更换平台后实测 GPU 为 RTX 3090 24GB，工作根为 `/home/a6000/gwl`。
 - 专用容器：`gwl-etpr1-rae`，复用镜像 `gwl-etpnav:etpnav-runtime-20260701185256`，但不复用或修改现有 `gwl-etpnav` 容器。
 - 专用环境：`/home/a6000/gwl/miniconda3/envs/etpr1_rae`，从远端 `raenwm` 只读克隆后清除继承的 ETPNav `.pth` 路径绑定。
 - 远端 `raenwm` 已核验为 Python 3.11.15、PyTorch 2.2.2+cu121、Transformers 4.49.0；它本身保持只读。
@@ -34,6 +34,8 @@ README 原始说明要求创建 `etpr1` conda 环境，核心环境为 Python 3.
 - `habitat_extensions/`: 对 Habitat 任务、传感器、度量、地图和模拟器封装的扩展。
 - `pretrain_src/`: 预训练数据、模型和脚本。
 - `precompute_img_features/`: 图像/深度特征预计算脚本。
+- `paper/`: 论文专用工作区；`drafts/` 存放初稿，`figures/`、`tables/`、`references/` 和 `notes/` 分别存放图片、表格、引用材料与写作笔记。
+- `docs/paper-mainline.md`: 2026-08-31 确认的论文主线，说明双阶段候选前瞻、预测状态引导查询、受约束计算，以及已实现方法与计划机制的边界。当前指定写作稿为 `paper/drafts/TopoForesight_TASE_初稿骨架.before-related-work.md`；其标题、摘要和引言使用 PILOT，方法及后文仍使用 TopoForesight，名称与贡献组织尚待统一，不能仅凭文件名判断正文版本。
 - `copy_extra_files.py`: 将额外数据、checkpoint 等资源复制到项目目录；内含可选的 Habitat 数据软链接逻辑。
 
 ## Core Scripts And Entry Points
@@ -56,6 +58,7 @@ README 原始说明要求创建 `etpr1` conda 环境，核心环境为 Python 3.
 
 ## Important Modules And Functions
 
+- 当前原生 CLS 世界模型入口配置为 `configs/nwm/raenwm_mp3d_fresh_cls.yaml`：冻结 DINOv2 表征上的 `CDiT-B/2` 条件生成，联合预测 CLS+256 patch，采用线性路径速度场/流匹配和欧拉采样。`runtime.py` 禁用 RGB 解码，但不能因此将其归类为直接回归式 JEPA；技术定位与原始 RAE-NWM 论文差异见 `paper/notes/world-model-landscape-and-section-b-20260905.md`。
 - `vlnce_baselines/ss_trainer_ETP_R1.py`: SFT/监督训练相关 trainer。
 - `vlnce_baselines/GRPO_trainer_ETP_R1.py`: GRPO/RFT 相关 trainer。
 - `vlnce_baselines/models/R1Policy.py`: ETP-R1 策略网络封装。
@@ -128,6 +131,16 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 
 ## Current Caveats And Open Questions
 
+- 2026-09-08 用户要求分析改变RGB注入结构，已直接复查全景编码、candidate→ghost更新和图输入组装，设计见`docs/rgb-ghost-local-injection-design-20260908.md`。建议保留纯观测图，使用冻结全景编码器的单候选对照差值，在图输入处对当前有效ghost做零初始化、有界临时修正；第一版不跨步缓存预测，不改STOP规则、不启用E24。明确预测CLS不能因同为768维就直接加到多模态全景嵌入上，也不能承诺图注意力之后STOP不变。需先做容量对照与预测/真值信息价值诊断；本次仅写方案，没有修改生产模型或启动实验。
+- 2026-09-08 15:16 已核验RGB-only三步实验全部完成：3组2000步训练、12份1839任务完整评测、4份冻结审计，19项验收重新通过；实际结束时间09:35。完整分析见`docs/rgb-only-optimization-analysis-20260908.md`。没有有效RGB配置超过历史SR63.7303或本轮基线63.5672。A1000/2000为SR61.6639/62.3709；B1000/2000均63.3496，B2000 SPL54.8832；C1000/2000为63.2409/63.1865。旧5200关闭增量alpha0最高SR63.7303但SPL53.9829，不算有效RGB提升；alpha1为63.5128/54.2061。源修复前后1839逐条结果完全相同，九份WM评测共370818有效查询错位计数均0，不能将此前退化归因于该边界错误。冻结保留能力但未取得净增益，简单对齐未验证有效；当前保留原始14200为使用参照，后续优先预测信息价值与ghost局部注入诊断。本次未启动新实验。
+- 2026-09-07 用户改为要求全自动执行，停止人工持续检测，具体分析等再次发起。`scripts/manage_rgb_only_pipeline.py start/status`已部署两机，可接管现有训练、评测、发布和收集进程，重复启动验收保持同一组PID。最终收集器已切到`--collect-only`：仅在3组训练、12评测、4冻结审计全部通过后生成测评机实验根的`final_report.md`和`final_summary.json`，不提前给出原因分析或模型推荐。人工监控exec循环已停止；操作命令和结果位置见`docs/rgb-only-optimization-execution-20260907.md`。
+- 2026-09-07 17:28 三步优化中途实测：本轮基线SR/SPL `63.5672/55.5275`，历史基线`63.7303/55.6054`，同SHA与1839 ID配对净差-3条；旧源5200完整复测`63.5128/54.2061`精确复现原指标。其41520次有效候选查询中源位姿错位为0，因此先前合成复现的边界错误不能解释这次旧5200退化。当前A已到约1104且1000模型同步，B约188，C等待；alpha0评测进行中。自动训练完成证据发布、4份冻结审计和19项产物验收后的最终报告已部署，尚未形成新模型性能结论。
+- 2026-09-07 用户已授权执行 RGB-only 三步优化，执行记录见 `docs/rgb-only-optimization-execution-20260907.md`。源位姿修复、冻结底座、预测侧共享冻结CLS适配层及有限实验调度已通过Git同步；代码截至 `eca64f3`。两机源位姿46项及冻结相关97项测试通过，真实B/C单卡、B双卡和A/C单卡batch16预检通过；643个导航张量冻结审计均一致。正式产物位于两机 `data/logs/rgb_only_optimization_20260907/`：训练机GPU0 A→C、GPU1 B（各单卡batch16/2000步），测评机依次完成基线、旧5200桥接、四强度以及ABC固定1000/2000完整评测。启动不等于性能已提高，最终指标、源位姿错位比例和配对结论等待完整结果。既有论文及未提交修改保持原状。
+- 2026-09-07 已补齐 RGB-only 三轮各 50 点的最终审计，见 `docs/rgb-only-navigation-diagnosis-20260907.md` 和 `docs/diagnostics/rgb-only-audit-20260907-metrics.json`。TensorBoard 的 `start_iter14200_no_rgb` 只是原始 14200 指标的水平参照线，不是同预算无注入续训。旧低级后补测 `iter9200` 达到 SR/SPL `64.0022/54.3409`；梯度修复后 `iter1000/5200` 并列最高 SR `63.5128`，5200 的 SPL 更好 `54.2061`。三轮均值 SR 几乎相同，主要问题是大量修好与破坏任务同时发生、路径效率下降。新发现低级碰撞转向后缓存末帧朝向与查询当前朝向可能不一致，测评机 CPU 合成位姿复现已确认，真实发生率与性能影响未测，生产代码尚未修复。优先源位姿合同核验、已有模型 alpha 消融、同预算无注入续训与冻结底座训练，再考虑对齐及全景编码后 ghost 局部注入；本轮没有启动新训练或完整导航评测。
+- 2026-09-05 已完成 RGB-only 跨工程与远端结果审计，详见 `docs/rgb-injection-navigation-audit-20260905.md`。核查时训练机修复后低级实验已保存并同步 `iter5000`，测评机已完整评完 `iter200`–`iter3800`，正在评 `iter4000`。同一 DINO 无 WM SFT 基线为 SR/SPL `63.7303/55.6054`；修复后当前最佳 `iter1000` 为 `63.5128/53.7450`。旧高层 native RGB 最佳 `64.2197/53.9265`，逐 episode 对照仅净增 9 条（修好 128、损失 119）。低级训练门均值在 `iter5000` 达到 `0.994`，候选注入覆盖率约 81%；`back_algo=teleport` 使低级上下文在每个高层动作边界清空，不能等同于旧高层跨决策历史。当前融合的观测输入是经过 residual MLP 的 `nav_cls`，预测输入是反归一化后的原始 DINO CLS；直接相减符合现有设计，但对齐效果仍待验证。优先建议已有 checkpoint 的注入强度消融、同预算无注入继续训练对照、冻结底座仅训 adapter；本次未启动新实验或改动远端任务。
+- 2026-09-04 提交 `ea860aa` 已修复低级上下文 SFT 的导航 CLS residual MLP 梯度丢失。根因是 `LowLevelContextSynchronizer` 在整个 rollout 的 CUDA autocast 区域内，先以 `torch.no_grad()` 调用同时包含 raw CLS/patch 和 navigation CLS 的接口；这会让 autocast 缓存无梯度版本的 residual MLP 权重，随后 waypoint 前向复用该缓存并失去梯度。编码器现提供完全不经过 residual MLP 的 raw-only 接口，低级同步器只能调用该接口；trainer 还会在每次优化器更新前拒绝 residual MLP 只有零锚、没有任何真实非零梯度的更新。训练机针对性测试 `59 passed`；完整测试除 3 个只能在测评机固定 Habitat 容器路径运行的 runtime-behavior 用例外为 `546 passed`。真实单卡低级两步 probe 的六项梯度全部非零；真实双卡 DDP 单步中两个 rank 的六项梯度全部非零且归约后一致，没有保存 checkpoint。旧低级 checkpoint 仍属于受影响产物，不能视为满足该梯度合同。
+- 2026-09-04 正式修复后重训的 `iter200` 到 `iter1400` 已完成参数级复核。七个相邻 200 步区间中，CLS residual MLP 的三个 bias 每次均为 `768/768` 元素变化，三个 weight 每次也有至少 `589818/589824` 元素变化；相对导航基座的整体 L2 漂移从 `iter200` 的 `0.619808%` 单调增至 `iter1400` 的 `1.461174%`。旧错误实验同两点只有 `0.002045%` 和 `0.014300%`，且三个 bias 始终逐位不变；旧 weight 的缩放系数约 `0.999859--0.999865`，与学习率 `1e-5`、权重衰减 `0.01` 在 1,400 步下的纯衰减系数 `0.999860` 一致。新 weight 变化的非缩放分量占更新范数约 `97.2%--99.9%`。结合正式训练连续超过 1,400 步且逐步非零梯度硬检查从未触发，可确认修复在各 checkpoint 区间持续生效，而非只在冒烟或首步生效。
+- 2026-09-04 测评机工作区的 `origin` 已从旧的不可达 Tailscale 地址校正为项目固定的训练机专线中央仓库 `ssh://gwl@10.10.10.1/home/gwl/git/ETP-R1.git`；确认工作树干净后，已通过 `fetch` 和 `ff-only pull` 快进到 `ea860aa`。
 - 2026-08-14 已确认测评机单卡续训 `pretrain_resume_source_250000` 的停止原因是宿主机 CPU 内存耗尽，不是显存溢出。任务使用提交 `94f4372`，配置为 `n_workers=2`、`pin_mem=true`、`thread_prefetch=false`；它从第 250,000 步运行到第 305,000 步，在 RxR MLM 验证开始后由内核 OOM killer 以 `SIGKILL` 结束。内核现场有 7 个约 18 GiB RSS 的 Python 进程，正好对应 1 个训练主进程、MLM/SAP 共 4 个长期训练 worker 和当前验证的 2 个 worker；容器累计内存峰值为 65,468,919,808 字节，2 GiB swap 已耗尽。`R2RTextPathData(in_memory=True)` 会让每个 worker 独立、单调填充 RGB/深度视点缓存，完整缓存约 1.36 GB（十进制），同时 worker 通过 Linux `fork` 继承装有 321 万条 Python 记录的约 18 GiB 主进程，长期访问会增加写时复制的私有页。它是有上界的缓存和进程复制，不是计算图无界泄漏，但实际表现为缓慢增内存并最终 OOM；验证额外 worker 构成最后峰值。最近完整恢复点是第 302,500 步。此前已稳定长跑的 `n_workers=0`、`pin_mem=false`、`thread_prefetch=true` 路径没有这些子进程；本次只读诊断未恢复任务、未修改训练代码或远端产物。
 - 2026-08-14 已实现保持 `n_workers=2` 的有界内存路径：321 万条 JSONL 改为约 24.5 MiB 的 mmap 行索引并按需解析；worker 使用 `spawn`；RGB+深度特征采用 256 MiB/worker 的按字节 LRU；预取降为 1；`pin_mem=false`；验证使用 `val_n_workers=0` 和零特征缓存。真实数据在 CUDA 先初始化的顺序下完成 2,000 micro-batch，500--2,000 batch 的 cgroup 内存稳定在约 22.82--22.88 GB，进程私有内存为主进程约 1.36 GiB、四个训练 worker 各约 1.38--1.43 GiB，退出正常。惰性/eager 的真实 R2R 首中尾样本和完整输入逐项一致，针对性测试 `44 passed`。测试中还发现 PyTorch `persistent_workers=true` 会在提前关闭时触发本地库 `SIGABRT`，最终配置已关闭。正式预训练现已在测评机从第 302,500 步恢复；2026-08-15 本次只读核验时已到约第 462,000 步，训练进程正常。当前最佳是第 452,500 步：MLM 平均准确率 `0.8666867801`、SAP 平均准确率 `0.8011502767`、联合选择分数 `1.6678370568`；对应 R2R/RxR 的 MLM 为 `0.8199916701`/`0.9133818901`，SAP 为 `0.8063005534`/`0.796`。新配置的每轮验证稳定约 166--172 秒（R2R 约 35 秒，RxR 约 131--136 秒）；旧配置共用 `n_workers=2` 时约 49 秒。差异主要来自新设置显式使用 `val_n_workers=0`，使验证的 HDF5 读取、样本构造和 batch 整理与 GPU 前向串行；这是为避免旧路径在验证 worker 创建时再次触发内存峰值的保守配置，不是训练 worker 卡死或验证逐轮退化。
 - 2026-08-15 对比当前 raw-CLS 实验与上一次完整 `rae_dinov2_cls_mlp` 实验：两者不是同配置复跑。旧实验使用经 `stat.pt` 归一化的 DINO CLS，再经可学三层 `768→768→768→512` 投影和 `512→768` 映射；当前实验为对齐 ETPNav，改用未应用 `stat.pt` 的 raw CLS 和单层 `768→768` 映射。旧实验有效 batch 为 128；当前实验前 10,000 步为 128，之后主动允许改为 64，因此同为 500,000 次参数更新时约只看到旧实验一半的训练样本。分数差距在前半程已存在：旧实验第 250,000 步最佳 `1.666969`，当前实验第 252,500 步为 `1.646896`；故后续转移到测评机、OOM 和 `val_n_workers=0` 不是主因。验证子集由固定 seed 选取，但 MLM mask 和 SAP 终点类型仍是每轮随机生成，因此单点最佳分数也包含一定验证噪声。现有证据能说明主要差异来自视觉链路和有效 batch，但没有单变量实验能精确分解两者各自的贡献。
@@ -155,9 +168,184 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 - 联合预训练配置将 `max_txt_len` 设为 250，`dataset.py` 会截断更长的指令。现有数据中 RxR-Marky 有 38,456 条、RxR train 有 3,097 条超过 250 个词元；这是训练配置造成的截断，不是数据文件缺失。
 - 5 类数据的训练就绪 JSONL 都完整，但转换脚本引用的部分原始源文件和 Gemini 标注中间文件未按原路径保存在当前仓库中。因此可以直接运行联合预训练，但若要从原始指令和 Gemini API 输出开始重新生成全部 JSONL，还需要另行补齐源数据。
 - 本机 `etpnav` 环境是 Python 3.7、PyTorch 1.9.1、Transformers 4.12.5，不包含 RAE-NWM 所用的 `Dinov2WithRegistersModel`，因此只能参考旧 CLIP 链路。测评机现已建立独立容器 `gwl-etpr1-rae`、独立 `etpr1_rae` 环境和 ETP-R1 自有 Habitat 0.3.3 依赖目录。现代导入链还需要仓库原环境固定的 `boto3==1.20.31`；它只安装在 `etpr1_rae` 中。
-- 测评机只有一张 RTX 4090。现有 ETPNav 任务占用 GPU 时，不得并行启动全量特征生成、预训练、SFT、GRPO 或完整评测，也不得擅自中断 ETPNav。
+- 测评机只有一张 RTX 3090 24GB。现有 ETPNav 任务占用 GPU 时，不得并行启动全量特征生成、预训练、SFT、GRPO 或完整评测，也不得擅自中断 ETPNav。
 
 ## Last Reviewed
+
+2026-09-08，用户要求查看自动实验结果。读取两机训练/评测清单、自动汇总、四份冻结审计、源位姿计数及B/C训练日志；在测评机专用环境重新执行19项只读验收，核对源修复前后逐任务字典完全一致，保存轻量结果快照并编写完整分析。三组训练与12份完整评测均正常完成；未获得超基线的有效RGB模型，未开展额外训练或评测。
+
+2026-09-07，任务上下文：分析三轮 native CLS RGB-only SFT 修复后未稳定超过原始 14200 基线的原因。核对两机配置、完整聚合与逐 episode 结果、TensorBoard 基线、训练诊断和真实 checkpoint 中 CLS 适配层参数，检查融合、全景编码、图历史、低级上下文和 NWM 条件构造，并对照 ETPNav 历史 57→59 实验及 NWM 训练数据合同。在测评机专用环境用 CPU 复现源朝向错位，保存本地诊断与指标快照；未改远端实现、环境、权重或任务。
+
+2026-09-06，任务上下文：参考本地 VLN 论文完成方法 III-A 初稿。重读 ETPNav、ETP-R1、HNR、NavMorph、DGNav 的方法开头，结合当前 `graph_utils.py`、SFT 图输入及候选评分掩码核对基础接口。删除 A 下两个编号小标题，以三个自然段串联任务/输入、在线拓扑候选和动作接口，按需定义符号并明确基础评分所在阶段。复用 [2]、[7]、[9]；缓存及残差细节保留在后文，A 之外正文不变。阅读依据追加在 `paper/notes/local-tase-vln-writing-reference-20260905.md`。
+
+2026-09-06，任务上下文：按用户确认的结构将问题定义并入方法章节。指定论文初稿的原 III、IV 合并为“III. 方法”，包含 A 问题定义与基础导航框架、B 方法总体框架、C 候选到达预测与表示增强、D 预测状态引导的后继查询与候选校正、E 前瞻干预与计算约束；候选预算和展开符号移至总体框架，评分/查询/残差以及回退/触发/成本分别归组。明确基础评分处于第一阶段增强之后、第二阶段校正之前；后续训练、实验、讨论、结论顺延为 IV–VII。参考 `paper/要求/学术写作的基本逻辑与要求.md` 的方法组织要求，保留现有公式、图表与未完成写作提示，本轮仅调整结构及衔接，不进行远端实验。
+
+2026-09-05，任务上下文：广泛检索后完成相关工作 C。查阅 16 项相关研究的原始摘要或全文，重点核对 Look Before You Leap、Active VLN、Dreamwalker、HNR、NWM 与 Metacontrol 的方法。C 改为“前瞻规划与决策”，围绕预测辅助策略、导航分支评估、额外信息获取和本文定位写成四段，新增书目 [29]–[32]；区分真实探索与模型预测，保留第二阶段触发待集成的状态。检索证据及取舍见 `paper/notes/related-work-c-research-20260905.md`。A、B 和其他原有正文及书目保持不变，未操作远端实验。
+
+2026-09-05，任务上下文：按用户确认的世界模型技术路径完成相关工作 B。标题改为“世界模型与导航动态建模”，以四段、1,168 字符连接潜在动态、可视生成、直接表征预测与 RAE-NWM；新增书目 [19]–[28]，复用 HNR、Dreamwalker、NavMorph，重点说明稠密表征上的动作条件流匹配及本文冻结使用方式。新增书目由上一轮保存的 arXiv 原始元数据核对。A、C 和其他正文及已有书目未改，同步记录于世界模型研究笔记。
+
+2026-09-05，任务上下文：广泛检索世界模型流派并分析相关工作 B。联网读取 23 篇原始文献页面，重点核对本地 NWM、RAE-NWM、DINO-WM 方法及当前原生 CLS 配置、速度场损失和采样代码。确认当前接入的是稠密 DINOv2 表征上的动作条件流匹配生成模型，关闭图像解码并不改变其生成式属性；原论文 256 patch 与项目 CLS+patch 输出分开说明。新增技术图谱与 B 写作建议，未改论文正文或运行远端实验。
+
+2026-09-05，任务上下文：用户认为相关工作 A 的显式分类行文过于报告化，要求融合前两版。保留大模型导航与任务专用策略的区别，删除分类维度说明和重复的“决策核心”句式，改为任务及大模型方法、专用策略与航点、空间记忆与在线拓扑、后续改进及本文定位四段连续论述。全部引用和 A 节外论文内容保持不变，同步更新写作逻辑笔记。
+
+2026-09-05，任务上下文：按用户意见重组相关工作 A。将分类依据明确为视觉语言大模型与任务专用跨模态策略两种决策核心，按任务与分类、大模型路线、专用策略及航点、地图与在线拓扑、本文定位组织为五段。保留全部 13 项引用和既有书目，同步更新 `paper/notes/related-work-a-research-20260905.md`；检查确认 A 节外论文内容保持原样。
+
+2026-09-05，任务上下文：广泛联网检索并完成相关工作 A。核对 R2R、RxR、VLN-CE、WPN、候选航点、跨模态地图、DUET、GridMM、BEVBert、ETPNav、ETP-R1、DGNav、NaVid、StreamVLN 共 14 项原始研究来源，补读 4 份论文前 4 页。II-A 改为四段正式正文，按任务演进、动作与观测路线、地图/在线拓扑、后续改进与本文定位组织，追加参考文献 [13]–[18]；引言及其他章节保持原样。来源与书目版本差异记录在 `paper/notes/related-work-a-research-20260905.md`。发现跨模态地图已有未观测语义预测，故不泛称所有地图方法只记录历史。未改变已暂存内容或运行远端任务。
+
+2026-09-05，任务上下文：依据本地 TASE/VLN 参考再次优化指定稿的引言。用同一个走廊指令例子串联观测不足、到达预测和后继查询，明确承认 HNR 已使用预测信息生成更远航点，具体介绍 Dreamwalker、HNR、NavMorph 的作用；突出本稿基础评分前后两阶段的分工和有界修正。引言含图注从 2,535 字符精简至 1,911 字符，图 1 改为概念图图注，证明、符号和绘图细节留在方法或 `paper/notes/local-tase-vln-writing-reference-20260905.md`。保留结果及机制状态括注，核对引用和正文修改范围，引言外论文内容保持原样。
+
+2026-09-05，任务上下文：参考本地 TASE 与 VLN 论文继续写作准备。浏览 TASE 目录 8 篇 PDF，重点读 HEIGHT、ViTeC，并阅读 ETPNav、ETP-R1、HNR、NavMorph、DreamNav、DGNav 的开篇与相关工作，检查代表页版式；新增 `paper/notes/local-tase-vln-writing-reference-20260905.md`，记录实际阅读范围和 14 篇来源。HNR §3.2.4 已使用候选预测深度生成更远航点，§3.3 使用前瞻图评估分支，因此“预测信息产生后继位置”不能直接当作独有创新，后续须具体比较潜在查询、双阶段评分接口和干预约束。本轮未修改论文正文，未重新核查各工作区实现或远端实验。
+
+2026-09-05，任务上下文：按用户确认的结构优化论文引言。修改 `paper/drafts/TopoForesight_TASE_初稿骨架.before-related-work.md` 的引言及其框架图图注：合并重复拓扑背景，明确候选方向可见与到达后视角未知的区别，补充候选对齐、后继查询、误差与成本三个研究问题，重组双阶段前瞻、预测状态引导查询、受约束选择性前瞻三项贡献。沿用引言中的 PILOT 名称；按用户偏好保留完整结果句并括注“待实验验证”，未集成机制另作括注。摘要和相关工作及之后章节保持原样；此前记录的引言贡献重复问题已在本次修改中处理。
+
+2026-09-05，任务上下文：开始逐节论文写作，暂不讨论最终实验结果。通读用户指定的 `paper/drafts/TopoForesight_TASE_初稿骨架.before-related-work.md`、`paper/README.md` 和 `docs/paper-mainline.md`，并查看旧主线候选、调查文档及前瞻模块代码。当前稿的摘要和引言已有正文，相关工作仍为提纲，方法和训练部分混合公式与作者待办；引言贡献前两点存在重叠，主线中的预测状态引导查询未单独突出。补充上述论文入口索引，保留原稿和既有未提交修改；后续可先逐段写引言，实验结论留待结果完成后补充。
+
+2026-09-05，任务上下文：整理 `docs/TopoForesight_TASE_初稿骨架.before-related-work.docx`。核对 Word 原稿为 19 页、636 个段落、10 个表格，无批注、修订痕迹或内嵌图片；新建根目录 `paper/` 作为论文资料工作区，并将原稿按实际标题层级、列表、公式、表格、图注、占位符和 12 条参考文献整理为 `paper/drafts/TopoForesight_TASE_初稿骨架.before-related-work.md`。原始 docx 未修改。
+
+2026-09-05，读取训练机/测评机的运行进程、保存 YAML、训练诊断和历史完整测评 JSON，核验 1,839 条 episode 的结果配对；对照笔记本 ETPNav 的历史 57.8032%→59.1082% 实验与实际 RGB adapter、ETP-R1 的注入、上下文、候选查询和优化器代码。新增 `docs/rgb-injection-navigation-audit-20260905.md`，区分已确认事实与待验证原因。远端操作仅只读检查，测评环境导入退出 0，未重跑训练或完整测评。
+
+2026-09-04 17:01（Asia/Shanghai），对修复后正式训练的
+`base_iter14200 → iter200/400/600/800/1000/1200/1400` 做 CLS residual MLP
+参数级审计，并用同区间旧错误实验作对照。逐张量核对了三层 weight/bias 的 L2、
+最大绝对变化、变化元素数以及 weight 对前一检查点的最佳纯缩放残差；结果确认七个
+区间六个张量都在真实更新，新实验到 `iter1400` 的整体漂移约为旧实验 102 倍，
+三个 bias 持续变化，weight 更新几乎都不能由 AdamW 纯衰减解释。训练日志同时未
+出现 anchor-only、梯度合同、DDP、NCCL 或显存错误。检查使用 CPU mmap 顺序读取
+模型 checkpoint，没有占用或中断训练 GPU。
+
+2026-09-04 15:09（Asia/Shanghai），已把修复后低级上下文 RGB-fusion SFT 的
+完整评测结果接入现有联合 TensorBoard。测评机容器内新增独立 tmux 会话
+`etpr1-rgb-fusion-lowlevel-bs16-gradfix-eval-normalizer`，每 10 秒扫描
+`native_cls_eval_lowlevel_bs16_gradfix_ea860aa_20260904` 的有效 JSON，并以 run
+`native_cls_rgb_fusion_sft_lowlevel_bs16_gradfix_ea860aa` 写入既有目录
+`data/logs/active_lookahead/native_cls_e24_joint_eval/metrics_tensorboard_20260828/`。
+首次写入 `iter200/400/600` 共 33 个标量；TensorBoard 数据接口已显示新 run，
+SR/SPL 的 step 和数值与原始 JSON 一致。本机原有 `6008` 隧道和测评机 6009
+TensorBoard 均保持运行，用户刷新当前页面即可看到，后续结果会自动追加。
+
+2026-09-04 10:45（Asia/Shanghai），测评机已启动修复后新训练的独立升序评测
+watcher。启动前确认 ETPNav 未运行、GPU 空闲、工程工作树干净；把失效的 Git
+`origin` 校正到训练机专线中央仓库并以 `ff-only` 快进到 `ea860aa`，随后在
+`gwl-etpr1-rae`/`etpr1_rae` 中完成 59 项定向测试，结果为
+`59 passed, 3 warnings`。新 watcher PID 为 `38957`，监控训练同步目录
+`data/logs/raenwm_rgb_fusion/native_cls_sft_lowlevel_bs16_gradfix_ea860aa_20260904/checkpoints/etpr1_native_cls_rgb_fusion_sft_lowlevel_bs16_gradfix_ea860aa/`，
+结果写入
+`data/logs/raenwm_rgb_fusion/native_cls_eval_lowlevel_bs16_gradfix_ea860aa_20260904/`；
+固定单卡、8 环境、完整 1,839 个 R2R `val_unseen` episode，并按 checkpoint
+升序执行。启动时训练约到第 60 次更新，尚无 `iter200`，watcher 正常记录
+`reason=no_checkpoints`，没有占用 GPU。修复前旧 watcher 和 `iter7200` 评测
+进程已停止，旧结果与 checkpoint 未删除。
+
+2026-09-04 10:28（Asia/Shanghai），按用户要求在训练机从干净导航基座重新启动
+低级上下文原生 CLS RGB-fusion SFT。源码固定为梯度修复提交 `ea860aa`，使用
+`start`/weights-only 路径加载 `base_iter14200.pth`，基座 SHA-256 仍为
+`1694b175d913404bfef8a53519d6f405db5de7f8b051e8343700125e43f05c61`，没有恢复
+旧低级实验的模型或优化器状态。除实验名、输出/同步目录和基座路径由相对路径改为
+同一文件的绝对路径外，保存配置与
+`native_cls_rgb_fusion_sft_lowlevel_bs16` 的有效训练参数一致：双卡、每 rank
+8 环境、每 rank batch 8、梯度累积 1、全局 batch 16、10,000 次更新、每 200 次
+保存、学习率 `1e-5`、无 warmup、DAgger 偏移 14,200、低级上下文和 RGB fusion
+参数不变。新实验名为
+`etpr1_native_cls_rgb_fusion_sft_lowlevel_bs16_gradfix_ea860aa`，输出根为训练机
+`data/logs/raenwm_rgb_fusion/native_cls_sft_lowlevel_bs16_gradfix_ea860aa_20260904/`，
+supervisor PID 为 `42131`，启动日志为
+`supervisor_server/start_20260904T102830.log`。启动核验时两个 rank、torchrun 和
+supervisor 均存活，两张 A6000 满载，NWM 两侧均 `314/314` 匹配，至少前两次真实
+优化更新已跨过 residual MLP 非零梯度硬检查，无 traceback、DDP、NCCL 或显存
+错误。checkpoint 同步使用测评机同名隔离目录；修复前旧实验评测随后已按用户
+要求停止，已有文件未覆盖。
+
+2026-09-04，完成低级上下文导航 CLS residual MLP 梯度修复并提交 `ea860aa`：新增 raw-only 编码接口、低级同步器强制接口和 anchor-only 更新硬检查；训练机完成 59 项针对性测试、546 项其余完整测试、真实单卡低级两步和真实双卡 DDP 单步回归。测评机当时正在执行完整评测，未抢占 GPU；另发现其 Git origin 仍为旧不可达入口，待下一次源码同步前按项目固定专线地址校正。
+
+2026-09-03，断电重启后恢复当前低级上下文 RGB-fusion SFT 的联合测评
+TensorBoard。测评机专用容器 `gwl-etpr1-rae` 内重新启动 TensorBoard 2.21.0
+和 `native_cls_rgb_fusion_sft_lowlevel_bs16` 结果归一化器；归一化器继续扫描
+`native_cls_eval_lowlevel_bs16_20260902` 的完整 JSON 结果，并写入既有联合目录
+`data/logs/active_lookahead/native_cls_e24_joint_eval/metrics_tensorboard_20260828/`。
+本机用户服务 `etpr1-native-cls-e24-eval-tb-tunnel.service` 已改用训练机跳板和
+测评机固定专线地址，并在每次启动时动态查询 ETP-R1 容器地址，不再依赖旧
+`eval` 入口或写死 Docker 地址。本机访问地址为 `http://127.0.0.1:6008/`；
+HTTP、TensorBoard 数据接口和浏览器页面均已验证，当前 run
+`native_cls_rgb_fusion_sft_lowlevel_bs16` 显示到第 2,800 次，后续完整结果会
+每 10 秒自动追加。
+
+2026-09-02 16:02（训练机时间），只读核验正在运行的 R2R 原生 CLS
+RGB-fusion 低级上下文 SFT。训练机提交为 `e46832d`，supervisor、torchrun 和
+两个 rank 均存活；实时进度为 `1606/10000`，最新完整模型/训练状态对为
+`iter1600`。两张 A6000 均为 100% 利用率，显存约 23.2/24.1 GiB，温度
+85/86°C；日志未发现 traceback、CUDA OOM、NCCL 或 RuntimeError。换平台期间
+`iter200`--`iter800` 曾因专线不可达和 SSH 主机指纹变化同步失败；网络恢复后
+`iter1000`、`1200`、`1400`、`1600` 均成功发布到测评机。随后按用户要求用
+项目原子同步工具补传 `iter200`、`400`、`600`、`800`，已有文件按大小跳过；
+两端现有 `iter200`--`iter1600` 共 8 个模型 checkpoint 的 SHA-256 逐一一致，
+测评机 `.incoming` 无残留。随后在测评机重新启动本实验的升序持续评测 watcher，
+PID 为 `14673`，输出根为
+`data/logs/raenwm_rgb_fusion/native_cls_eval_lowlevel_bs16_20260902/`；它固定使用
+单卡、8 环境和完整 1,839 个 R2R `val_unseen` episode，已领取 `iter200` 并
+推进到 44/1,839，3090 显存约 12.8 GiB、利用率 100%，无加载或 CUDA 错误。
+训练进程自身继续为后续每 200 步的新 checkpoint 启动原子同步；watcher 会按
+升序跳过已有结果并持续领取新文件。更换平台后测评机系统时钟一度比训练机慢约
+2 小时 53 分，已在
+本地授权窗口中一次性校准到约 5 秒内；因测评机没有可用公网时间源，
+`timedatectl` 仍显示未持续 NTP 同步，后续应继续以文件大小和 SHA-256 判断同步
+完整性，而不是只比较两机本地时间戳。
+
+2026-09-02，测评机更换平台并改用 RTX 3090 24GB 后完成推理回归。恢复专用
+`gwl-etpr1-rae` 容器，在 `etpr1_rae` 环境确认 Python 3.11.15、PyTorch
+2.2.2+cu121、Transformers 4.49.0、CUDA 可用、Habitat/Habitat-Sim 0.3.3。
+低级上下文 E24 joint `iter200` 单 episode 推理退出 0，NWM `314/314` 匹配，
+SR/SPL 为 `1/1`。随后使用旧平台已有完整结果的 RGB-fusion `iter10000`
+checkpoint，以原高层上下文语义、单卡、8 环境完整复跑 1,839 个 R2R
+`val_unseen` episode，耗时 53 分 29 秒且无 traceback/CUDA/OOM 错误。新旧
+SR 为 `0.6329526917/0.6318651441`，SPL 为
+`0.5417617617/0.5415429860`，分别偏移 `+0.1088/+0.0219` 个百分点；nDTW、
+SDTW 分别偏移 `+0.0754/+0.0898` 个百分点，未见严重平台偏移。新结果和日志
+位于测评机 `data/logs/platform3090_validation/`。旧 4090 同一检查点评测耗时
+29 分 27 秒；新 3090 本次耗时 53 分 29 秒，表面上慢约 81.6%。但旧结果运行
+时测评机仍停在提交 `0e82d27`，新结果使用提交 `e46832d` 并显式把后来新增的
+上下文参数恢复为旧值 `high_level_nav_latent`。因此 checkpoint 和评测语义相同，
+但可执行代码并非同一提交；这组耗时不能作为纯 4090/3090 硬件对照。若要严格
+归因，需要在 3090 上使用 `0e82d27` 的代码原样复跑。
+
+2026-09-02，测评机更换平台但保留原硬盘后，重新核验三机网络。新平台只检测到
+RTL8125 2.5GbE 网卡 `enp6s0`，固定为 `10.10.10.2/24`，没有独立默认路由、
+互联网或可用的 Tailscale 入口。训练机 `enp5s0` 保持 `10.10.10.1/24`；双端
+协商为 2.5 Gbps 全双工，专线无丢包，笔记本通过 `server` 跳板登录测评机成功。
+笔记本到测评机的标准入口改为 `ssh -J server a6000@10.10.10.2`。测评机受限
+部署密钥已只读验证可通过 `10.10.10.1` 读取中央裸仓库；全局和项目
+`AGENTS.md` 已同步移除旧 `ssh eval`/Tailscale 入口并更新 Docker、GPU、管理员
+授权和 Git 同步示例。
+
+2026-09-02，按用户要求启动新的 R2R 原生 CLS RGB-only SFT 与升序完整测评，
+使用最新低级世界模型上下文代码，但不启用前瞻。训练源提交为 `e46832d`，配置
+`run_r2r/iter_train_rae_dino_native_cls_rgb_fusion.yaml` 明确使用上下文合同
+`r1_low_level_move_rgb_anchor_v1`、`rgb_fusion_enabled=True`、
+`rgb_fusion_trainable=True` 和 `ACTIVE_LOOKAHEAD.enabled=False`。任务从
+`base_iter14200.pth` weights-only 启动，双卡、每 rank 8 个 Habitat 环境、
+梯度累积 1，全局 batch 16，共 10,000 次更新，每 200 次保存并通过 2.5 GbE
+直连原子同步到测评机。实验名为
+`etpr1_native_cls_rgb_fusion_sft_lowlevel_bs16`，训练输出根为
+`data/logs/raenwm_rgb_fusion/native_cls_sft_lowlevel_bs16_20260902/`，训练机
+supervisor PID `3364601`。
+
+启动前训练机和测评机的 RGB-only/低级上下文针对性测试分别为
+`28 passed, 2 warnings` 和 `28 passed, 3 warnings`。启动后两个 rank 的 NWM
+均 `314/314` 匹配，已稳定跨过第 3 次更新，无 traceback、DDP 或显存错误；
+两张 A6000 均为 100% 利用率，显存约 21.1/19.6 GiB。测评机 watcher PID
+`1123911`，输出根为
+`data/logs/raenwm_rgb_fusion/native_cls_eval_lowlevel_bs16_20260902/`，实验名为
+`etpr1_native_cls_rgb_fusion_eval_lowlevel_bs16_watch`，固定单卡 8 环境、完整
+1,839 个 `val_unseen` episode、按 checkpoint 升序执行。交接时尚未到第 200
+次保存点，watcher 正常处于 `reason=no_checkpoints`；受保护的 ETPNav 容器未
+运行，4090 空闲。旧 RGB-only 完成态 watcher 仅保留 30 秒空轮询且无评测子进程。
+
+2026-09-02，按用户要求停止低级移动上下文 batch-16 原生 CLS E24 joint SFT，
+并同时停止测评机对应的升序 watcher 和当时正在执行的 `iter1600` 全量评测。
+训练机 supervisor、torchrun 和两个训练 rank 均已退出，两张 A6000 显存降至
+45/16 MiB、利用率为 0%；最后完整模型/训练状态对均为 `iter1600`。测评机
+watcher 退出后，Docker 内评测因位于独立进程组而未随 watcher 的 TERM 信号
+退出，随后按完整实验名精确终止该评测进程组；4090 降至 142 MiB、利用率为
+0%。两个 TensorBoard 和低级上下文指标归一化进程按用户范围保留运行。
 
 2026-09-01，将本轮低级上下文 batch-16 joint SFT 的增量评测接入笔记本
 `http://127.0.0.1:6008/`。该端口继续由用户级 SSH 隧道映射到测评容器 6009，
