@@ -85,27 +85,40 @@ def main():
         if iterations != sorted(set(iterations)) or not iterations or min(iterations) < 1:
             parser.error("--eval-iterations must be unique positive ascending iterations")
         summary = []
-        for iteration in iterations:
-            checkpoint = args.output + "/train/" + train_name + "/checkpoints/" + train_name + f"/ckpt.iter{iteration}.pth"
-            eval_name = name + f"_iter{iteration}"
-            eval_opts = dict(opts)
-            eval_opts.update({"EVAL.CKPT_PATH_DIR": str(ROOT / checkpoint), "EVAL.EPISODE_COUNT": args.episodes,
-                              "EVAL.SAVE_RESULTS": True, "EVAL.USE_CKPT_CONFIG": False, "EVAL.fast_eval": False})
-            execute(args, eval_name, eval_opts, checkpoint, "eval", config_file=CONFIG)
+        from rgb_only_optimization import save
+        if not args.dry_run:
+            save(ROOT / args.output / "eval_summary.json", {
+                "status": "waiting", "requested_iterations": iterations, "results": summary,
+            })
+        try:
+            for iteration in iterations:
+                checkpoint = args.output + "/train/" + train_name + "/checkpoints/" + train_name + f"/ckpt.iter{iteration}.pth"
+                eval_name = name + f"_iter{iteration}"
+                eval_opts = dict(opts)
+                eval_opts.update({"EVAL.CKPT_PATH_DIR": str(ROOT / checkpoint), "EVAL.EPISODE_COUNT": args.episodes,
+                                  "EVAL.SAVE_RESULTS": True, "EVAL.USE_CKPT_CONFIG": False, "EVAL.fast_eval": False})
+                execute(args, eval_name, eval_opts, checkpoint, "eval", config_file=CONFIG)
+                if not args.dry_run:
+                    manifest = json.loads((ROOT / args.output / "eval" / eval_name / "manifest.json").read_text())
+                    # Require exact original IDs, not merely the expected count.
+                    if args.episodes == -1:
+                        from summarize_rgb_only_optimization import load_episodes, expected_ids
+                        ids = expected_ids(ROOT / "data/datasets/R2R_VLNCE_v1-3_preprocessed_xlmr/val_unseen/val_unseen.json.gz")
+                        load_episodes(manifest["validation"]["episode_result"], 1839, ids)
+                    summary.append({"iteration": iteration, "checkpoint_sha256": manifest["checkpoint_sha256"],
+                                    **manifest["validation"]})
+                    from rgb_only_optimization import save
+                    save(ROOT / args.output / "eval_summary.json", {
+                        "status": "completed" if iteration == iterations[-1] else "running",
+                        "requested_iterations": iterations, "results": summary,
+                    })
+        except Exception as exc:
             if not args.dry_run:
-                manifest = json.loads((ROOT / args.output / "eval" / eval_name / "manifest.json").read_text())
-                # Require exact original IDs, not merely the expected count.
-                if args.episodes == -1:
-                    from summarize_rgb_only_optimization import load_episodes, expected_ids
-                    ids = expected_ids(ROOT / "data/datasets/R2R_VLNCE_v1-3_preprocessed_xlmr/val_unseen/val_unseen.json.gz")
-                    load_episodes(manifest["validation"]["episode_result"], 1839, ids)
-                summary.append({"iteration": iteration, "checkpoint_sha256": manifest["checkpoint_sha256"],
-                                **manifest["validation"]})
-                from rgb_only_optimization import save
                 save(ROOT / args.output / "eval_summary.json", {
-                    "status": "completed" if iteration == iterations[-1] else "running",
+                    "status": "failed", "error": str(exc),
                     "requested_iterations": iterations, "results": summary,
                 })
+            raise
 
 
 if __name__ == "__main__":
