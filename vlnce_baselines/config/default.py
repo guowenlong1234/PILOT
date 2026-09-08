@@ -241,6 +241,7 @@ _C.MODEL.RAENWM.final_only_euler = False
 _C.MODEL.RAENWM.noise_seed = 0
 _C.MODEL.RAENWM.rgb_fusion_enabled = False
 _C.MODEL.RAENWM.rgb_fusion_type = "residual_gate"
+_C.MODEL.RAENWM.ghost_concat_hidden_dim = 1536
 _C.MODEL.RAENWM.rgb_fusion_alpha = 1.0
 _C.MODEL.RAENWM.rgb_fusion_zero_init = True
 _C.MODEL.RAENWM.rgb_fusion_gate_bias_init = -8.0

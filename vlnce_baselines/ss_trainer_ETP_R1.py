@@ -49,6 +49,10 @@ from vlnce_baselines.nwm.rgb_fusion import (
     apply_rgb_fusion_to_current_candidates,
     clone_wp_outputs_candidate_rgb,
 )
+from vlnce_baselines.nwm.ghost_concat_fusion import (
+    GhostConcatFusionAdapter,
+    apply_ghost_concat_to_graph,
+)
 from vlnce_baselines.nwm.low_level_context import (
     LOW_LEVEL_CONTEXT_DIAGNOSTIC_FORMAT,
     LOW_LEVEL_CONTEXT_DIAGNOSTIC_NAMES,
@@ -863,9 +867,16 @@ class RLTrainer(BaseVLNCETrainer):
     def _navigation_backbone_frozen(self):
         return bool(getattr(getattr(self.config, "IL", None), "freeze_navigation_backbone", False))
 
+    def _rgb_fusion_type(self):
+        return str(getattr(self.config.MODEL.RAENWM, "rgb_fusion_type", "residual_gate")).strip().lower()
+
+    def _ghost_concat_enabled(self):
+        return self._raenwm_rgb_fusion_enabled() and self._rgb_fusion_type() == "ghost_concat"
+
     def _rgb_fusion_navigation_contract(self):
-        return {
+        contract = {
             "freeze_navigation_backbone": self._navigation_backbone_frozen(),
+            "fusion_type": self._rgb_fusion_type(),
             "condition_source_pose": str(getattr(
                 getattr(self.config.MODEL, "RAENWM", None), "condition_source_pose", "context_last"
             )),
@@ -873,6 +884,17 @@ class RLTrainer(BaseVLNCETrainer):
                 getattr(self.config.MODEL, "RAENWM", None), "rgb_fusion_align_navigation_cls", False
             )),
         }
+        if contract["fusion_type"] == "ghost_concat":
+            width = int(getattr(self.config.MODEL.RAENWM, "ghost_concat_hidden_dim", 1536))
+            contract["ghost_concat"] = {
+                "format": "post_panorama_ghost_concat_v1",
+                "layer_dims": [1536, width, width, 768],
+                "observation": "raw_graph_ghost_mean",
+                "prediction": "dinov2_raw_cls",
+                "memory": "current_step_only",
+            }
+            contract["fusion_alpha"] = float(self.config.MODEL.RAENWM.rgb_fusion_alpha)
+        return contract
 
     def _configure_navigation_backbone_training(self):
         contract = self._rgb_fusion_navigation_contract()
@@ -890,13 +912,18 @@ class RLTrainer(BaseVLNCETrainer):
 
     def _validate_rgb_fusion_navigation_contract(self, checkpoint):
         expected = self._rgb_fusion_navigation_contract()
-        saved = checkpoint.get("rgb_fusion_navigation_contract", {
+        saved = dict(checkpoint.get("rgb_fusion_navigation_contract", {
             "freeze_navigation_backbone": False,
             "align_navigation_cls": False,
             "condition_source_pose": "query_current",
-        })
+        }))
+        saved.setdefault("fusion_type", "residual_gate")
         # A clean baseline has no adapter and is the intentional B/C start.
         if checkpoint.get("raenwm_rgb_fusion_adapter_state_dict") is not None:
+            if saved["fusion_type"] != expected["fusion_type"]:
+                raise ValueError("RGB fusion checkpoint injection structure mismatch")
+            if expected["fusion_type"] == "ghost_concat" and saved.get("ghost_concat") != expected["ghost_concat"]:
+                raise ValueError("Ghost concat checkpoint architecture/feature contract mismatch")
             if saved.get("align_navigation_cls") != expected["align_navigation_cls"]:
                 raise ValueError("RGB fusion checkpoint prediction alignment mismatch")
         if bool(self.config.IL.is_requeue) and saved != expected:
@@ -920,7 +947,7 @@ class RLTrainer(BaseVLNCETrainer):
         fusion_type = str(
             getattr(raenwm_config, "rgb_fusion_type", "residual_gate")
         ).strip().lower()
-        if fusion_type != "residual_gate":
+        if fusion_type not in {"residual_gate", "ghost_concat"}:
             raise ValueError(
                 f"Unsupported MODEL.RAENWM.rgb_fusion_type: {fusion_type}"
             )
@@ -931,24 +958,31 @@ class RLTrainer(BaseVLNCETrainer):
                 "RAE-NWM RGB fusion requires MODEL.RGB_ENCODER.type="
                 "rae_dinov2 and output_size=768"
             )
+        if fusion_type == "ghost_concat":
+            if self._active_lookahead_enabled() or not self._navigation_backbone_frozen():
+                raise ValueError("Ghost concat requires a frozen navigation backbone and E24 disabled")
+            if not bool(getattr(raenwm_config, "predict_cls_token", False)):
+                raise ValueError("Ghost concat requires native raw CLS predictions")
+            if bool(getattr(raenwm_config, "rgb_fusion_align_navigation_cls", False)):
+                raise ValueError("Ghost concat concatenates raw CLS; external navigation alignment must be disabled")
         if self.raenwm_rgb_fusion_adapter is None:
-            self.raenwm_rgb_fusion_adapter = RaeNwmRgbFusionAdapter(
-                input_dim=768,
-                hidden_dim=768,
-                zero_init=bool(
-                    getattr(raenwm_config, "rgb_fusion_zero_init", True)
-                ),
-                alpha=float(
-                    getattr(raenwm_config, "rgb_fusion_alpha", 1.0)
-                ),
-                gate_bias_init=float(
-                    getattr(
-                        raenwm_config,
-                        "rgb_fusion_gate_bias_init",
-                        -8.0,
-                    )
-                ),
-            ).to(self.device)
+            if fusion_type == "ghost_concat":
+                self.raenwm_rgb_fusion_adapter = GhostConcatFusionAdapter(
+                    input_dim=768,
+                    hidden_dim=int(getattr(raenwm_config, "ghost_concat_hidden_dim", 1536)),
+                    zero_init=bool(getattr(raenwm_config, "rgb_fusion_zero_init", True)),
+                    alpha=float(getattr(raenwm_config, "rgb_fusion_alpha", 1.0)),
+                ).to(self.device)
+                logger.info("Ghost concat: 1536 -> %d -> %d -> 768, batched current-step graph input only",
+                            self.raenwm_rgb_fusion_adapter.hidden_dim, self.raenwm_rgb_fusion_adapter.hidden_dim)
+            else:
+                self.raenwm_rgb_fusion_adapter = RaeNwmRgbFusionAdapter(
+                    input_dim=768,
+                    hidden_dim=768,
+                    zero_init=bool(getattr(raenwm_config, "rgb_fusion_zero_init", True)),
+                    alpha=float(getattr(raenwm_config, "rgb_fusion_alpha", 1.0)),
+                    gate_bias_init=float(getattr(raenwm_config, "rgb_fusion_gate_bias_init", -8.0)),
+                ).to(self.device)
         trainable = self._raenwm_rgb_fusion_trainable()
         self.raenwm_rgb_fusion_adapter.train(trainable)
         for parameter in self.raenwm_rgb_fusion_adapter.parameters():
@@ -1076,6 +1110,12 @@ class RLTrainer(BaseVLNCETrainer):
         summary = summarize_rgb_fusion_diagnostic_totals(
             raw_totals, world_size=int(getattr(self, "world_size", 1))
         )
+        if self._ghost_concat_enabled():
+            # These are graph embeddings and raw CLS, not comparable image
+            # features, and the concat adapter has no confidence gate.
+            for name in ("RGB_fusion_gate_mean", "RGB_fusion_gate_std",
+                         "RGB_fusion_cosine_mean", "RGB_fusion_cosine_std"):
+                summary.pop(name, None)
         for name, value in summary.items():
             self.logs[name].append(value)
         self._rgb_fusion_diagnostic_totals = None
@@ -1209,6 +1249,10 @@ class RLTrainer(BaseVLNCETrainer):
             "q0_first_stage_nwm_seconds": float(elapsed),
         }
         self.last_raenwm_prediction = prediction
+        if self._ghost_concat_enabled():
+            # Defer fusion until after the pure-observation graph update.
+            # The prediction is a local rollout value, never graph history.
+            return prediction
         self.last_raenwm_rgb_fusion_diagnostics = (
             apply_rgb_fusion_to_current_candidates(
                 wp_outputs,
@@ -1223,6 +1267,16 @@ class RLTrainer(BaseVLNCETrainer):
             self.last_raenwm_rgb_fusion_diagnostics,
         )
         return prediction
+
+    def _apply_ghost_concat_prediction(self, nav_inputs, prediction):
+        fused_inputs, diagnostics = apply_ghost_concat_to_graph(
+            nav_inputs, prediction, self.raenwm_rgb_fusion_adapter
+        )
+        self.last_raenwm_rgb_fusion_diagnostics = [diagnostics]
+        self._accumulate_rgb_fusion_diagnostics(
+            self.last_candidate_q0_prediction_diagnostics, [diagnostics]
+        )
+        return fused_inputs
 
     def _raenwm_rgb_fusion_applied_last_step(self):
         diagnostics = self.last_raenwm_rgb_fusion_diagnostics or []
@@ -3388,6 +3442,7 @@ class RLTrainer(BaseVLNCETrainer):
                     raenwm_front_cls = None
 
             fusion_enabled = self._raenwm_rgb_fusion_enabled()
+            ghost_concat_enabled = self._ghost_concat_enabled()
             if not fusion_enabled:
                 # Preserve the prediction-only path's original call order.
                 vp_inputs = self._vp_feature_variable(wp_outputs)
@@ -3461,7 +3516,9 @@ class RLTrainer(BaseVLNCETrainer):
                     )
 
             if fusion_enabled:
-                raw_wp_outputs = clone_wp_outputs_candidate_rgb(wp_outputs)
+                raw_wp_outputs = (
+                    None if ghost_concat_enabled else clone_wp_outputs_candidate_rgb(wp_outputs)
+                )
                 candidate_q0_prediction = self._run_raenwm_rgb_fusion_prediction(
                     raenwm_front_latents,
                     cur_pos,
@@ -3474,7 +3531,7 @@ class RLTrainer(BaseVLNCETrainer):
                 vp_inputs.update({'mode': 'panorama'})
                 pano_embeds, pano_masks = self.policy.net(**vp_inputs)
                 node_pano_embeds, node_pano_masks = pano_embeds, pano_masks
-                if self._raenwm_rgb_fusion_applied_last_step():
+                if not ghost_concat_enabled and self._raenwm_rgb_fusion_applied_last_step():
                     raw_vp_inputs = self._vp_feature_variable(raw_wp_outputs)
                     raw_vp_inputs.update({'mode': 'panorama'})
                     node_pano_embeds, node_pano_masks = self.policy.net(
@@ -3523,6 +3580,8 @@ class RLTrainer(BaseVLNCETrainer):
                     )
 
             nav_inputs = self._nav_gmap_variable(cur_vp, cur_pos, cur_ori, task_type)
+            if ghost_concat_enabled:
+                nav_inputs = self._apply_ghost_concat_prediction(nav_inputs, candidate_q0_prediction)
             nav_inputs.update({
                 'mode': 'navigation',
                 'txt_embeds': txt_embeds, 

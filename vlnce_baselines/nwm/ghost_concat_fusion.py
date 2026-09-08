@@ -1,0 +1,172 @@
+"""Temporary, batched prediction residuals on already encoded ghost features."""
+
+import math
+
+import torch
+from torch import nn
+
+
+class _ConcatResidualMlp(nn.Module):
+    def __init__(self, input_dim, hidden_dim, zero_init):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(2 * input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, input_dim),
+        )
+        if zero_init:
+            nn.init.zeros_(self.layers[-1].weight)
+            nn.init.zeros_(self.layers[-1].bias)
+
+    def forward(self, value):
+        return self.layers(value)
+
+
+class GhostConcatFusionAdapter(nn.Module):
+    """Learn a residual from concatenated graph observation and raw prediction.
+
+    Hidden layers never compress the concatenated input; only the output maps
+    back to the navigation dimension. There is no gate or feature subtraction.
+    """
+
+    def __init__(self, input_dim=768, hidden_dim=1536, zero_init=True, alpha=1.0):
+        super().__init__()
+        self.input_dim = int(input_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.alpha = float(alpha)
+        if self.input_dim <= 0:
+            raise ValueError("input_dim must be > 0")
+        if self.hidden_dim < 2 * self.input_dim:
+            raise ValueError("hidden_dim must be >= 2 * input_dim (no bottleneck)")
+        if not math.isfinite(self.alpha):
+            raise ValueError("alpha must be finite")
+        self.residual = _ConcatResidualMlp(
+            self.input_dim, self.hidden_dim, bool(zero_init)
+        )
+
+    def forward(self, observed, pred_raw):
+        if not torch.is_tensor(observed) or not torch.is_tensor(pred_raw):
+            raise TypeError("observed and pred_raw must be tensors")
+        if observed.ndim != 2 or pred_raw.ndim != 2:
+            raise ValueError("observed and pred_raw must have shape [N, D]")
+        if observed.shape != pred_raw.shape:
+            raise ValueError("observed and pred_raw must have the same shape")
+        if observed.shape[-1] != self.input_dim:
+            raise ValueError("feature dimension must match input_dim")
+        if observed.device != pred_raw.device or observed.dtype != pred_raw.dtype:
+            raise ValueError("observed and pred_raw must have the same device/dtype")
+
+        valid = torch.isfinite(observed).all(-1) & torch.isfinite(pred_raw).all(-1)
+        if self.alpha == 0.0:
+            # Multiplying NaN by zero would not disable injection.
+            return observed, {
+                "valid_mask": valid.detach(),
+                "fusion_delta_norm": observed.new_zeros(observed.shape[0]),
+            }
+        safe_observed = torch.where(valid[:, None], observed, torch.zeros_like(observed))
+        safe_prediction = torch.where(valid[:, None], pred_raw, torch.zeros_like(pred_raw))
+        delta = self.alpha * self.residual(torch.cat([safe_observed, safe_prediction], -1))
+        proposed = safe_observed + delta
+        valid = valid & torch.isfinite(proposed).all(-1)
+        fused = torch.where(valid[:, None], proposed, observed)
+        safe_delta = torch.where(valid[:, None], delta, torch.zeros_like(delta))
+        return fused, {
+            "valid_mask": valid.detach(),
+            "fusion_delta_norm": safe_delta.detach().float().norm(dim=-1),
+        }
+
+
+def _empty_diagnostics(features):
+    zero = features.new_zeros((), dtype=torch.float64)
+    return {name: zero.clone() for name in (
+        "eligible_candidate_count", "fused_candidate_count",
+        "invalid_prediction_count", "fusion_delta_norm_sum",
+        "fusion_delta_norm_square_sum", "fusion_delta_norm_count",
+    )}
+
+
+def apply_ghost_concat_to_graph(nav_inputs, prediction, adapter):
+    """Return a new graph input, leaving persistent observations untouched.
+
+    CPU metadata identifies rows across all environments. GPU gathers, masks,
+    one adapter forward, and an out-of-place index_copy process them together.
+    No per-ghost device transfers, scalar reads, or prediction cache are used.
+    Diagnostics are device scalars; the caller decides when to synchronize.
+    """
+    features = nav_inputs["gmap_img_fts"]
+    if features.ndim != 3:
+        raise ValueError("gmap_img_fts must have shape [B, L, D]")
+    diagnostics = _empty_diagnostics(features)
+    pred_raw = getattr(prediction, "pred_cls_raw", None)
+    if pred_raw is None:
+        return nav_inputs, diagnostics
+    if not torch.is_tensor(pred_raw):
+        pred_raw = torch.as_tensor(pred_raw)
+    records = list((getattr(prediction, "meta", None) or {}).get("records", []))
+    if pred_raw.ndim != 2 or pred_raw.shape[-1] != features.shape[-1]:
+        raise ValueError("pred_cls_raw must have shape [N, graph feature dimension]")
+    if pred_raw.shape[0] != len(records):
+        raise ValueError("prediction row count does not match records")
+
+    batch_size, graph_len, feature_dim = features.shape
+    vp_ids = nav_inputs["gmap_vp_ids"]
+    if len(vp_ids) != batch_size:
+        raise ValueError("gmap_vp_ids length must match graph batch size")
+    graph_lookup = {}
+    for env_index, ids in enumerate(vp_ids):
+        if len(ids) > graph_len:
+            raise ValueError("gmap_vp_ids length exceeds padded graph length")
+        for col, vp in enumerate(ids):
+            if vp is None or not str(vp).startswith("g"):
+                continue
+            key = (env_index, str(vp))
+            if key in graph_lookup:
+                raise ValueError("Duplicate ghost id in graph: %s" % (key,))
+            graph_lookup[key] = env_index * graph_len + col
+
+    graph_rows, prediction_rows, seen = [], [], set()
+    for row, record in enumerate(records):
+        key = (int(record.env_index), str(record.ghost_vp))
+        if key in seen:
+            raise ValueError("Duplicate RAE-NWM prediction record for %s" % (key,))
+        seen.add(key)
+        if key in graph_lookup:
+            graph_rows.append(graph_lookup[key])
+            prediction_rows.append(row)
+    if not graph_rows:
+        return nav_inputs, diagnostics
+
+    masks = nav_inputs["gmap_masks"]
+    visited = nav_inputs["gmap_visited_masks"]
+    if masks.shape != features.shape[:2] or visited.shape != features.shape[:2]:
+        raise ValueError("graph masks must have shape [B, L]")
+    # Transfer index vectors once; never inspect CUDA masks from Python.
+    graph_index = torch.tensor(graph_rows, device=features.device, dtype=torch.long)
+    pred_index = torch.tensor(prediction_rows, device=pred_raw.device, dtype=torch.long)
+    predicted = pred_raw.index_select(0, pred_index).to(device=features.device, dtype=features.dtype)
+    flat_features = features.reshape(-1, feature_dim)
+    observed = flat_features.index_select(0, graph_index)
+    eligible = masks.reshape(-1).index_select(0, graph_index).bool()
+    eligible = eligible & ~visited.reshape(-1).index_select(0, graph_index).bool()
+    # Mask before the MLP as well as after it: invalid/padded rows must not
+    # contribute non-finite activations or gradients to shared parameters.
+    safe_observed = torch.where(eligible[:, None], observed, torch.zeros_like(observed))
+    safe_predicted = torch.where(eligible[:, None], predicted, torch.zeros_like(predicted))
+    fused, row_diagnostics = adapter(safe_observed, safe_predicted)
+    valid = eligible & row_diagnostics["valid_mask"]
+    replacements = torch.where(valid[:, None], fused, observed)
+    output = dict(nav_inputs)
+    output["gmap_img_fts"] = flat_features.index_copy(0, graph_index, replacements).reshape_as(features)
+    applied = valid if adapter.alpha != 0.0 else torch.zeros_like(valid)
+    norms = torch.where(applied, row_diagnostics["fusion_delta_norm"], 0).double()
+    diagnostics.update({
+        "eligible_candidate_count": eligible.sum().detach(),
+        "fused_candidate_count": applied.sum().detach(),
+        "invalid_prediction_count": (eligible & ~valid).sum().detach(),
+        "fusion_delta_norm_sum": norms.sum(),
+        "fusion_delta_norm_square_sum": norms.square().sum(),
+        "fusion_delta_norm_count": applied.sum().detach(),
+    })
+    return output, diagnostics

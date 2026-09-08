@@ -103,7 +103,7 @@ def resources(machine, gpus):
             lock.close()
 
 
-def execute(args, name, overrides, checkpoint, mode, expected_iteration=None):
+def execute(args, name, overrides, checkpoint, mode, expected_iteration=None, config_file=None):
     root = ROOT / args.output
     job = root / ("train" if mode == "dagger" else "eval") / name
     manifest_path = job / "manifest.json"
@@ -111,7 +111,7 @@ def execute(args, name, overrides, checkpoint, mode, expected_iteration=None):
     opts.update({"CHECKPOINT_FOLDER": str(job / "checkpoints") + "/",
                  "TENSORBOARD_DIR": str(job / "tensorboard") + "/",
                  "RESULTS_DIR": str(job / "results") + "/"})
-    command = ["run.py", "--exp_name", name, "--run-type", mode, "--exp-config", CONFIG]
+    command = ["run.py", "--exp_name", name, "--run-type", mode, "--exp-config", config_file or CONFIG]
     for key, value in opts.items():
         command.extend([key, str(value)])
     if mode == "dagger":

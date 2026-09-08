@@ -610,6 +610,9 @@ class RLTrainer(BaseVLNCETrainer):
         observation_space: Space,
         action_space: Space,
     ):
+        nwm = getattr(config.MODEL, "RAENWM", None)
+        if str(getattr(nwm, "rgb_fusion_type", "residual_gate")) == "ghost_concat":
+            raise ValueError("Post-panorama ghost concat is supported by SS-ETP-R1 train/eval/inference only; GRPO integration is not enabled")
         start_iter = 0
         policy = baseline_registry.get_policy(self.config.MODEL.policy_name)
         self.policy = policy.from_config(
