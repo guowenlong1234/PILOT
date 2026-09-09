@@ -120,6 +120,20 @@ def main():
                     handles.append(module.register_forward_hook(capture_inputs, with_kwargs=True))
             model(**inputs)
             for handle in handles: handle.remove()
+            # Real BF16 gate inputs demonstrate the intermediate-rounding
+            # change independently of the sampler, attention, and weights.
+            mlp, mlp_args, _, _ = samples['blocks.0.mlp']
+            x1,x2 = mlp.w12(*mlp_args).chunk(2,dim=-1)
+            def gate(a,b): return F.silu(a)*b
+            gate_eager=gate(x1,x2)
+            gate_compiled=compile_fn(gate)(x1,x2)
+            gate_fp32=gate(x1.float(),x2.float()).to(x1.dtype)
+            report['real_bf16_gate'] = {
+                'compiled_vs_eager':metrics(gate_compiled,gate_eager),
+                'compiled_vs_fp32_intermediates':metrics(gate_compiled,gate_fp32),
+                'fp32_intermediates_vs_eager':metrics(gate_fp32,gate_eager),
+                'output_projection_effect':metrics(mlp.w3(gate_compiled),mlp.w3(gate_eager))}
+            print('BF16_GATE '+json.dumps(report['real_bf16_gate']),flush=True)
             report['modules'] = {}
             for name, (module,a,kw,out) in samples.items():
                 value = compile_fn(module)(*a, **kw)
