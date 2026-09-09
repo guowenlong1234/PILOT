@@ -71,7 +71,7 @@ def make_encoder():
     from vlnce_baselines.models.encoders.rae_dinov2_encoder import RaeDinov2RgbEncoder
     from vlnce_baselines.nwm.runtime import RaeNwmLatentNormalizer
     from vlnce_baselines.nwm.raenwm_core.models import pack_cls_patch
-    encoder=RaeDinov2RgbEncoder('pretrained/rae_dinov2_with_registers_base',precision='float32').cuda().eval()
+    encoder=RaeDinov2RgbEncoder('pretrained/rae_dinov2_with_registers_base',device=torch.device('cuda:0'),precision='float32').cuda().eval()
     encoder.requires_grad_(False)
     normalizer=RaeNwmLatentNormalizer('pretrained/raenwm_stage0/stat.pt').cuda()
     def encode(images):
