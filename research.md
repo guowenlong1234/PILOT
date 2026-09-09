@@ -131,6 +131,7 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 
 ## Current Caveats And Open Questions
 
+- 2026-09-09 已按用户要求把`world_exact_select`接为主工作区ghost_concat训练/评测默认：全局auto在低级native CLS ghost配置解析为新模式，当前ghost YAML与CLI明确默认新模式；环境按已访问历史位姿提供全景，runtime维护与reset/pause一致的历史并调用目标对齐预测。旧E24保持front并拒绝新源快照合同。旧front权重仅允许非续训迁移，新/旧上下文跨模式恢复被拒绝；新检查点保存panorama元数据。87项相关测试、双环境19查询（10倒序端点）及2步联合训练通过，479策略张量与CLS映射更新、冻结视觉未变。说明见`docs/ghost-concat-fusion-implementation-20260908.md`，训练机日志`data/logs/panorama_default_20260909/`；无长任务或导航性能结论。
 - 2026-09-09 全景上下文预测质量实现已完成：11场景22短片段、288实际查询；6场景162目标比较7方案，预先锁定`world_exact_select`，另5场景126目标×3噪声复核，场景等权CLS0.6950→0.8267、图块0.5707→0.7049、RMSE下降24.46%，5场景均提升、108/126目标改善。>90度组CLS0.6191→0.8413。44项测试和真实可复用接口/缓存检查通过，推荐配置`configs/nwm/panorama_context_quality_best.yaml`，完整报告`docs/nwm-context-quality-results-20260909.md`。世界模型与策略权重未训练，原导航默认链路未切换，本次没有导航性能结论。
 - 2026-09-09 该实现最初位于用户授权的独立全景上下文实现分支`feature/nwm-panorama-context`，两端目录后缀`ETP-R1-wm-context`。新增`panorama_context.py`实现全景取视图、固定目标位姿及虚拟源条件，`panorama_runtime.py`提供真实已观测全景的缓存与批量预测，独立质量基准按11场景中的6/5场景选择/复核，规则见`docs/nwm-context-quality-plan-20260909.md`。世界模型4帧没有独立时间顺序编码，重排本身近似不改变输出；可变因素是方向图像和参考源条件。正式产物保留训练机新目录`data/logs/nwm_context_quality_20260909/formal_v3/`，已完成的预测质量结论见结果报告，不测试导航SR/SPL。
 - 2026-09-09 进一步核查虚拟时间倒序发现关键架构事实：75k模型4帧使用完全相同的冻结空间位置编码，没有帧顺序/每帧时间标记，拼接后作无时间掩码交叉注意力。真实样本固定条件噪声仅倒序，预测余弦0.9999549；单次FP32前向最大差5.72e-6、余弦1.0。应修正“倒序本身让现有模型识别前进运动”的解释；主要可变因素是选视角、新参考源及目标条件。新算法推导见`docs/nwm-virtual-trajectory-algorithm-20260909.md`，顺序诊断退出0，未改生产模型或训练。

@@ -56,4 +56,4 @@ prediction = runtime.predict(
 
 训练机新工作区使用`bash scripts/rgb_only_optimization_runtime.sh server ...`；环境没有安装或升级。完整实验入口和选择规则见`nwm-context-quality-plan-20260909.md`。`scripts/check_panorama_runtime.py`用真实全景、目标与固定噪声，把可复用接口和离线基准的同一输入对照，同时检查缓存第二次调用无需重新编码且结果相同。
 
-本轮没有将该接口切换为生产导航默认，也没有重新训练策略或报告导航SR/SPL。将它接入导航事件流时，需要真正采集低级历史全景，保留段边界，并在训练检查点中新增上下文格式/模式/相机布局元数据；不能把当前单前置上下文的训练状态当作相同输入合同直接续训。
+后续已按用户要求接入主工作区默认ghost_concat训练/评测链路：低级事件包含真实历史全景、重置及环境暂停同步维护缓存，新检查点保存全景元数据；旧front权重可做非续训初始化，旧训练状态不能跨上下文模式恢复。默认入口为`run_r2r/iter_train_rae_dino_ghost_concat.yaml`和`scripts/ghost_concat_job.py`；显式`--panorama-context-mode front`可复现旧前置链路。E24旧前瞻继续使用front。小规模默认运行及训练验证见`ghost-concat-fusion-implementation-20260908.md`，没有新增导航SR/SPL结论。
