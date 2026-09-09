@@ -591,7 +591,13 @@ class VLNCEDaggerEnv(habitat.RLEnv):
             poses.append(dict(position=self._raenwm_direct_history[token],
                 rotation=[0.,math.sin(yaw/2),0.,math.cos(yaw/2)]))
         started=time.perf_counter()
+        sim=getattr(getattr(self,'_env',None),'sim',None)
+        previous_obs=getattr(sim,'_prev_sim_obs',None)
+        frame_count=getattr(sim,'_num_total_frames',None)
         rendered=self._render_nwm_rgb_views(poses)
+        if sim is not None and (getattr(sim,'_prev_sim_obs',None) is not previous_obs or
+                                getattr(sim,'_num_total_frames',None)!=frame_count):
+            raise RuntimeError('direct history rendering changed simulator observation/action state')
         return dict(rgb=[x['rgb'] for x in rendered],count=len(rendered),seconds=time.perf_counter()-started)
 
     def _normalize_candidate_q0_trajectory(self, trajectory):
