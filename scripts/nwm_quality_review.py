@@ -46,7 +46,8 @@ def main():
         assert items
         entry={'scene':scene,'queries':len(items)}
         for field in paired[0]:
-            if field.startswith(('base_','winner_','delta_')):entry[field]=float(np.mean([x[field] for x in items]))
+            if field!='winner_source_index' and field.startswith(('base_','winner_','delta_')):
+                entry[field]=float(np.mean([x[field] for x in items]))
         per_scene.append(entry)
     rng=np.random.default_rng(909);uncertainty={}
     for metric in ['cls_cosine','patch_cosine','cls_rmse']:

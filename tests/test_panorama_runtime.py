@@ -61,3 +61,11 @@ def test_missing_history_does_not_duplicate_spatial_views_as_time():
     runtime=PanoramaPredictionRuntime(encoder=e,normalizer=Normalizer(),predictor=p,mode='world30',device='cpu')
     result=runtime.predict([PanoramaTarget(0,'a',(0,0,-2),0)],{0:h})
     assert result.meta['empty'] and e.frames==0 and not p.batches
+
+
+def test_validated_preset_rejects_missing_native_observations():
+    h=PanoramaHistory()
+    for i in range(4):h.append(frame(i))
+    runtime=PanoramaPredictionRuntime(encoder=Encoder(),normalizer=Normalizer(),predictor=Predictor(),mode='world_exact_select',device='cpu')
+    with pytest.raises(ValueError,match='native world direction bank'):
+        runtime.predict([PanoramaTarget(0,'a',(0,0,-2),0)],{0:h})
