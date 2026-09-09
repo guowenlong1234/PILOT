@@ -22,7 +22,7 @@ def main():
     p.add_argument('--output', required=True)
     p.add_argument('--inputs')
     p.add_argument('--capture', default='data/logs/panorama_perf_20260909/baseline_v1/capture0.pt')
-    p.add_argument('--variant', choices=['eager', 'aot_eager', 'default', 'nofusion', 'cudagraphs'], default='eager')
+    p.add_argument('--variant', choices=['eager', 'aot_eager', 'default', 'nofusion', 'cudagraphs', 'native'], default='eager')
     p.add_argument('--modules', action='store_true')
     args = p.parse_args()
     root = Path(args.output); root.mkdir(parents=True, exist_ok=True)
@@ -71,6 +71,9 @@ def main():
         if args.variant == 'eager': return fn
         if args.variant == 'aot_eager': return torch.compile(fn, backend='aot_eager', fullgraph=True)
         if args.variant == 'cudagraphs': return torch.compile(fn, backend='cudagraphs', fullgraph=True)
+        if args.variant == 'native':
+            from vlnce_baselines.nwm.compile_runtime import compile_frozen_world_model
+            return compile_frozen_world_model(fn)[0]
         return torch.compile(fn, fullgraph=True, options=options)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
