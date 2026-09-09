@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--log-every", type=int, default=200)
     parser.add_argument("--checkpoint", help="required for evaluation")
     parser.add_argument("--alpha", type=float, default=1.0)
+    parser.add_argument("--panorama-context-mode",choices=("auto","front","world_exact_select"),default="world_exact_select")
     parser.add_argument("--train-policy", action="store_true", help="jointly update navigation and fusion")
     parser.add_argument("--policy-lr", type=float, default=None)
     parser.add_argument("--fusion-lr", type=float, default=1e-5)
@@ -60,6 +61,7 @@ def main():
     name = train_name if args.action == "train" else prefix + "_eval"
     opts = common(args.gpus, args.batch if args.action == "train" else args.environments)
     opts.update({"MODEL.RAENWM.rgb_fusion_type": "ghost_concat",
+                 "MODEL.RAENWM.panorama_context_mode": args.panorama_context_mode,
                  "MODEL.RAENWM.ghost_concat_hidden_dim": 1536,
                  "MODEL.RAENWM.rgb_fusion_enabled": True,
                  "MODEL.RAENWM.rgb_fusion_trainable": True,

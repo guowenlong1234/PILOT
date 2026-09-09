@@ -59,6 +59,7 @@ from vlnce_baselines.nwm.low_level_context import (
     LOW_LEVEL_CONTEXT_SOURCE,
     LowLevelContextSynchronizer,
     context_metadata_from_config,
+    panorama_mode_from_config,
     normalize_context_source,
     summarize_low_level_context_diagnostics,
 )
@@ -836,6 +837,12 @@ class RLTrainer(BaseVLNCETrainer):
             for key, value in expected.items()
             if saved.get(key) != value
         }
+        if mismatches and expected.get("panorama_context_mode") == "world_exact_select":
+            panorama_keys = {key for key in expected if key.startswith("panorama_")}
+            is_resume = bool(getattr(getattr(self.config,"IL",None),"is_requeue",False))
+            if set(mismatches) <= panorama_keys and not any(key in saved for key in panorama_keys) and not is_resume:
+                logger.warning("Loading legacy front-context weights with default world_exact_select; optimizer state is not resumed")
+                return dict(saved)
         if mismatches:
             raise ValueError(
                 f"NWM context checkpoint metadata mismatch: {mismatches}"
@@ -846,6 +853,8 @@ class RLTrainer(BaseVLNCETrainer):
         if not self._raenwm_enabled():
             return
         nwm = self.config.MODEL.RAENWM
+        if panorama_mode_from_config(nwm) != "front" and self._active_lookahead_enabled():
+            raise ValueError("default panorama context requires E24 disabled; legacy E24 must explicitly use front")
         metadata = context_metadata_from_config(nwm)
         if metadata["context_source"] != LOW_LEVEL_CONTEXT_SOURCE:
             return

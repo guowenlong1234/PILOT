@@ -124,7 +124,10 @@ class PanoramaPredictionRuntime:
             part=pending_items[start:start+self.encode_batch_size]
             rgb=np.stack([frame.front_rgb if self.mode=='front' else
                 observed_view(frame.cube_rgb,yaw,frame.native_world_rgb12) for _,(frame,_,yaw) in part])
-            cls,patch=self.encoder.forward_raw_cls_and_patch_latents({'rgb':rgb})
+            # Match the verified FP32 visual representation inside SFT's outer
+            # autocast too; this raw-only call never touches the navigation MLP.
+            with torch.autocast(device_type=self.device.type,enabled=False):
+                cls,patch=self.encoder.forward_raw_cls_and_patch_latents({'rgb':rgb})
             tokens=pack_cls_patch(self.normalizer.normalize_cls(cls),self.normalizer.normalize_patch(patch)).detach().half().cpu()
             for token,(batchkey,(frame,cachekey,_)) in zip(tokens,part):
                 features[batchkey]=token;frame._cache[cachekey]=token

@@ -24,6 +24,7 @@ from vlnce_baselines.nwm.low_level_context import (
     LOW_LEVEL_CONTEXT_SOURCE,
     context_metadata_from_config,
     normalize_context_source,
+    panorama_mode_from_config,
 )
 
 
@@ -215,6 +216,11 @@ class NwmPredictionRuntime:
             getattr(config, "context_source", None)
         )
         self.context_metadata = context_metadata_from_config(config)
+        self.panorama_mode = panorama_mode_from_config(config)
+        self.panorama_predictor = None
+        self.panorama_histories = []
+        self._panorama_segments = []
+        self._panorama_frame_counter = 0
         if (
             self.context_source == LOW_LEVEL_CONTEXT_SOURCE
             and not self.predict_cls_token
@@ -337,11 +343,27 @@ class NwmPredictionRuntime:
 
     def reset(self, num_envs: int) -> None:
         self.adapter.reset(num_envs)
+        if getattr(self,"panorama_mode","front") != "front":
+            from .panorama_runtime import PanoramaHistory
+            self.panorama_histories = [PanoramaHistory() for _ in range(num_envs)]
+            self._panorama_segments = [0] * num_envs
         self.last_batch = None
         self.last_prediction = None
 
     def pause_at(self, env_index: int) -> None:
         self.adapter.pause_at(env_index)
+        if getattr(self,"panorama_mode","front") != "front":
+            del self.panorama_histories[env_index]
+            del self._panorama_segments[env_index]
+
+    def configure_panorama_encoder(self, encoder):
+        from .panorama_runtime import PanoramaPredictionRuntime
+        self.panorama_predictor = PanoramaPredictionRuntime(
+            encoder=encoder,normalizer=self.normalizer,predictor=self.predictor,
+            mode=self.panorama_mode,device=self.device,
+            encode_batch_size=int(getattr(self.config,"panorama_encode_batch_size",16)),
+            prediction_batch_size=int(getattr(self.config,"panorama_prediction_batch_size",8)),
+            cached_views_per_frame=int(getattr(self.config,"panorama_cached_views_per_frame",12)))
 
     def update_contexts(
         self,
@@ -414,6 +436,9 @@ class NwmPredictionRuntime:
             env_index = int(event.get("env_index", -1))
             if event_type == "reset":
                 self.adapter.clear_at(env_index)
+                if getattr(self,"panorama_mode","front") != "front":
+                    self.panorama_histories[env_index].clear()
+                    self._panorama_segments[env_index] += 1
             elif event_type == "frame":
                 frame_index = int(event.get("frame_index", -1))
                 if frame_index < 0 or frame_index >= len(frame_events):
@@ -425,6 +450,16 @@ class NwmPredictionRuntime:
                     yaw=float(event.get("yaw")),
                     latent=normalized_tokens[frame_index],
                 )
+                if getattr(self,"panorama_mode","front") != "front":
+                    from .panorama_runtime import ObservedPanoramaFrame
+                    observed = event.get("panorama")
+                    if not isinstance(observed,Mapping) or observed.get("format") != "observed_panorama_v1":
+                        raise ValueError("default panorama context requires observed panorama events")
+                    self._panorama_frame_counter += 1
+                    self.panorama_histories[env_index].append(ObservedPanoramaFrame(
+                        str(self._panorama_frame_counter),str(self._panorama_segments[env_index]),
+                        event["position"],float(event["yaw"]),observed["cube_rgb"],
+                        observed["native_world_rgb12"]))
             else:
                 raise ValueError(
                     f"Unknown low-level context event type: {event_type!r}"
@@ -439,6 +474,8 @@ class NwmPredictionRuntime:
     ):
         """Return a detached CPU copy of the normalized four-frame context."""
 
+        if getattr(self,"panorama_mode","front") != "front":
+            raise RuntimeError("panorama contexts do not support legacy E24 source snapshots")
         return self.adapter.source_context_snapshot(
             env_index,
             source_front_vp=source_front_vp,
@@ -468,6 +505,25 @@ class NwmPredictionRuntime:
         *,
         initial_noise: Optional[torch.Tensor] = None,
     ) -> NwmPrediction:
+        if getattr(self,"panorama_mode","front") != "front":
+            from .panorama_runtime import PanoramaTarget
+            if self.panorama_predictor is None:
+                raise RuntimeError("panorama encoder has not been configured")
+            targets = []
+            for query in queries:
+                record = self.adapter.build_ghost_condition(query.env_index,query.query_id,
+                    query.current_position,query.current_yaw,query.target_position)
+                target_yaw = float(query.current_yaw) + record.condition.dtheta
+                targets.append(PanoramaTarget(query.env_index,query.query_id,
+                    tuple(query.target_position),target_yaw))
+            self.last_batch = None
+            self.last_prediction = self.panorama_predictor.predict(targets,
+                dict(enumerate(self.panorama_histories)),initial_noise=initial_noise,generator=self.generator)
+            self._source_pose_prediction_calls += 1
+            if self._source_pose_prediction_calls == 1 or self._source_pose_prediction_calls % 128 == 0:
+                logging.getLogger(__name__).warning("NWM_PANORAMA mode=%s %s",self.panorama_mode,
+                    json.dumps(self.panorama_predictor.last_diagnostics))
+            return self.last_prediction
         requests = [
             RaeGhostInputRequest(
                 env_index=int(query.env_index),

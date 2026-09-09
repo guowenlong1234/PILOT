@@ -119,6 +119,22 @@ def context_contract_for_source(source: Any) -> str:
     return HIGH_LEVEL_CONTEXT_CONTRACT
 
 
+def panorama_mode_from_config(config: Any) -> str:
+    mode = str(getattr(config, "panorama_context_mode", "auto"))
+    if mode == "auto":
+        mode = ("world_exact_select" if
+                bool(getattr(config, "predict_cls_token", False)) and
+                getattr(config, "rgb_fusion_type", "") == "ghost_concat" and
+                getattr(config, "context_source", None) == LOW_LEVEL_CONTEXT_SOURCE
+                else "front")
+    if mode not in {"front", "world_exact_select"}:
+        raise ValueError("online panorama_context_mode must be auto/front/world_exact_select")
+    if mode != "front" and (getattr(config, "context_source", None) != LOW_LEVEL_CONTEXT_SOURCE or
+                            not bool(getattr(config, "predict_cls_token", False))):
+        raise ValueError("panorama context requires low-level native CLS mode")
+    return mode
+
+
 def context_metadata_from_config(config: Any) -> Dict[str, Any]:
     source = normalize_context_source(getattr(config, "context_source", None))
     batch_size = int(getattr(config, "low_level_encode_batch_size", 64))
@@ -148,6 +164,15 @@ def context_metadata_from_config(config: Any) -> Dict[str, Any]:
                 "encode_batch_size": batch_size,
             }
         )
+    mode = panorama_mode_from_config(config)
+    if mode != "front":
+        metadata.update({
+            "panorama_context_mode": mode,
+            "panorama_format": "nwm_observed_panorama_virtual_context_v2",
+            "panorama_encode_batch_size": int(getattr(config,"panorama_encode_batch_size",16)),
+            "panorama_prediction_batch_size": int(getattr(config,"panorama_prediction_batch_size",8)),
+            "panorama_cache_views": int(getattr(config,"panorama_cached_views_per_frame",12)),
+        })
     return metadata
 
 
@@ -506,6 +531,8 @@ class LowLevelContextSynchronizer:
         self.encoder = encoder
         self.device = torch.device(device)
         self.batch_size = int(batch_size)
+        if getattr(runtime,"panorama_mode","front") != "front":
+            runtime.configure_panorama_encoder(encoder)
         if self.batch_size <= 0:
             raise ValueError("low-level context encode batch size must be positive")
         if normalize_context_source(getattr(runtime, "context_source", None)) != (
@@ -658,6 +685,7 @@ class LowLevelContextSynchronizer:
                             "frame_index": frame_index,
                             "position": _as_position3(event.get("position")),
                             "yaw": _wrap_to_pi(float(event.get("yaw"))),
+                            **({"panorama": event["panorama"]} if "panorama" in event else {}),
                         }
                     )
                 else:

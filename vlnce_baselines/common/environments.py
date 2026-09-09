@@ -20,6 +20,7 @@ from vlnce_baselines.common.episode_iterator_state import (
     restore_episode_iterator_state,
 )
 from vlnce_baselines.nwm.low_level_context import (
+    panorama_mode_from_config,
     LOW_LEVEL_CONTEXT_SOURCE,
     LOW_LEVEL_RGB_SENSOR_UUID,
     LowLevelContextEventBuffer,
@@ -416,6 +417,7 @@ class VLNCEDaggerEnv(habitat.RLEnv):
         self.video_frames = []
         self.plan_frames = []
         raenwm_config = getattr(getattr(config, "MODEL", None), "RAENWM", None)
+        self.raenwm_panorama_mode = panorama_mode_from_config(raenwm_config)
         self.raenwm_context_source = normalize_context_source(
             getattr(raenwm_config, "context_source", None)
         )
@@ -541,7 +543,22 @@ class VLNCEDaggerEnv(habitat.RLEnv):
             raise RuntimeError(
                 "low-level context events requested while high-level mode is active"
             )
-        return self.raenwm_context_events.pop_payload()
+        payload = self.raenwm_context_events.pop_payload()
+        if getattr(self,"raenwm_panorama_mode","front") != "front":
+            from vlnce_baselines.nwm.panorama_context import cube_quaternions
+            quaternions = [[0.,math.sin(i*math.pi/12),0.,math.cos(i*math.pi/12)] for i in range(12)]
+            quaternions.extend(cube_quaternions()[4:])
+            for event in payload["events"]:
+                if event["type"] != "frame":
+                    continue
+                # Only past observed positions enter this path. No candidate
+                # or target pose is available to the history collector.
+                views = self._render_nwm_rgb_views([
+                    {"position":event["position"],"rotation":rotation} for rotation in quaternions])
+                rgb = np.stack([v["rgb"] for v in views])
+                event["panorama"] = {"format":"observed_panorama_v1",
+                    "cube_rgb":rgb[[0,3,6,9,12,13]],"native_world_rgb12":rgb[:12]}
+        return payload
 
     def _normalize_candidate_q0_trajectory(self, trajectory):
         """Normalize each temporary action endpoint on the start navmesh island."""
@@ -763,6 +780,10 @@ class VLNCEDaggerEnv(habitat.RLEnv):
         Caller separates observed-history requests from oracle target labels.
         Production context construction uses recorded images, never this API.
         """
+        return self._render_nwm_rgb_views(requests,check_navigability=True)
+
+    def _render_nwm_rgb_views(self, requests, check_navigability=False):
+        """Render calibrated views at a common optical center and restore state."""
         sim = self._env.sim
         before = sim.get_agent_state()
         rgb_offset = quaternion_rotate_vector(
@@ -787,7 +808,7 @@ class VLNCEDaggerEnv(habitat.RLEnv):
                 sensor_uuid='rgb')
             result.append({'rgb': np.asarray(rgb).copy(),
                            'camera_center_error_m':center_error,
-                           'navigable': bool(sim.is_navigable(request['position']))})
+                           **({'navigable':bool(sim.is_navigable(request['position']))} if check_navigability else {})})
         after = sim.get_agent_state()
         if not np.allclose(before.position, after.position, atol=1e-7, rtol=0):
             raise RuntimeError('diagnostic rendering changed agent position')

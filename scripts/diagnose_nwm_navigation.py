@@ -167,6 +167,7 @@ def main():
     VectorEnv.step = record_step
     opts = common('0', 1)
     opts.update({'IL.freeze_navigation_backbone': False, 'IL.lr': 2e-6,
+        'MODEL.RAENWM.panorama_context_mode': 'front',
         'IL.rgb_fusion_lr': 1e-5, 'EVAL.CKPT_PATH_DIR': str(Path(args.checkpoint).resolve()),
         'EVAL.EPISODE_COUNT': args.episodes, 'EVAL.SAVE_RESULTS': True,
         'EVAL.USE_CKPT_CONFIG': False, 'EVAL.fast_eval': False,

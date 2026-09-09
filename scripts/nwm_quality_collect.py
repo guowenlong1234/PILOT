@@ -103,6 +103,7 @@ def main():
     RLTrainer._run_raenwm_rgb_fusion_prediction=hook;VectorEnv.step=step
     opts=common('0',1)
     opts.update({'IL.freeze_navigation_backbone':False,'IL.lr':2e-6,'IL.rgb_fusion_lr':1e-5,
+        'MODEL.RAENWM.panorama_context_mode':'front',
         'EVAL.CKPT_PATH_DIR':str(Path(args.checkpoint).resolve()),'EVAL.EPISODE_ID':str([args.episode]),
         'EVAL.EPISODE_COUNT':1,'EVAL.SAVE_RESULTS':False,'EVAL.USE_CKPT_CONFIG':False,'EVAL.fast_eval':False,
         'CHECKPOINT_FOLDER':str(root/'unused_checkpoints')+'/',

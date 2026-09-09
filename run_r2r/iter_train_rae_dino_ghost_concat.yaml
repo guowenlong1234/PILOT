@@ -99,6 +99,7 @@ MODEL:
     context_size: 4
     max_buffer_size: 64
     context_source: low_level_move_rgb_anchor
+    panorama_context_mode: world_exact_select
     condition_source_pose: context_last
     low_level_encode_batch_size: 64
     metric_waypoint_spacing: 0.24975892673356762
@@ -133,4 +134,3 @@ TASK_CONFIG:
   SIMULATOR:
     HABITAT_SIM_V0:
       ALLOW_SLIDING: True
-
