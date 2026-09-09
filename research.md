@@ -6,6 +6,8 @@ ETP-R1 是一个 VLN-CE 项目：让智能体在连续三维环境里，根据�
 
 ## Quick Start And Environment
 
+本工作区为 2026-09-09 建立的 `perf/panorama-training` 独立性能优化分支：笔记本 `/home/sia/project/ETP-R1-perf`、训练机 `/home/gwl/project/etpr1/ETP-R1-perf`。原 10000 步任务及配套等待队列已按用户要求停止。基准与优化记录见 `docs/panorama-training-performance-20260909.md`，真实产物保存在训练机 `data/logs/panorama_perf_20260909/`（数据盘软链接）。使用训练机既有 `etpnav_unified`；新目录的 DINO 资产和用于隔离检查的运行时具有独立文件路径，避免放宽项目所有权检查。
+
 README 原始说明要求创建 `etpr1` conda 环境，核心环境为 Python 3.6.12、PyTorch 1.9.1+cu111，并使用 Habitat-Sim 0.1.7 和 Habitat-Lab 0.1.7。该说明和本机已有 `etpnav` 环境只用于了解旧 CLIP 链路，不作为本次 RAE/DINOv2 工作的运行方案。
 
 已检查本机状态：
@@ -183,6 +185,8 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 - 测评机只有一张 RTX 3090 24GB。现有 ETPNav 任务占用 GPU 时，不得并行启动全量特征生成、预训练、SFT、GRPO 或完整评测，也不得擅自中断 ETPNav。
 
 ## Last Reviewed
+
+2026-09-09，在独立性能工作区建立固定真实输入回放和双卡短训练基准。保留精确几何缓存、GPU 视觉缓存、跳过未使用 front 编码、GPU 双精度批量插值四项优化；逐项 6 步基准从 21.807 降至 16.641 秒/更新，固定输入预测保持逐元素相同。最终关闭分段同步的 12 步对照为 24.567→17.871 秒/更新，吞吐提升 37.47%；562 项回归通过，GPU 相关 25 项通过，两卡冻结视觉/路点/世界模型权重哈希不变，CLS 映射与融合层更新。编译与推理批量 16 试验因数值差异被拒绝。基准任务全部退出，原长训练保持停止；详见 `docs/panorama-training-performance-20260909.md`。
 
 2026-09-09，复查新全景 10000 步训练的冻结与性能：实际优化器为 375,128,067 个导航参数加 5,902,080 个融合参数，视觉骨干/路点/世界模型冻结。45 次采样双卡平均利用率 65.0%/48.4%，前 25 步更新耗时约为旧任务 2.14 倍（非同轨迹严格对照）。确认全景额外渲染、CPU 重投影、FP32 编码、特征往返与遗留 front 编码开销，未定量归因各阶段；详见 `docs/ghost-concat-panorama-performance-review-20260909.md`。
 
