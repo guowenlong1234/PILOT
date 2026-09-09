@@ -3,6 +3,7 @@
 import argparse
 from collections import defaultdict
 import json
+import hashlib
 import math
 from pathlib import Path
 import time
@@ -79,26 +80,39 @@ def score(args):
               ('direct_large_fp32','direct','float32',64,64),('direct_large_bf16','direct','bf16',64,64),
               ('direct_large_fp16','direct','fp16',64,64)]
     rows=[]
-    for entry in files:
-        data=torch.load(entry['file'],map_location='cpu',weights_only=False)
-        capture=torch.load(data['source'],map_location='cpu',weights_only=False)
-        histories={0:PanoramaHistory()}
-        for i in range(4):
-            histories[0].append(ObservedPanoramaFrame(str(i),'segment',capture['positions'][i],capture['yaws'][i],
-                capture['cube_rgb'][i],capture['native_world_rgb12'][i],render_token=str(i)))
-        targets=[PanoramaTarget(0,t['query'],tuple(t['position']),t['yaw']) for t in capture['targets']]
+    for part in ['development','confirmation']:
+      selected=[entry for entry in files if entry['split']==part]
+      for offset in range(0,len(selected),4):
+        group=selected[offset:offset+4];histories={};data_by_env={};targets=[];owners=[];truth_images=[]
+        for env_index,entry in enumerate(group):
+            data=torch.load(entry['file'],map_location='cpu',weights_only=False)
+            capture=torch.load(data['source'],map_location='cpu',weights_only=False)
+            data_by_env[env_index]=data;history=PanoramaHistory()
+            for i in range(4):
+                history.append(ObservedPanoramaFrame(str(i),'segment',capture['positions'][i],capture['yaws'][i],
+                    capture['cube_rgb'][i],capture['native_world_rgb12'][i],render_token=str(i)))
+            histories[env_index]=history
+            for t,rgb in zip(capture['targets'],capture['target_rgb']):
+                targets.append(PanoramaTarget(env_index,t['query'],tuple(t['position']),t['yaw']))
+                owners.append(entry);truth_images.append(rgb)
         def render(requests):
-            return np.stack([data['rgb'][data['keys'][(r['frame_id'],round(float(r['yaw']%(2*np.pi)),8))]] for r in requests])
+            return np.stack([data_by_env[r['env_index']]['rgb'][data_by_env[r['env_index']]['keys'][
+                (r['frame_id'],round(float(r['yaw']%(2*np.pi)),8))]] for r in requests])
         with torch.no_grad(),torch.autocast('cuda',enabled=False):
-            cls,patch=encoder.forward_raw_cls_and_patch_latents({'rgb':capture['target_rgb']})
+            cls,patch=encoder.forward_raw_cls_and_patch_latents({'rgb':np.stack(truth_images)})
             truth=pack_cls_patch(normalizer.normalize_cls(cls),normalizer.normalize_patch(patch))
-        seeds=[11] if entry['split']=='development' else [11,29,47]
+        seeds=[11] if part=='development' else [11,29,47]
         for name,source,precision,eb,pb in variants:
             runtime=PanoramaPredictionRuntime(encoder=encoder,normalizer=normalizer,predictor=predictor,
                 mode='world_exact_select',observation_source=source,visual_precision=precision,
                 encode_batch_size=eb,prediction_batch_size=pb,render_observed=render)
             for seed in seeds:
-                noise=torch.randn(len(targets),257,768,device='cuda',generator=torch.Generator(device='cuda').manual_seed(seed))
+                noises=[]
+                for target,entry in zip(targets,owners):
+                    uid=Path(entry['file']).parent.name+'_'+Path(entry['file']).stem+'_'+target.query_id
+                    noise_seed=int.from_bytes(hashlib.sha256((uid+':'+str(seed)).encode()).digest()[:8],'little')%(2**63-1)
+                    noises.append(torch.randn(257,768,device='cuda',generator=torch.Generator(device='cuda').manual_seed(noise_seed)))
+                noise=torch.stack(noises)
                 torch.cuda.synchronize();start=time.perf_counter()
                 pred=runtime.predict(targets,histories,initial_noise=noise);torch.cuda.synchronize();elapsed=time.perf_counter()-start
                 assert torch.isfinite(pred.pred_tokens).all()
@@ -106,13 +120,13 @@ def score(args):
                 cls_score=F.cosine_similarity(pcls,gt_cls,dim=-1)
                 patch_score=F.cosine_similarity(pred.pred_tokens[:,1:],truth[:,1:],dim=-1).mean(-1)
                 rmse=(pcls-gt_cls).square().mean(-1).sqrt()
-                for i,target in enumerate(targets):
+                for i,(target,entry) in enumerate(zip(targets,owners)):
                     rows.append(dict(scene=entry['scene'],split=entry['split'],capture=entry['file'],query=target.query_id,seed=seed,variant=name,
-                        cls_cosine=cls_score[i].item(),patch_cosine=patch_score[i].item(),cls_rmse=rmse[i].item(),seconds=elapsed/len(targets)))
-            # Release precision-specific caches before scoring the next mode.
+                        cls_cosine=cls_score[i].item(),patch_cosine=patch_score[i].item(),cls_rmse=rmse[i].item(),seconds=elapsed/len(targets),
+                        batch_queries=len(targets)))
             for h in histories.values():
                 for frame in h.frames:frame._cache.clear()
-        save(root/'quality_rows.json',rows);print('scored '+entry['file'],flush=True)
+        save(root/'quality_rows.json',rows);print('scored '+part+' group '+str(offset)+' queries '+str(len(targets)),flush=True)
     result={}
     for part in ['development','confirmation']:
         result[part]={}
