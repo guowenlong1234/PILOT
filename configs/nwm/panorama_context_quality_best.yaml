@@ -1,0 +1,36 @@
+# Selected on 6 development scenes before examining 5 confirmation scenes.
+# This config constructs the independent prediction runtime, not the trainer.
+format: nwm_observed_panorama_virtual_context_v2
+runtime:
+  mode: world_exact_select
+  encode_batch_size: 16
+  prediction_batch_size: 8
+  cached_views_per_frame: 12
+  require_native_views: true
+
+observation:
+  context_size: 4
+  cube_faces: [yaw0, yaw90, yaw180, yaw270, pitch90, pitch_minus90]
+  native_world_yaws_deg: [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330]
+  optical_center: identical_across_views
+  image_size: 224
+  hfov_deg: 90
+  break_history_at_teleport: true
+
+world_model:
+  config: configs/nwm/raenwm_mp3d_fresh_cls.yaml
+  checkpoint: pretrained/raenwm_native_cls/checkpoint_step_75000.pth.tar
+  checkpoint_sha256: 38b24af13b76ba8faef367559244c3a0401e0557e7c299870c273cbee8a07064
+  normalization_stat: pretrained/raenwm_stage0/stat.pt
+  stat_sha256: 84ede66def5e6e3f25679334dc89cf63b12aacb99cbf0f5ae7ed4ad3187f7e59
+  num_steps: 10
+
+validation:
+  selection: scene_macro_raw_cls_cosine
+  development_scenes: 6
+  development_queries: 162
+  confirmation_scenes: 5
+  confirmation_queries: 126
+  confirmation_noise_seeds: [11, 29, 47]
+  frozen_selection_file: data/logs/nwm_context_quality_20260909/formal_v3/selection.json
+  navigation_performance_validated: false

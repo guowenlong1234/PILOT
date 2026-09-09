@@ -757,6 +757,45 @@ class VLNCEDaggerEnv(habitat.RLEnv):
         ))
         return obs
 
+    def get_nwm_quality_views(self, requests):
+        """Diagnostic RGB at explicit poses; does not step or update context.
+
+        Caller separates observed-history requests from oracle target labels.
+        Production context construction uses recorded images, never this API.
+        """
+        sim = self._env.sim
+        before = sim.get_agent_state()
+        rgb_offset = quaternion_rotate_vector(
+            before.rotation.inverse(), before.sensor_states['rgb'].position-before.position)
+        if np.linalg.norm(np.asarray(rgb_offset)[[0,2]])>1e-5:
+            raise RuntimeError('quality capture expects the calibrated upright RGB offset')
+        result = []
+        for request in requests:
+            rotation = self._rotation_from_raenwm_values(request['rotation'])
+            # Rotate about the optical center, not the feet. Otherwise pitched
+            # cube faces translate the 1.25m sensor offset and create parallax.
+            center = np.asarray(request['position'])+rgb_offset
+            base_position = center-quaternion_rotate_vector(rotation,rgb_offset)
+            sim.set_agent_state(base_position,rotation,reset_sensors=False)
+            actual_center = sim.get_agent_state().sensor_states['rgb'].position
+            center_error = float(np.linalg.norm(actual_center-center))
+            sim.set_agent_state(before.position,before.rotation,reset_sensors=False)
+            if center_error>2e-5:
+                raise RuntimeError('cube optical centers differ')
+            rgb = sim.get_sensor_observation_at(
+                base_position, rotation,
+                sensor_uuid='rgb')
+            result.append({'rgb': np.asarray(rgb).copy(),
+                           'camera_center_error_m':center_error,
+                           'navigable': bool(sim.is_navigable(request['position']))})
+        after = sim.get_agent_state()
+        if not np.allclose(before.position, after.position, atol=1e-7, rtol=0):
+            raise RuntimeError('diagnostic rendering changed agent position')
+        if abs(float(np.dot(np.r_[before.rotation.imag,before.rotation.real],
+                            np.r_[after.rotation.imag,after.rotation.real]))) < 1-1e-7:
+            raise RuntimeError('diagnostic rendering changed agent rotation')
+        return result
+
     def current_dist_to_goal(self, is_train):
         init_state = self._env.sim.get_agent_state() 
         if is_train:
