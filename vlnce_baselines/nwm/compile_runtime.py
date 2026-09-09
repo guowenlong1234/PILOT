@@ -16,6 +16,7 @@ class NativeCudaGraphBackend:
         if max_graphs < 1:
             raise ValueError('max_graphs must be positive')
         self.max_graphs = max_graphs
+        self.name = 'native'
         self.graphs = OrderedDict()
         self.static_ptrs = {v.data_ptr() for v in list(model.parameters()) + list(model.buffers())}
         self.stats = dict(compilations=0, captures=0, replays=0, evictions=0)
@@ -64,11 +65,27 @@ class NativeCudaGraphBackend:
         return run
 
 
-def compile_frozen_world_model(model, max_graphs=4):
+class InductorBackend:
+    """Track dynamic graph compilation; retain standard Inductor numerics."""
+    name = 'inductor'
+
+    def __init__(self):
+        self.stats = dict(compilations=0)
+        self.graphs = {}
+
+    def __call__(self, gm, example_inputs):
+        self.stats['compilations'] += 1
+        return torch._inductor.compile(gm, example_inputs, options={'triton.cudagraphs': False})
+
+
+def compile_frozen_world_model(model, max_graphs=4, backend_name='native'):
+    if backend_name not in ('native', 'inductor'):
+        raise ValueError('Unknown NWM compiler backend: '+str(backend_name))
     if model.training or any(p.requires_grad for p in model.parameters()):
         raise ValueError('Only a frozen eval world model can be compiled')
     if next(model.parameters()).device.type != 'cuda':
         raise ValueError('World-model CUDA graph compilation requires CUDA')
-    backend = NativeCudaGraphBackend(model, max_graphs=max_graphs)
+    backend = (NativeCudaGraphBackend(model, max_graphs=max_graphs)
+               if backend_name == 'native' else InductorBackend())
     compiled = torch.compile(model, backend=backend, dynamic=True, fullgraph=True)
     return compiled, backend

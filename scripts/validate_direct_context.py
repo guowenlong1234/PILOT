@@ -71,7 +71,8 @@ def score(args):
     from vlnce_baselines.nwm.predictor import RaeNwmPredictor
     from vlnce_baselines.nwm.panorama_runtime import ObservedPanoramaFrame,PanoramaHistory,PanoramaTarget,PanoramaPredictionRuntime
     from vlnce_baselines.nwm.raenwm_core.models import pack_cls_patch
-    root=Path(args.output);files=json.loads((root/'prepared.json').read_text())
+    root=Path(args.output);root.mkdir(parents=True,exist_ok=True)
+    files=json.loads(Path(args.prepared or root/'prepared.json').read_text())
     encoder=RaeDinov2RgbEncoder('pretrained/rae_dinov2_with_registers_base',device=torch.device('cuda:0'),precision='ambient').eval()
     normalizer=RaeNwmLatentNormalizer('pretrained/raenwm_stage0/stat.pt').cuda()
     predictor=RaeNwmPredictor('configs/nwm/raenwm_mp3d_fresh_cls.yaml','pretrained/raenwm_native_cls/checkpoint_step_75000.pth.tar',
@@ -79,6 +80,14 @@ def score(args):
     variants=[('cube_fp32','cube','float32',16,8),('direct_fp32','direct','float32',16,8),
               ('direct_large_fp32','direct','float32',64,64),('direct_large_bf16','direct','bf16',64,64),
               ('direct_large_fp16','direct','fp16',64,64)]
+    eager_model=predictor.bundle.model
+    compiled_model=None
+    if args.compile_comparison:
+        from vlnce_baselines.nwm.compile_runtime import compile_frozen_world_model
+        compiled_model,backend=compile_frozen_world_model(eager_model)
+        variants=[('eager','direct','fp16',64,64),('compiled','direct','fp16',64,64)]
+        inductor_model,inductor_backend=compile_frozen_world_model(eager_model,backend_name='inductor')
+        variants.append(('inductor','direct','fp16',64,64))
     rows=[]
     for part in ['development','confirmation']:
       selected=[entry for entry in files if entry['split']==part]
@@ -102,7 +111,10 @@ def score(args):
             cls,patch=encoder.forward_raw_cls_and_patch_latents({'rgb':np.stack(truth_images)})
             truth=pack_cls_patch(normalizer.normalize_cls(cls),normalizer.normalize_patch(patch))
         seeds=[11] if part=='development' else [11,29,47]
+        paired_outputs={}
         for name,source,precision,eb,pb in variants:
+            predictor.bundle.model=compiled_model if name=='compiled' else eager_model
+            if name=='inductor':predictor.bundle.model=inductor_model
             runtime=PanoramaPredictionRuntime(encoder=encoder,normalizer=normalizer,predictor=predictor,
                 mode='world_exact_select',observation_source=source,visual_precision=precision,
                 encode_batch_size=eb,prediction_batch_size=pb,render_observed=render)
@@ -115,6 +127,11 @@ def score(args):
                 noise=torch.stack(noises)
                 torch.cuda.synchronize();start=time.perf_counter()
                 pred=runtime.predict(targets,histories,initial_noise=noise);torch.cuda.synchronize();elapsed=time.perf_counter()-start
+                parity_max=None
+                if args.compile_comparison:
+                    if name=='eager':paired_outputs[seed]=pred.pred_tokens.clone()
+                    else:
+                        parity_max=(pred.pred_tokens-paired_outputs[seed]).abs().max().item()
                 assert torch.isfinite(pred.pred_tokens).all()
                 gt_cls=normalizer.denormalize_cls(truth[:,0]);pcls=pred.pred_cls
                 cls_score=F.cosine_similarity(pcls,gt_cls,dim=-1)
@@ -124,6 +141,7 @@ def score(args):
                     rows.append(dict(scene=entry['scene'],split=entry['split'],capture=entry['file'],query=target.query_id,seed=seed,variant=name,
                         cls_cosine=cls_score[i].item(),patch_cosine=patch_score[i].item(),cls_rmse=rmse[i].item(),seconds=elapsed/len(targets),
                         batch_queries=len(targets)))
+                    if parity_max is not None:rows[-1]['compiled_max_abs']=parity_max
             for h in histories.values():
                 for frame in h.frames:frame._cache.clear()
         save(root/'quality_rows.json',rows);print('scored '+part+' group '+str(offset)+' queries '+str(len(targets)),flush=True)
@@ -137,9 +155,14 @@ def score(args):
                 for metric in ['cls_cosine','patch_cosine','cls_rmse']}
             result[part][name].update(scenes=len(scenes),query_seed_pairs=len(selected))
     save(root/'quality_summary.json',result);print(json.dumps(result,indent=2))
+    if args.compile_comparison:
+        save(root/'compiler.json',{'native':dict(backend.stats,cached_graphs=len(backend.graphs)),
+                                  'inductor':inductor_backend.stats})
 
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('action',choices=['prepare','score']);p.add_argument('--source',required=True);p.add_argument('--output',required=True)
+    p.add_argument('--prepared',help='reuse existing prepared manifest without copying images')
+    p.add_argument('--compile-comparison',action='store_true')
     a=p.parse_args();prepare(a) if a.action=='prepare' else score(a)

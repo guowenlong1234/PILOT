@@ -23,6 +23,8 @@ def main():
     p.add_argument('--capture', action='store_true')
     p.add_argument('--sync-stages', action='store_true')
     p.add_argument('--audit', action='store_true')
+    p.add_argument('--compile-model', action='store_true')
+    p.add_argument('--compile-backend',choices=['native','inductor'],default='native')
     p.add_argument('--context-mode',choices=('front','world_exact_select'),default='world_exact_select')
     p.add_argument('--observation-source',choices=('cube','direct'),default='cube')
     p.add_argument('--visual-precision',choices=('float32','fp16','bf16'),default='float32')
@@ -140,6 +142,9 @@ def main():
                 fusion_updated=fusion_before!=digest(self.raenwm_rgb_fusion_adapter.named_parameters()))
             assert all(audit.values()),audit
             report['audit']=audit
+        backend = getattr(self.raenwm_runtime.predictor, 'compile_backend', None)
+        if backend is not None:
+            report['compiler'] = dict(backend.stats, name=backend.name, cached_graphs=len(backend.graphs))
         (root/f'rank{rank}.json').write_text(json.dumps(report,indent=2))
         print('BENCHMARK '+json.dumps(report),flush=True)
         return result
@@ -147,6 +152,8 @@ def main():
     trainer_module.RLTrainer.save_checkpoint=lambda *a,**kw:None
     opts=common(','.join(map(str,range(world))),4)
     opts.update({'IL.freeze_navigation_backbone':False,'IL.lr':2e-6,'IL.rgb_fusion_lr':1e-5,
+        'MODEL.RAENWM.torch_compile':args.compile_model,
+        'MODEL.RAENWM.compile_backend':args.compile_backend,
         'IL.iters':args.updates,'IL.log_every':args.updates,'IL.batch_size':4,
         'IL.checkpoint_sync_enabled':False,'IL.is_requeue':False,
         'MODEL.RAENWM.panorama_context_mode':args.context_mode,

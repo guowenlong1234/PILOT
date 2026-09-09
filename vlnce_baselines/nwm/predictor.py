@@ -222,6 +222,7 @@ class RaeNwmPredictor:
         num_steps=None,
         final_only_euler=False,
         use_external_context_latents=False,
+        compile_backend_name='native',
     ):
         if enable_decoder:
             raise ValueError(
@@ -236,6 +237,8 @@ class RaeNwmPredictor:
         self.device = str(device)
         self.enable_decoder = bool(enable_decoder)
         self.torch_compile = bool(torch_compile)
+        self.compile_backend = None
+        self.compile_backend_name = compile_backend_name
         self.use_external_context_latents = bool(use_external_context_latents)
         self.config = load_merged_config(self.config_path)
         if num_steps is not None:
@@ -345,7 +348,9 @@ class RaeNwmPredictor:
         )
         model = _freeze_for_inference(model).to(device)
         if self.torch_compile:
-            model = torch.compile(model)
+            from .compile_runtime import compile_frozen_world_model
+            model, self.compile_backend = compile_frozen_world_model(model, backend_name=self.compile_backend_name)
+            print('[NWM] Compiler: '+self.compile_backend_name+', dynamic shapes')
 
         transport_config = config.get("transport", {})
         token_count = int(latent_size) * int(latent_size)
@@ -584,6 +589,7 @@ class RaeNwmHeadPredictor(RaeNwmPredictor):
         token_head_trainable=True,
         confidence_head_trainable=True,
         head_state_dict_override=None,
+        compile_backend_name='native',
     ):
         super().__init__(
             config_path=config_path,
@@ -595,6 +601,7 @@ class RaeNwmHeadPredictor(RaeNwmPredictor):
             num_steps=num_steps,
             final_only_euler=final_only_euler,
             use_external_context_latents=use_external_context_latents,
+            compile_backend_name=compile_backend_name,
         )
         resolved_head_checkpoint_path = head_checkpoint_path
         if resolved_head_checkpoint_path is None and head_config is None:

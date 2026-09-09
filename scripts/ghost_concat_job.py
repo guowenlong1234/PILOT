@@ -41,6 +41,8 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--sync", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--compile-model", action="store_true", help="compile frozen NWM with native-arithmetic CUDA graphs")
+    parser.add_argument('--compile-backend',choices=['native','inductor'],default='native')
     args = parser.parse_args()
     args.wait_ready = args.action == "watch"
     if args.policy_lr is None:
@@ -76,6 +78,9 @@ def main():
                  "IL.freeze_navigation_backbone": not args.train_policy})
     if args.train_policy:
         opts.update({"IL.lr": args.policy_lr, "IL.rgb_fusion_lr": args.fusion_lr})
+    if args.compile_model:
+        opts['MODEL.RAENWM.torch_compile'] = True
+        opts['MODEL.RAENWM.compile_backend'] = args.compile_backend
     for value,key in [(args.observation_source,'panorama_observation_source'),
                       (args.visual_precision,'panorama_visual_precision'),
                       (args.dino_batch,'panorama_encode_batch_size'),
