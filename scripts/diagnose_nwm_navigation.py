@@ -79,8 +79,10 @@ def main():
                     rotation = [0., math.sin(heading/2), 0., math.cos(heading/2)]
                     error = (heading_from_quaternion(rotation)-heading+math.pi)%(2*math.pi)-math.pi
                     assert abs(error) < 1e-5, error
-                    rgb = self.envs.call_at(rec.env_index, '_render_raenwm_context_rgb',
-                        {'position': np.asarray(position).tolist(), 'rotation': rotation})
+                    obs = self.envs.call_at(rec.env_index, 'get_observation_at',
+                        {'source_position': np.asarray(position).tolist(),
+                         'source_rotation': rotation, 'keep_agent_at_new_pose': False})
+                    rgb = obs['rgb']
                     images.append(np.asarray(rgb).copy())
                 encoder = self.raenwm_low_level_synchronizer.encoder
                 raw_cls, raw_patch = encoder.forward_raw_cls_and_patch_latents({'rgb': np.stack(images)})
