@@ -133,6 +133,8 @@ def panorama_mode_from_config(config: Any) -> str:
                 else "front")
     if mode not in {"front", "world_exact_select"}:
         raise ValueError("online panorama_context_mode must be auto/front/world_exact_select")
+    if mode == 'front' and getattr(config, 'panorama_observation_source', 'cube') == 'direct':
+        raise ValueError('direct observed rendering requires target-aligned context')
     if mode != "front" and (getattr(config, "context_source", None) != LOW_LEVEL_CONTEXT_SOURCE or
                             not bool(getattr(config, "predict_cls_token", False))):
         raise ValueError("panorama context requires low-level native CLS mode")
@@ -170,6 +172,10 @@ def context_metadata_from_config(config: Any) -> Dict[str, Any]:
         )
     mode = panorama_mode_from_config(config)
     if mode != "front":
+        observation_source = str(getattr(config, "panorama_observation_source", "cube"))
+        precision = str(getattr(config, "panorama_visual_precision", "float32"))
+        if observation_source not in {"cube", "direct"} or precision not in {"float32", "fp16", "bf16"}:
+            raise ValueError("invalid panorama observation source or visual precision")
         metadata.update({
             "panorama_context_mode": mode,
             "panorama_format": "nwm_observed_panorama_virtual_context_v2",
@@ -177,6 +183,10 @@ def context_metadata_from_config(config: Any) -> Dict[str, Any]:
             "panorama_prediction_batch_size": int(getattr(config,"panorama_prediction_batch_size",8)),
             "panorama_cache_views": int(getattr(config,"panorama_cached_views_per_frame",12)),
         })
+        if (observation_source != "cube" or precision != "float32"
+                or int(getattr(config,'panorama_prediction_batch_size',8)) != 8):
+            metadata.update(panorama_observation_source=observation_source,
+                            panorama_visual_precision=precision,panorama_noise_batch_size=8)
     return metadata
 
 
@@ -623,6 +633,25 @@ class LowLevelContextSynchronizer:
                 "low-level NWM buffer count does not match active environments"
             )
         payloads = envs.call(["pop_raenwm_context_events"] * num_envs)
+        if getattr(getattr(self.runtime, "config", None), "panorama_observation_source", "cube") == "direct":
+            def render_observed(requests):
+                grouped = [[] for _ in range(envs.num_envs)]
+                indices = [[] for _ in range(envs.num_envs)]
+                for index, request in enumerate(requests):
+                    env_index = int(request['env_index'])
+                    if not 0 <= env_index < envs.num_envs:
+                        raise ValueError('direct view request has invalid environment')
+                    grouped[env_index].append(dict(frame_id=request['frame_id'],yaw=request['yaw']))
+                    indices[env_index].append(index)
+                results = envs.call(['render_raenwm_observed_directions'] * envs.num_envs,
+                                   [{'requests': rows} for rows in grouped])
+                images = [None] * len(requests)
+                for ids, result in zip(indices, results):
+                    if len(ids) != len(result['rgb']):
+                        raise ValueError('direct render returned wrong row count')
+                    for index, rgb in zip(ids, result['rgb']):images[index] = rgb
+                return np.stack(images)
+            self.runtime.panorama_predictor.render_observed = render_observed
         if not isinstance(payloads, (list, tuple)) or len(payloads) != num_envs:
             raise ValueError("low-level event read returned the wrong environment count")
 
@@ -694,6 +723,7 @@ class LowLevelContextSynchronizer:
                             "position": _as_position3(event.get("position")),
                             "yaw": _wrap_to_pi(float(event.get("yaw"))),
                             **({"panorama": event["panorama"]} if "panorama" in event else {}),
+                            **({"rgb": frames[-1]} if getattr(self.runtime, "panorama_mode", "front") != "front" else {}),
                         }
                     )
                 else:
@@ -701,11 +731,18 @@ class LowLevelContextSynchronizer:
                         f"Unknown low-level context event type: {event_type!r}"
                     )
 
-        if frames and self.device.type == "cuda":
+        panorama_active = getattr(self.runtime, "panorama_mode", "front") != "front"
+        if frames and self.device.type == "cuda" and not panorama_active:
             torch.cuda.synchronize(self.device)
         started = time.perf_counter()
-        raw_cls, raw_patch, encode_batches = self._encode_frames(frames)
-        if frames and self.device.type == "cuda":
+        if panorama_active:
+            # Panorama prediction uses target-aligned views. Keep the recorded
+            # RGB and pose for adapter bookkeeping without encoding an unused
+            # front latent or imposing two device-wide barriers.
+            raw_cls, raw_patch, encode_batches = None, None, 0
+        else:
+            raw_cls, raw_patch, encode_batches = self._encode_frames(frames)
+        if frames and self.device.type == "cuda" and not panorama_active:
             torch.cuda.synchronize(self.device)
         encode_seconds = time.perf_counter() - started
         self.runtime.apply_low_level_context_events(
@@ -723,7 +760,7 @@ class LowLevelContextSynchronizer:
             "environment_count": float(num_envs),
             "reset_events": float(reset_events),
             "frame_events": float(len(frames)),
-            "encoded_frames": float(len(frames)),
+            "encoded_frames": 0.0 if panorama_active else float(len(frames)),
             "encode_batches": float(encode_batches),
             "encode_seconds": float(encode_seconds),
             "context_ready": float(ready),

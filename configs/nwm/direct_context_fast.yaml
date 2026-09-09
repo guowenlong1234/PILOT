@@ -1,0 +1,15 @@
+# Overlay after run_r2r/iter_train_rae_dino_ghost_concat.yaml.
+# Qualified on the training machine, two A6000 GPUs, four environments/rank.
+NUM_ENVIRONMENTS: 4
+IL:
+  freeze_navigation_backbone: False
+  batch_size: 4
+  lr: 2.0e-6
+  rgb_fusion_lr: 1.0e-5
+MODEL:
+  RAENWM:
+    panorama_context_mode: world_exact_select
+    panorama_observation_source: direct
+    panorama_visual_precision: fp16
+    panorama_encode_batch_size: 64
+    panorama_prediction_batch_size: 64

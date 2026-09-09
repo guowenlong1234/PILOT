@@ -26,6 +26,10 @@ def main():
     parser.add_argument("--checkpoint", help="required for evaluation")
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--panorama-context-mode",choices=("auto","front","world_exact_select"),default="world_exact_select")
+    parser.add_argument('--observation-source',choices=('cube','direct'))
+    parser.add_argument('--visual-precision',choices=('float32','fp16','bf16'))
+    parser.add_argument('--dino-batch',type=int)
+    parser.add_argument('--nwm-batch',type=int)
     parser.add_argument("--train-policy", action="store_true", help="jointly update navigation and fusion")
     parser.add_argument("--policy-lr", type=float, default=None)
     parser.add_argument("--fusion-lr", type=float, default=1e-5)
@@ -37,6 +41,8 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--sync", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--compile-model", action="store_true", help="compile the frozen world model")
+    parser.add_argument('--compile-backend',choices=['native','inductor'],default='inductor')
     args = parser.parse_args()
     args.wait_ready = args.action == "watch"
     if args.policy_lr is None:
@@ -45,6 +51,8 @@ def main():
         parser.error("--gpus must be distinct numeric indices")
     if min(args.batch, args.environments, args.iters, args.log_every) < 1:
         parser.error("batch, environments, iters and log-every must be positive")
+    if any(v is not None and v < 1 for v in (args.dino_batch,args.nwm_batch)):
+        parser.error('DINO and world-model batch sizes must be positive')
     if Path(args.output).is_absolute() or ".." in Path(args.output).parts:
         parser.error("--output must be project-relative without '..'")
     if args.action == "train" and args.machine != "server":
@@ -70,6 +78,14 @@ def main():
                  "IL.freeze_navigation_backbone": not args.train_policy})
     if args.train_policy:
         opts.update({"IL.lr": args.policy_lr, "IL.rgb_fusion_lr": args.fusion_lr})
+    if args.compile_model:
+        opts['MODEL.RAENWM.torch_compile'] = True
+        opts['MODEL.RAENWM.compile_backend'] = args.compile_backend
+    for value,key in [(args.observation_source,'panorama_observation_source'),
+                      (args.visual_precision,'panorama_visual_precision'),
+                      (args.dino_batch,'panorama_encode_batch_size'),
+                      (args.nwm_batch,'panorama_prediction_batch_size')]:
+        if value is not None:opts['MODEL.RAENWM.'+key]=value
     if args.action == "train":
         opts.update({"IL.iters": args.iters, "IL.log_every": args.log_every,
                      "IL.batch_size": args.batch, "IL.is_requeue": args.resume,

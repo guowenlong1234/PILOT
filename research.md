@@ -6,6 +6,12 @@ ETP-R1 是一个 VLN-CE 项目：让智能体在连续三维环境里，根据�
 
 ## Quick Start And Environment
 
+本性能分支已验证可选世界模型编译：在 `direct_context_fast.yaml` 后合并 `configs/nwm/direct_context_compiled.yaml`，或为入口添加 `--compile-model --compile-backend inductor`。同轮 16 步双卡短测（剔除四步预热）从 11.296 降至 9.265 秒/更新，吞吐提高 21.92%；11 场景固定质量对照中，复核集 CLS/图块余弦变化仅约 -0.000090/-0.000063。首次编译有启动成本，含预热的 16 步总耗时仍比未编译略长。上次数值失败已复现并确认实际 BF16 中间舍入差异；原生算子 CUDA Graph 可保持零差异但训练更慢。详见 `docs/nwm-compile-validation-20260909.md`。编译仍需显式开启，正式长训练未启动。
+
+未启用编译时的已验证配置为 `configs/nwm/direct_context_fast.yaml`：直接历史位姿定向渲染、DINO/世界模型批次上限 64、FP16。上一轮训练机 12 步双卡复测 12.105 秒/更新，较当轮全景优化版下降 32.27%，较同轮旧 front 10.637 秒仍慢 13.79%。567 项回归及额外 13 项 GPU 检查通过；11 场景固定目标质量对照未见下降。详见 `docs/direct-context-fast-validation-20260909.md`。长训练仍停止，未合并主工作区。
+
+本工作区为 2026-09-09 建立的 `perf/panorama-training` 独立性能优化分支：笔记本 `/home/sia/project/ETP-R1-perf`、训练机 `/home/gwl/project/etpr1/ETP-R1-perf`。原 10000 步任务及配套等待队列已按用户要求停止。基准与优化记录见 `docs/panorama-training-performance-20260909.md`，真实产物保存在训练机 `data/logs/panorama_perf_20260909/`（数据盘软链接）。使用训练机既有 `etpnav_unified`；新目录的 DINO 资产和用于隔离检查的运行时具有独立文件路径，避免放宽项目所有权检查。
+
 README 原始说明要求创建 `etpr1` conda 环境，核心环境为 Python 3.6.12、PyTorch 1.9.1+cu111，并使用 Habitat-Sim 0.1.7 和 Habitat-Lab 0.1.7。该说明和本机已有 `etpnav` 环境只用于了解旧 CLIP 链路，不作为本次 RAE/DINOv2 工作的运行方案。
 
 已检查本机状态：
@@ -183,6 +189,18 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 - 测评机只有一张 RTX 3090 24GB。现有 ETPNav 任务占用 GPU 时，不得并行启动全量特征生成、预训练、SFT、GRPO 或完整评测，也不得擅自中断 ETPNav。
 
 ## Last Reviewed
+
+2026-09-09，实现并验证世界模型编译。复现旧最大差 0.789076，AOT 原生执行零差异，真实 BF16 门控中间值证实 Inductor 改变舍入位置；按用户要求以固定目标质量验收，Inductor 指标变化很小。新增动态形状编译后端、可选原生 CUDA Graph 对照、CLI/覆盖配置和诊断测试。CPU 回归 568 passed，GPU 编译合同 2 passed，11 场景质量与三组 16 步双卡训练通过；推荐 Inductor，预热后 11.296→9.265 秒/更新，首次编译开销单独报告。主要检查 `nwm/compile_runtime.py`、`predictor.py`、`runtime.py`、`raenwm_core/models.py`、`model_utils.py` 及三份编译/质量/训练验证脚本。详见 `docs/nwm-compile-validation-20260909.md`。
+
+2026-09-09，针对 `perf/panorama-training` 的后续提速做源码审查，核对 SFT 更新/保存循环、直接渲染管线、DINO 编码、CDiT 条件计算与 Euler 采样器、导航注意力。建议优先试验采样内静态条件缓存、导航合并注意力，再评估渲染/编码重叠、融合梯度合桶与异步保存；当前短基准不包含保存成本。未执行新基准或修改训练实现，收益均待实测。详见 `docs/panorama-training-next-performance-review-20260909.md`。
+
+2026-09-09，完成直接渲染、大批次、混合精度最终验收。选定 direct/FP16/64/64，通过原生图像零像素差校准，开发集选定后在五场景126目标×三噪声复核；CLS 余弦 0.826675→0.829386，图块余弦 0.704895→0.707941。双卡12步吞吐和冻结权重审计通过，最终567项回归、13项GPU检查通过，CLI和覆盖配置已提供，所有基准已退出。报告 `docs/direct-context-fast-validation-20260909.md`。
+
+2026-09-09，按用户新授权实现按需直接渲染、更大 DINO/世界模型合批和混合精度。新增历史编号白名单与 reset 失效机制，批量按需渲染；随机噪声按固定八行分组，独立于执行批次。六步同规格基准从全景优化版 16.641 降至直接 FP32 13.244，再经世界模型合批和 FP16 降至 10.842 秒/更新。11 场景288目标质量对照中，复核五场景×三噪声的选定 FP16 64/64 方案无下降；推荐覆盖配置 `configs/nwm/direct_context_fast.yaml`，详情见 `docs/direct-context-fast-validation-20260909.md`。
+
+2026-09-09，补跑同规格旧 front 六步基准：9.969 秒/更新，对比优化后全景 16.641 秒。核实旧 runtime 将有效查询整批预测，新路径按 8 拆批；新目标定向视图还失去了原 front 特征的跨候选共享，并显式用 FP32 编码。六步 rank 0 世界模型累计 41.44→50.77 秒、原始 DINO 编码 3.81→10.10 秒，另有目标图像准备 8.01 秒。说明见性能报告补充对照小节；分批成本不能视为朝向修正的数学必然成本。
+
+2026-09-09，在独立性能工作区建立固定真实输入回放和双卡短训练基准。保留精确几何缓存、GPU 视觉缓存、跳过未使用 front 编码、GPU 双精度批量插值四项优化；逐项 6 步基准从 21.807 降至 16.641 秒/更新，固定输入预测保持逐元素相同。最终关闭分段同步的 12 步对照为 24.567→17.871 秒/更新，吞吐提升 37.47%；562 项回归通过，GPU 相关 25 项通过，两卡冻结视觉/路点/世界模型权重哈希不变，CLS 映射与融合层更新。编译与推理批量 16 试验因数值差异被拒绝。基准任务全部退出，原长训练保持停止；详见 `docs/panorama-training-performance-20260909.md`。
 
 2026-09-09，复查新全景 10000 步训练的冻结与性能：实际优化器为 375,128,067 个导航参数加 5,902,080 个融合参数，视觉骨干/路点/世界模型冻结。45 次采样双卡平均利用率 65.0%/48.4%，前 25 步更新耗时约为旧任务 2.14 倍（非同轨迹严格对照）。确认全景额外渲染、CPU 重投影、FP32 编码、特征往返与遗留 front 编码开销，未定量归因各阶段；详见 `docs/ghost-concat-panorama-performance-review-20260909.md`。
 

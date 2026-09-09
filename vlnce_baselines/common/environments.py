@@ -419,6 +419,9 @@ class VLNCEDaggerEnv(habitat.RLEnv):
         self.plan_frames = []
         raenwm_config = getattr(getattr(config, "MODEL", None), "RAENWM", None)
         self.raenwm_panorama_mode = panorama_mode_from_config(raenwm_config)
+        self.raenwm_observation_source = str(getattr(raenwm_config, "panorama_observation_source", "cube"))
+        self._raenwm_direct_history = {}
+        self._raenwm_direct_serial = 0
         self.raenwm_context_source = normalize_context_source(
             getattr(raenwm_config, "context_source", None)
         )
@@ -545,6 +548,18 @@ class VLNCEDaggerEnv(habitat.RLEnv):
                 "low-level context events requested while high-level mode is active"
             )
         payload = self.raenwm_context_events.pop_payload()
+        if getattr(self, "raenwm_observation_source", "cube") == "direct" and self.raenwm_panorama_mode != "front":
+            for event in payload['events']:
+                if event['type'] == 'reset':
+                    self._raenwm_direct_history.clear()
+                elif event['type'] == 'frame':
+                    self._raenwm_direct_serial += 1
+                    token = str(self._raenwm_direct_serial)
+                    self._raenwm_direct_history[token] = np.asarray(event['position']).copy()
+                    while len(self._raenwm_direct_history) > 4:
+                        del self._raenwm_direct_history[next(iter(self._raenwm_direct_history))]
+                    event['panorama'] = dict(format='observed_direction_requests_v1',frame_id=token)
+            return payload
         if getattr(self,"raenwm_panorama_mode","front") != "front":
             from vlnce_baselines.nwm.panorama_context import cube_quaternions
             quaternions = [[0.,math.sin(i*math.pi/12),0.,math.cos(i*math.pi/12)] for i in range(12)]
@@ -563,6 +578,27 @@ class VLNCEDaggerEnv(habitat.RLEnv):
                 event["panorama"] = {"format":"observed_panorama_v1",
                     "cube_rgb":rgb[[0,3,6,9,12,13]],"native_world_rgb12":rgb[:12]}
         return payload
+
+    def render_raenwm_observed_directions(self, requests):
+        """Accept only worker-issued IDs of the last four observed positions."""
+        if self.raenwm_observation_source != 'direct':
+            raise RuntimeError('direct observed rendering is disabled')
+        poses=[]
+        for request in requests:
+            token=str(request['frame_id']);yaw=float(request['yaw'])
+            if token not in self._raenwm_direct_history or not np.isfinite(yaw):
+                raise ValueError('unknown/stale observed frame or invalid heading')
+            poses.append(dict(position=self._raenwm_direct_history[token],
+                rotation=[0.,math.sin(yaw/2),0.,math.cos(yaw/2)]))
+        started=time.perf_counter()
+        sim=getattr(getattr(self,'_env',None),'sim',None)
+        previous_obs=getattr(sim,'_prev_sim_obs',None)
+        frame_count=getattr(sim,'_num_total_frames',None)
+        rendered=self._render_nwm_rgb_views(poses)
+        if sim is not None and (getattr(sim,'_prev_sim_obs',None) is not previous_obs or
+                                getattr(sim,'_num_total_frames',None)!=frame_count):
+            raise RuntimeError('direct history rendering changed simulator observation/action state')
+        return dict(rgb=[x['rgb'] for x in rendered],count=len(rendered),seconds=time.perf_counter()-started)
 
     def _normalize_candidate_q0_trajectory(self, trajectory):
         """Normalize each temporary action endpoint on the start navmesh island."""

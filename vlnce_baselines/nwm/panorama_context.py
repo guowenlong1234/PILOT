@@ -4,6 +4,7 @@ No simulator or oracle is used here. Six RGB cube faces cover all rays so
 arbitrary 90-degree views do not require inventing uncovered polar pixels.
 """
 from dataclasses import dataclass
+from functools import lru_cache
 import math
 
 import numpy as np
@@ -48,6 +49,20 @@ def perspective_from_cube(cube, yaw, size=224, hfov=90.):
         raise ValueError('cube RGB must be uint8')
     if not np.isfinite(yaw) or not 0 < hfov < 180 or size < 1:
         raise ValueError('invalid perspective geometry')
+    face, y0, x0, y1, x1, wx, wy = _perspective_sampling_map(
+        cube.shape[1], float(yaw), int(size), float(hfov))
+    out = ((1-wx)*(1-wy)*cube[face,y0,x0] + wx*(1-wy)*cube[face,y0,x1]
+           + (1-wx)*wy*cube[face,y1,x0] + wx*wy*cube[face,y1,x1])
+    return np.rint(out).clip(0,255).astype(np.uint8)
+
+
+@lru_cache(maxsize=16)
+def _perspective_sampling_map(n, yaw, size, hfov):
+    """Share exact pixel geometry across the four historical images.
+
+    Keys retain the full heading, resolution and field of view. Only geometry
+    is cached, never RGB or a feature; sixteen maps bound CPU memory usage.
+    """
     axis = (2*(np.arange(size)+.5)/size-1) * math.tan(math.radians(hfov)/2)
     xx, yy = np.meshgrid(axis, -axis)
     rays = np.stack([xx, yy, -np.ones_like(xx)], -1) @ yaw_matrix(yaw).T
@@ -60,15 +75,15 @@ def perspective_from_cube(cube, yaw, size=224, hfov=90.):
     uv = chosen[..., :2] / depth[..., None]
     if np.max(np.abs(uv)) > 1+1e-6:
         raise ValueError('cube did not cover requested rays')
-    n = cube.shape[1]
     sx = np.clip((uv[..., 0]+1)*n/2-.5, 0, n-1)
     sy = np.clip((1-uv[..., 1])*n/2-.5, 0, n-1)
     x0, y0 = np.floor(sx).astype(int), np.floor(sy).astype(int)
     x1, y1 = np.minimum(x0+1, n-1), np.minimum(y0+1, n-1)
     wx, wy = (sx-x0)[..., None], (sy-y0)[..., None]
-    out = ((1-wx)*(1-wy)*cube[face,y0,x0] + wx*(1-wy)*cube[face,y0,x1]
-           + (1-wx)*wy*cube[face,y1,x0] + wx*wy*cube[face,y1,x1])
-    return np.rint(out).clip(0,255).astype(np.uint8)
+    arrays = (face, y0, x0, y1, x1, wx, wy)
+    for array in arrays:
+        array.flags.writeable = False
+    return arrays
 
 
 def local_xy(source, target, yaw):

@@ -293,7 +293,8 @@ class NwmPredictionRuntime:
                 checkpoint_path=checkpoint_path,
                 device=self.device,
                 enable_decoder=False,
-                torch_compile=False,
+                torch_compile=bool(getattr(config, 'torch_compile', False)),
+                compile_backend_name=str(getattr(config, 'compile_backend', 'inductor')),
                 num_steps=int(config.num_steps),
                 final_only_euler=bool(config.final_only_euler),
                 use_external_context_latents=True,
@@ -363,7 +364,9 @@ class NwmPredictionRuntime:
             mode=self.panorama_mode,device=self.device,
             encode_batch_size=int(getattr(self.config,"panorama_encode_batch_size",16)),
             prediction_batch_size=int(getattr(self.config,"panorama_prediction_batch_size",8)),
-            cached_views_per_frame=int(getattr(self.config,"panorama_cached_views_per_frame",12)))
+            cached_views_per_frame=int(getattr(self.config,"panorama_cached_views_per_frame",12)),
+            observation_source=str(getattr(self.config,"panorama_observation_source","cube")),
+            visual_precision=str(getattr(self.config,"panorama_visual_precision","float32")))
 
     def update_contexts(
         self,
@@ -405,8 +408,8 @@ class NwmPredictionRuntime:
         self,
         events,
         *,
-        raw_patch_latents: torch.Tensor,
-        raw_cls: torch.Tensor,
+        raw_patch_latents: Optional[torch.Tensor],
+        raw_cls: Optional[torch.Tensor],
     ) -> None:
         if self.context_source != LOW_LEVEL_CONTEXT_SOURCE:
             raise RuntimeError(
@@ -418,17 +421,22 @@ class NwmPredictionRuntime:
             event for event in events
             if isinstance(event, Mapping) and event.get("type") == "frame"
         ]
-        if int(raw_patch_latents.shape[0]) != len(frame_events):
+        pose_only = (getattr(self, "panorama_mode", "front") != "front"
+                     and raw_patch_latents is None and raw_cls is None)
+        if not pose_only and (raw_patch_latents is None or raw_cls is None):
+            raise ValueError("front context requires encoded CLS and patch latents")
+        if not pose_only and int(raw_patch_latents.shape[0]) != len(frame_events):
             raise ValueError("low-level patch count does not match frame events")
-        if int(raw_cls.shape[0]) != len(frame_events):
+        if not pose_only and int(raw_cls.shape[0]) != len(frame_events):
             raise ValueError("low-level CLS count does not match frame events")
-        normalized_patch = self.normalizer.normalize_patch(raw_patch_latents)
-        normalized_cls = self.normalizer.normalize_cls(raw_cls)
-        normalized_tokens = pack_cls_patch(normalized_cls, normalized_patch)
-        if tuple(normalized_tokens.shape[1:]) != (257, 768):
-            raise ValueError(
-                "low-level native context must encode as [N,257,768]"
-            )
+        if not pose_only:
+            normalized_patch = self.normalizer.normalize_patch(raw_patch_latents)
+            normalized_cls = self.normalizer.normalize_cls(raw_cls)
+            normalized_tokens = pack_cls_patch(normalized_cls, normalized_patch)
+            if tuple(normalized_tokens.shape[1:]) != (257, 768):
+                raise ValueError(
+                    "low-level native context must encode as [N,257,768]"
+                )
         for event in events:
             if not isinstance(event, Mapping):
                 raise ValueError("low-level context event must be a mapping")
@@ -445,21 +453,23 @@ class NwmPredictionRuntime:
                     raise ValueError("low-level frame_index is out of range")
                 self.adapter.update_context(
                     env_index=env_index,
-                    rgb=None,
+                    rgb=event.get("rgb") if pose_only else None,
                     position=event.get("position"),
                     yaw=float(event.get("yaw")),
-                    latent=normalized_tokens[frame_index],
+                    latent=None if pose_only else normalized_tokens[frame_index],
                 )
                 if getattr(self,"panorama_mode","front") != "front":
                     from .panorama_runtime import ObservedPanoramaFrame
                     observed = event.get("panorama")
-                    if not isinstance(observed,Mapping) or observed.get("format") != "observed_panorama_v1":
+                    direct = getattr(self.config, 'panorama_observation_source', 'cube') == 'direct' if hasattr(self, 'config') else False
+                    expected_format = 'observed_direction_requests_v1' if direct else 'observed_panorama_v1'
+                    if not isinstance(observed,Mapping) or observed.get("format") != expected_format:
                         raise ValueError("default panorama context requires observed panorama events")
                     self._panorama_frame_counter += 1
                     self.panorama_histories[env_index].append(ObservedPanoramaFrame(
                         str(self._panorama_frame_counter),str(self._panorama_segments[env_index]),
-                        event["position"],float(event["yaw"]),observed["cube_rgb"],
-                        observed["native_world_rgb12"]))
+                        event["position"],float(event["yaw"]),observed.get("cube_rgb"),
+                        observed.get("native_world_rgb12"),render_token=observed.get('frame_id')))
             else:
                 raise ValueError(
                     f"Unknown low-level context event type: {event_type!r}"
