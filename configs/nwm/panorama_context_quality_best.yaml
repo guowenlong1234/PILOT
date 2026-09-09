@@ -29,5 +29,8 @@ validation:
   selection: scene_macro_raw_cls_cosine
   development_scenes: 6
   development_queries: 162
+  confirmation_scenes: 5
+  confirmation_queries: 126
+  confirmation_noise_seeds: [11, 29, 47]
   frozen_selection_file: data/logs/nwm_context_quality_20260909/formal_v3/selection.json
   navigation_performance_validated: false

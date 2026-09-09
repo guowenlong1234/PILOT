@@ -73,6 +73,9 @@ def main():
     colors=['#dc7257' if abs(x['original_turn_deg'])>90 else '#3575b5' for x in paired]
     ax[0].scatter([x['base_cls_cosine'] for x in paired],[x['winner_cls_cosine'] for x in paired],c=colors,s=22,alpha=.7)
     ax[0].plot([0,1],[0,1],'k--',lw=1);ax[0].set(xlabel='Original front context: CLS cosine',ylabel='Selected panorama context: CLS cosine',title='Held-out queries (3 noise seeds averaged)',xlim=(0,1),ylim=(0,1))
+    from matplotlib.lines import Line2D
+    ax[0].legend(handles=[Line2D([],[],marker='o',ls='',color='#dc7257',label='Original turn > 90 deg'),
+                          Line2D([],[],marker='o',ls='',color='#3575b5',label='Original turn <= 90 deg')],loc='lower right',fontsize=8)
     ax[1].barh([x['scene'] for x in per_scene],[x['delta_cls_cosine'] for x in per_scene],color='#3575b5')
     ax[1].axvline(0,color='black',lw=.8);ax[1].set(xlabel='Change in mean CLS cosine',title='Each held-out scene')
     fig.savefig(root/'confirmation_quality.png',dpi=160)

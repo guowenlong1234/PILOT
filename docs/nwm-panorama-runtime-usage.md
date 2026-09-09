@@ -2,6 +2,8 @@
 
 新工作区提供独立的`PanoramaPredictionRuntime`，输出仍为原`NwmPrediction`：预测的原始CLS、标准化图块和按候选ID排列的元数据。输入只接受已保存图像及位姿，没有模拟器或目标真值回调。
 
+本轮受测推荐模式为`world_exact_select`：四帧统一到目标的精确世界朝向，按历史运动和目标相对位置选择参考端点。配置为`configs/nwm/panorama_context_quality_best.yaml`，预测质量结果见`nwm-context-quality-results-20260909.md`。这是本轮受测方案中的选择，不是所有可能方案的全局最优。
+
 ## 缓存观测
 
 每个环境维护一个`PanoramaHistory`，最多4个真实时间点。每个时间点保存：
