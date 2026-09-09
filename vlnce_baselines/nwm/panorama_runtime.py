@@ -97,6 +97,10 @@ class PanoramaPredictionRuntime:
             raise ValueError('invalid observed image source or visual precision')
         if observation_source == 'direct' and mode == 'front':
             raise ValueError('direct observed rendering requires target-aligned context')
+        forced_dtype=getattr(encoder,'compute_dtype',None)
+        requested_dtype={'float32':torch.float32,'fp16':torch.float16,'bf16':torch.bfloat16}[visual_precision]
+        if forced_dtype is not None and forced_dtype != requested_dtype:
+            raise ValueError('context precision conflicts with the RGB encoder; use ambient RGB precision')
         self.observation_source=observation_source;self.visual_precision=visual_precision
         self.render_observed=render_observed
         self.cache_identity=object()
@@ -146,7 +150,7 @@ class PanoramaPredictionRuntime:
                 'target':'absolute_pose_unchanged','cache_dtype':'float16',
                 'require_native_views':self.require_native_views,
                 'view_extraction':('direct_observed_pose' if self.observation_source=='direct' else 'native_world_30deg_else_cube_bilinear'),
-                'visual_precision':self.visual_precision}
+                'visual_precision':self.visual_precision,'noise_batch_size':8}
 
     @torch.no_grad()
     def predict(self,targets:Sequence[PanoramaTarget],histories,*,initial_noise=None,generator=None):

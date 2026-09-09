@@ -96,3 +96,10 @@ def test_fast_preset_records_source_precision_and_batches():
     assert meta['panorama_visual_precision']=='fp16'
     assert meta['panorama_encode_batch_size']==meta['panorama_prediction_batch_size']==64
     assert meta['panorama_noise_batch_size']==8
+
+
+def test_explicit_encoder_precision_cannot_silently_override_context_precision():
+    encoder=Encoder();encoder.compute_dtype=torch.float32
+    with pytest.raises(ValueError,match='precision conflicts'):
+        PanoramaPredictionRuntime(encoder=encoder,normalizer=Normalizer(),predictor=Predictor(),
+            mode='world_exact_select',device='cpu',visual_precision='bf16')

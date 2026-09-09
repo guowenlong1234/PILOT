@@ -183,7 +183,8 @@ def context_metadata_from_config(config: Any) -> Dict[str, Any]:
             "panorama_prediction_batch_size": int(getattr(config,"panorama_prediction_batch_size",8)),
             "panorama_cache_views": int(getattr(config,"panorama_cached_views_per_frame",12)),
         })
-        if observation_source != "cube" or precision != "float32":
+        if (observation_source != "cube" or precision != "float32"
+                or int(getattr(config,'panorama_prediction_batch_size',8)) != 8):
             metadata.update(panorama_observation_source=observation_source,
                             panorama_visual_precision=precision,panorama_noise_batch_size=8)
     return metadata
