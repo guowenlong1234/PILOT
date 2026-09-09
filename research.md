@@ -6,11 +6,13 @@ ETP-R1 是一个 VLN-CE 项目：让智能体在连续三维环境里，根据�
 
 ## Quick Start And Environment
 
+2026-09-09，按用户决定，将静态条件缓存和导航SDPA之前的 `75cbe1d` 合并到当前 `feature/e24-joint-sft`，合并提交 `372ba21`，保留直接渲染和世界模型编译。当前笔记本工作区为 `/home/sia/project/ETP-R1`，训练机对应 `/home/gwl/project/etpr1/ETP-R1`，使用既有 `etpnav_unified`；后面的性能分支测试数字属于历史试验。静态条件缓存和SDPA已被用户放弃，不作为待实施或待启用方案，相关实现未合入。
+
 本性能分支已验证可选世界模型编译：在 `direct_context_fast.yaml` 后合并 `configs/nwm/direct_context_compiled.yaml`，或为入口添加 `--compile-model --compile-backend inductor`。同轮 16 步双卡短测（剔除四步预热）从 11.296 降至 9.265 秒/更新，吞吐提高 21.92%；11 场景固定质量对照中，复核集 CLS/图块余弦变化仅约 -0.000090/-0.000063。首次编译有启动成本，含预热的 16 步总耗时仍比未编译略长。上次数值失败已复现并确认实际 BF16 中间舍入差异；原生算子 CUDA Graph 可保持零差异但训练更慢。详见 `docs/nwm-compile-validation-20260909.md`。编译仍需显式开启，正式长训练未启动。
 
 未启用编译时的已验证配置为 `configs/nwm/direct_context_fast.yaml`：直接历史位姿定向渲染、DINO/世界模型批次上限 64、FP16。上一轮训练机 12 步双卡复测 12.105 秒/更新，较当轮全景优化版下降 32.27%，较同轮旧 front 10.637 秒仍慢 13.79%。567 项回归及额外 13 项 GPU 检查通过；11 场景固定目标质量对照未见下降。详见 `docs/direct-context-fast-validation-20260909.md`。长训练仍停止，未合并主工作区。
 
-本工作区为 2026-09-09 建立的 `perf/panorama-training` 独立性能优化分支：笔记本 `/home/sia/project/ETP-R1-perf`、训练机 `/home/gwl/project/etpr1/ETP-R1-perf`。原 10000 步任务及配套等待队列已按用户要求停止。基准与优化记录见 `docs/panorama-training-performance-20260909.md`，真实产物保存在训练机 `data/logs/panorama_perf_20260909/`（数据盘软链接）。使用训练机既有 `etpnav_unified`；新目录的 DINO 资产和用于隔离检查的运行时具有独立文件路径，避免放宽项目所有权检查。
+性能优化此前在 2026-09-09 建立的 `perf/panorama-training` 独立分支开发：笔记本 `/home/sia/project/ETP-R1-perf`、训练机 `/home/gwl/project/etpr1/ETP-R1-perf`。当前已选取 `75cbe1d` 合入主工作区，后续被放弃的试验仍留在性能分支历史中。原 10000 步任务及配套等待队列已按用户要求停止。基准与优化记录见 `docs/panorama-training-performance-20260909.md`，历史产物保存在训练机性能工作区 `data/logs/panorama_perf_20260909/`（数据盘软链接）。两工作区各自使用已有资产及隔离运行时，未放宽所有权检查。
 
 README 原始说明要求创建 `etpr1` conda 环境，核心环境为 Python 3.6.12、PyTorch 1.9.1+cu111，并使用 Habitat-Sim 0.1.7 和 Habitat-Lab 0.1.7。该说明和本机已有 `etpnav` 环境只用于了解旧 CLIP 链路，不作为本次 RAE/DINOv2 工作的运行方案。
 
@@ -189,6 +191,8 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 - 测评机只有一张 RTX 3090 24GB。现有 ETPNav 任务占用 GPU 时，不得并行启动全量特征生成、预训练、SFT、GRPO 或完整评测，也不得擅自中断 ETPNav。
 
 ## Last Reviewed
+
+2026-09-09，按用户决定排除静态条件缓存与SDPA，从实施前的 `75cbe1d` 合并到主工作区 `feature/e24-joint-sft`，合并提交 `372ba21`，Git tree与选定提交完全一致。保留用户 `.gitignore` 未提交修改，通过Git同步训练机主目录并完成568项CPU回归、11项GPU检查和双卡8次真实更新，全部退出0，两卡冻结/参数更新审计通过。源码未做额外改写，之后仅更新合并状态和测试文档。详见 `docs/perf-merge-validation-20260909.md`；正式长训练未启动。
 
 2026-09-09，实现并验证世界模型编译。复现旧最大差 0.789076，AOT 原生执行零差异，真实 BF16 门控中间值证实 Inductor 改变舍入位置；按用户要求以固定目标质量验收，Inductor 指标变化很小。新增动态形状编译后端、可选原生 CUDA Graph 对照、CLI/覆盖配置和诊断测试。CPU 回归 568 passed，GPU 编译合同 2 passed，11 场景质量与三组 16 步双卡训练通过；推荐 Inductor，预热后 11.296→9.265 秒/更新，首次编译开销单独报告。主要检查 `nwm/compile_runtime.py`、`predictor.py`、`runtime.py`、`raenwm_core/models.py`、`model_utils.py` 及三份编译/质量/训练验证脚本。详见 `docs/nwm-compile-validation-20260909.md`。
 
