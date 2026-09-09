@@ -25,6 +25,7 @@ class ObservedPanoramaFrame:
     body_yaw: float
     cube_rgb: np.ndarray
     native_world_rgb12: object = None
+    front_rgb: object = None
     _cache: OrderedDict = field(default_factory=OrderedDict,repr=False)
 
     def __post_init__(self):
@@ -39,6 +40,10 @@ class ObservedPanoramaFrame:
             bank=np.asarray(self.native_world_rgb12).copy()
             if bank.shape!=(12,224,224,3) or bank.dtype!=np.uint8:raise ValueError('invalid native direction bank')
             bank.flags.writeable=False;self.native_world_rgb12=bank
+        if self.front_rgb is not None:
+            front=np.asarray(self.front_rgb).copy()
+            if front.shape!=(224,224,3) or front.dtype!=np.uint8:raise ValueError('invalid recorded front view')
+            front.flags.writeable=False;self.front_rgb=front
 
 
 class PanoramaHistory:
@@ -96,12 +101,14 @@ class PanoramaPredictionRuntime:
             frames=list(histories[target.env_index].frames)
             if len(frames)!=4:
                 skipped['context_not_ready']=skipped.get('context_not_ready',0)+1;continue
+            if self.mode=='front' and any(f.front_rgb is None for f in frames):
+                raise ValueError('baseline mode requires the four directly recorded front images')
             plan=make_context_plan([f.position for f in frames],[f.body_yaw for f in frames],
                 target.position,target.yaw,self.mode,[f.segment_id for f in frames])
             keys=[]
             for i in plan.order:
                 frame=frames[i];yaw=plan.view_yaws[i]
-                cachekey=(self.cache_identity,round(float(yaw%(2*np.pi)),8))
+                cachekey=(self.cache_identity,self.mode=='front',round(float(yaw%(2*np.pi)),8))
                 batchkey=(id(frame),cachekey);keys.append(batchkey)
                 if cachekey in frame._cache:
                     features[batchkey]=frame._cache[cachekey];frame._cache.move_to_end(cachekey)
@@ -110,7 +117,8 @@ class PanoramaPredictionRuntime:
         pending_items=list(pending.items())
         for start in range(0,len(pending_items),self.encode_batch_size):
             part=pending_items[start:start+self.encode_batch_size]
-            rgb=np.stack([observed_view(frame.cube_rgb,yaw,frame.native_world_rgb12) for _,(frame,_,yaw) in part])
+            rgb=np.stack([frame.front_rgb if self.mode=='front' else
+                observed_view(frame.cube_rgb,yaw,frame.native_world_rgb12) for _,(frame,_,yaw) in part])
             cls,patch=self.encoder.forward_raw_cls_and_patch_latents({'rgb':rgb})
             tokens=pack_cls_patch(self.normalizer.normalize_cls(cls),self.normalizer.normalize_patch(patch)).detach().half().cpu()
             for token,(batchkey,(frame,cachekey,_)) in zip(tokens,part):
