@@ -36,7 +36,7 @@ def main():
     import habitat_sim
     import transformers
 
-    report = {'samples': [], 'versions': {
+    report = {'samples': [], 'geometry': [], 'actions': [], 'versions': {
         'python': platform.python_version(), 'torch': str(torch.__version__),
         'cuda': torch.version.cuda, 'transformers': transformers.__version__,
         'habitat': getattr(habitat, '__version__', 'unknown'),
@@ -52,8 +52,6 @@ def main():
         calls[0] += 1
         if prediction is None or prediction.pred_tokens is None:
             return prediction
-        if len(report['samples']) >= args.max_samples:
-            return prediction
         runtime = self.raenwm_runtime
         batch = runtime.last_batch
         from vlnce_baselines.nwm.raenwm_core.models import make_latent_noise
@@ -65,6 +63,30 @@ def main():
         queries = self._build_raenwm_preview_queries(cur_pos, cur_ori, previews)
         lookup = {(q.env_index, q.query_id): q for q in queries}
         episodes = self.envs.current_episodes()
+        wp = call_args[4]
+        for rec in batch.records:
+            ei = rec.env_index
+            query = lookup[(ei, rec.query_id)]
+            frames = runtime.adapter.buffers[ei].get_context()
+            matches = []
+            for ci, preview in enumerate(previews[ei]):
+                if preview.target_kind == 'node' or str(preview.target_vp) != rec.query_id:
+                    continue
+                matches.append({'candidate_index': ci, 'candidate_vp': preview.candidate_vp,
+                    'kind': preview.target_kind, 'raw_angle_deg': float(wp['cand_angles'][ei][ci])*180/math.pi,
+                    'raw_distance_m': float(wp['cand_distances'][ei][ci]),
+                    'raw_position': np.asarray(preview.position).tolist()})
+            report['geometry'].append({'call': calls[0], 'episode': str(episodes[ei].episode_id),
+                'query': rec.query_id, 'scene': str(episodes[ei].scene_id),
+                'current_position': np.asarray(cur_pos[ei]).tolist(),
+                'current_yaw': heading_from_quaternion(cur_ori[ei]),
+                'source_position': frames[-1].position.tolist(), 'source_yaw': frames[-1].yaw,
+                'context_positions': [f.position.tolist() for f in frames],
+                'context_yaws': [f.yaw for f in frames], 'condition': rec.condition.as_dict(),
+                'target_position': query.target_position.tolist(), 'matches': matches,
+                'old_ghost_positions': [np.asarray(p).tolist() for p in self.gmaps[ei].ghost_pos.get(rec.query_id, [])]})
+        if len(report['samples']) >= args.max_samples:
+            return prediction
         # First three ready decision points per episode, up to three candidates
         # each, in runtime order (not selected by prediction quality).
         ep = str(episodes[0].episode_id)
@@ -135,6 +157,14 @@ def main():
         return prediction
 
     RLTrainer._run_raenwm_rgb_fusion_prediction = capture
+    from habitat.core.vector_env import VectorEnv
+    original_step = VectorEnv.step
+    def record_step(envs, actions):
+        for episode, action in zip(envs.current_episodes(), actions):
+            report['actions'].append({'call': calls[0], 'episode': str(episode.episode_id),
+                'action': json.loads(json.dumps(action['action'], default=lambda x: np.asarray(x).tolist()))})
+        return original_step(envs, actions)
+    VectorEnv.step = record_step
     opts = common('0', 1)
     opts.update({'IL.freeze_navigation_backbone': False, 'IL.lr': 2e-6,
         'IL.rgb_fusion_lr': 1e-5, 'EVAL.CKPT_PATH_DIR': str(Path(args.checkpoint).resolve()),
@@ -153,6 +183,7 @@ def main():
         report['completed'] = True
     finally:
         RLTrainer._run_raenwm_rgb_fusion_prediction = original
+        VectorEnv.step = original_step
         (root / 'capture.json').write_text(json.dumps(report, indent=2))
 
 
