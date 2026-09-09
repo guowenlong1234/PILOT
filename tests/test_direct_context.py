@@ -84,3 +84,15 @@ def test_noise_stream_is_independent_of_execution_batch_size():
         tapes.append(torch.cat(predictor.noises));states.append(g.get_state())
     assert all(torch.equal(tapes[0],v) for v in tapes)
     assert all(torch.equal(states[0],v) for v in states)
+
+
+def test_fast_preset_records_source_precision_and_batches():
+    from vlnce_baselines.config.default import get_config
+    from vlnce_baselines.nwm.low_level_context import context_metadata_from_config
+    cfg=get_config('run_r2r/iter_train_rae_dino_ghost_concat.yaml,configs/nwm/direct_context_fast.yaml')
+    meta=context_metadata_from_config(cfg.MODEL.RAENWM)
+    assert not cfg.IL.freeze_navigation_backbone and cfg.NUM_ENVIRONMENTS==4
+    assert meta['panorama_observation_source']=='direct'
+    assert meta['panorama_visual_precision']=='fp16'
+    assert meta['panorama_encode_batch_size']==meta['panorama_prediction_batch_size']==64
+    assert meta['panorama_noise_batch_size']==8

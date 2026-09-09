@@ -43,6 +43,7 @@ def main():
     import habitat, habitat_sim, transformers
     stats = defaultdict(lambda: [0., 0]);steps=[];captures=[0];trainer=[None];last=[None]
     frozen_world_before={}
+    batch_sizes=defaultdict(list)
 
     def digest(named):
         return {name:hashlib.sha256(value.detach().cpu().contiguous().numpy().tobytes()).hexdigest()
@@ -61,6 +62,8 @@ def main():
     def wrap(cls, name, label):
         old = getattr(cls,name)
         def call(*a, **kw):
+            if label=='raw_dino_encode':batch_sizes['dino'].append(len(a[1]['rgb']))
+            if label=='world_model':batch_sizes['world_model'].append(len(a[1].records))
             if args.sync_stages:torch.cuda.synchronize(rank)
             start=time.perf_counter()
             value=old(*a,**kw)
@@ -122,6 +125,7 @@ def main():
         context={k:sum(v) for k,v in self.logs.items() if k.startswith('nwm_context_')}
         report=dict(rank=rank,world=world,steps=steps,warmup=args.warmup,
             settings=vars(args),
+            batch_sizes={k:dict(max=max(v),mean=float(np.mean(v))) for k,v in batch_sizes.items()},
             mean_step_seconds=float(np.mean(steps[args.warmup:])),stages=dict(stats),
             synchronized_stages=args.sync_stages,optimizer=groups,context=context,
             losses={k:list(v) for k,v in self.logs.items() if 'loss' in k.lower() or 'grad_norm' in k.lower()},
