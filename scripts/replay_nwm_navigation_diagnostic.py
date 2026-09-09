@@ -28,8 +28,9 @@ def main():
         for steps in (10,50):
             predictor.bundle.config['transport']['num_steps']=steps
             with torch.no_grad():
-                pred=predictor.predict_time_from_etp_batch(batch,initial_noise=data['initial_noise'])
-            outputs[steps]=pred.pred_latent.float().cpu()[0]
+                _,tokens=predictor._predict_time_from_latents(batch.context_latent,
+                    batch.curr_delta,batch.rel_t,initial_noise=data['initial_noise'])
+            outputs[steps]=tokens.float().cpu()[0]
         mean=data['normalizer_mean'].mean((2,3))[0]
         scale=torch.sqrt(data['normalizer_var'].mean((2,3))[0]+1e-5)
         gt=data['truth_tokens'][-1]
