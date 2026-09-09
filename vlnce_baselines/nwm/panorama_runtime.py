@@ -169,7 +169,8 @@ class PanoramaPredictionRuntime:
             keys=[]
             for i in plan.order:
                 frame=frames[i];yaw=plan.view_yaws[i]
-                frame_envs[id(frame)]=target.env_index
+                owner=frame_envs.setdefault(id(frame),target.env_index)
+                if owner!=target.env_index:raise ValueError('an observed frame cannot belong to multiple environments')
                 cachekey=(self.cache_identity,self.mode=='front',round(float(yaw%(2*np.pi)),8))
                 batchkey=(id(frame),cachekey);keys.append(batchkey)
                 if cachekey in frame._cache:

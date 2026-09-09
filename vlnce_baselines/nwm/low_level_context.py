@@ -133,6 +133,8 @@ def panorama_mode_from_config(config: Any) -> str:
                 else "front")
     if mode not in {"front", "world_exact_select"}:
         raise ValueError("online panorama_context_mode must be auto/front/world_exact_select")
+    if mode == 'front' and getattr(config, 'panorama_observation_source', 'cube') == 'direct':
+        raise ValueError('direct observed rendering requires target-aligned context')
     if mode != "front" and (getattr(config, "context_source", None) != LOW_LEVEL_CONTEXT_SOURCE or
                             not bool(getattr(config, "predict_cls_token", False))):
         raise ValueError("panorama context requires low-level native CLS mode")
@@ -183,7 +185,7 @@ def context_metadata_from_config(config: Any) -> Dict[str, Any]:
         })
         if observation_source != "cube" or precision != "float32":
             metadata.update(panorama_observation_source=observation_source,
-                            panorama_visual_precision=precision)
+                            panorama_visual_precision=precision,panorama_noise_batch_size=8)
     return metadata
 
 
