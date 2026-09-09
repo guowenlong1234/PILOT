@@ -86,12 +86,16 @@ def main():
         # Compare every step at identical eager states, then measure accumulated error.
         original = predictor.bundle.model
         step_rows = []
-        def paired(*a, **kw):
-            eager = original(*a, **kw)
-            value = compiled(*a, **kw)
-            step_rows.append(metrics(value, eager))
-            return eager
-        predictor.bundle.model = paired
+        class Paired(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.original = original
+            def forward(self, *a, **kw):
+                eager = self.original(*a, **kw)
+                value = compiled(*a, **kw)
+                step_rows.append(metrics(value, eager))
+                return eager
+        predictor.bundle.model = Paired()
         _, expected_final = predictor._predict_time_from_latents(**data)
         predictor.bundle.model = compiled
         _, actual_final = predictor._predict_time_from_latents(**data)
