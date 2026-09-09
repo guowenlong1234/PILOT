@@ -103,7 +103,10 @@ def main():
         trainer[0]=self
         groups=[dict(name=g.get('name'),params=sum(p.numel() for p in g['params']),lr=g['lr']) for g in self.optimizer.param_groups]
         if args.audit:
+            assert all(p.requires_grad for g in self.optimizer.param_groups for p in g['params'])
+            assert not any(p.requires_grad for p in self.waypoint_predictor.parameters())
             frozen_before=digest((n,p) for n,p in self.policy.named_parameters() if not p.requires_grad)
+            waypoint_before=digest(self.waypoint_predictor.named_parameters())
             cls_before=digest((n,p) for n,p in self.policy.named_parameters() if 'cls_residual_mlp' in n)
             fusion_before=digest(self.raenwm_rgb_fusion_adapter.named_parameters())
         torch.cuda.synchronize(rank);last[0]=time.perf_counter()
@@ -118,6 +121,7 @@ def main():
                 transformers=transformers.__version__,habitat=habitat.__version__,habitat_sim=habitat_sim.__version__))
         if args.audit:
             audit=dict(frozen_visual_unchanged=frozen_before==digest((n,p) for n,p in self.policy.named_parameters() if not p.requires_grad),
+                frozen_waypoint_unchanged=waypoint_before==digest(self.waypoint_predictor.named_parameters()),
                 frozen_world_unchanged=frozen_world_before==digest(self.raenwm_runtime.predictor.bundle.model.named_parameters()),
                 cls_mapping_updated=cls_before!=digest((n,p) for n,p in self.policy.named_parameters() if 'cls_residual_mlp' in n),
                 fusion_updated=fusion_before!=digest(self.raenwm_rgb_fusion_adapter.named_parameters()))
