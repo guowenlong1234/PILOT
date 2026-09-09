@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Repeatable real joint-training benchmark; optional stage synchronization."""
 import argparse
+import hashlib
 from collections import defaultdict
 import json
 import os
@@ -21,6 +22,7 @@ def main():
     p.add_argument('--warmup', type=int, default=1)
     p.add_argument('--capture', action='store_true')
     p.add_argument('--sync-stages', action='store_true')
+    p.add_argument('--audit', action='store_true')
     args = p.parse_args()
     rank = int(os.environ.get('LOCAL_RANK', 0))
     world = int(os.environ.get('WORLD_SIZE', 1))
@@ -35,6 +37,21 @@ def main():
     from vlnce_baselines.models.R1Policy import ETP
     import habitat, habitat_sim, transformers
     stats = defaultdict(lambda: [0., 0]);steps=[];captures=[0];trainer=[None];last=[None]
+    frozen_world_before={}
+
+    def digest(named):
+        return {name:hashlib.sha256(value.detach().cpu().contiguous().numpy().tobytes()).hexdigest()
+                for name,value in named}
+
+    old_init_runtime=trainer_module.RLTrainer._initialize_raenwm_runtime
+    def init_runtime(self,*a,**kw):
+        result=old_init_runtime(self,*a,**kw)
+        if args.audit and not frozen_world_before:
+            model=self.raenwm_runtime.predictor.bundle.model
+            assert not any(p.requires_grad for p in model.parameters())
+            frozen_world_before.update(digest(model.named_parameters()))
+        return result
+    trainer_module.RLTrainer._initialize_raenwm_runtime=init_runtime
 
     def wrap(cls, name, label):
         old = getattr(cls,name)
@@ -85,6 +102,10 @@ def main():
     def interval(self,*a,**kw):
         trainer[0]=self
         groups=[dict(name=g.get('name'),params=sum(p.numel() for p in g['params']),lr=g['lr']) for g in self.optimizer.param_groups]
+        if args.audit:
+            frozen_before=digest((n,p) for n,p in self.policy.named_parameters() if not p.requires_grad)
+            cls_before=digest((n,p) for n,p in self.policy.named_parameters() if 'cls_residual_mlp' in n)
+            fusion_before=digest(self.raenwm_rgb_fusion_adapter.named_parameters())
         torch.cuda.synchronize(rank);last[0]=time.perf_counter()
         result=old_interval(self,*a,**kw)
         context={k:sum(v) for k,v in self.logs.items() if k.startswith('nwm_context_')}
@@ -95,6 +116,13 @@ def main():
             peak_memory_mib=torch.cuda.max_memory_allocated(rank)/2**20,
             versions=dict(python=platform.python_version(),torch=str(torch.__version__),cuda=torch.version.cuda,
                 transformers=transformers.__version__,habitat=habitat.__version__,habitat_sim=habitat_sim.__version__))
+        if args.audit:
+            audit=dict(frozen_visual_unchanged=frozen_before==digest((n,p) for n,p in self.policy.named_parameters() if not p.requires_grad),
+                frozen_world_unchanged=frozen_world_before==digest(self.raenwm_runtime.predictor.bundle.model.named_parameters()),
+                cls_mapping_updated=cls_before!=digest((n,p) for n,p in self.policy.named_parameters() if 'cls_residual_mlp' in n),
+                fusion_updated=fusion_before!=digest(self.raenwm_rgb_fusion_adapter.named_parameters()))
+            assert all(audit.values()),audit
+            report['audit']=audit
         (root/f'rank{rank}.json').write_text(json.dumps(report,indent=2))
         print('BENCHMARK '+json.dumps(report),flush=True)
         return result
