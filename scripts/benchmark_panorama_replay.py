@@ -16,6 +16,7 @@ def main():
     p.add_argument('--captures',required=True);p.add_argument('--output',required=True)
     p.add_argument('--reference');p.add_argument('--repeats',type=int,default=3)
     p.add_argument('--compile-model',action='store_true')
+    p.add_argument('--prediction-batch-size',type=int,default=8)
     args=p.parse_args();root=Path(args.output);root.mkdir(parents=True,exist_ok=True)
     from vlnce_baselines.models.encoders.rae_dinov2_encoder import RaeDinov2RgbEncoder
     from vlnce_baselines.nwm.runtime import RaeNwmLatentNormalizer
@@ -27,7 +28,8 @@ def main():
         device='cuda:0',enable_decoder=False,num_steps=10,final_only_euler=False,use_external_context_latents=True)
     if args.compile_model:
         predictor.bundle.model=torch.compile(predictor.bundle.model,mode='reduce-overhead')
-    runtime=m.PanoramaPredictionRuntime(encoder=encoder,normalizer=normalizer,predictor=predictor,mode='world_exact_select')
+    runtime=m.PanoramaPredictionRuntime(encoder=encoder,normalizer=normalizer,predictor=predictor,
+        mode='world_exact_select',prediction_batch_size=args.prediction_batch_size)
     stages=defaultdict(float)
     def wrap(obj,name,key):
         old=getattr(obj,name)
@@ -68,12 +70,15 @@ def main():
         for a,b in zip(outputs,ref):
             assert a.shape==b.shape
             max_abs=(a-b).abs().max().item();cos=F.cosine_similarity(a.flatten(1),b.flatten(1),dim=1).min().item()
-            torch.testing.assert_close(a,b,rtol=1e-4,atol=1e-4)
-            parity.append(dict(max_abs=max_abs,min_cosine=cos))
+            error=None
+            try:torch.testing.assert_close(a,b,rtol=1e-4,atol=1e-4)
+            except AssertionError as exc:error=str(exc)
+            parity.append(dict(max_abs=max_abs,min_cosine=cos,passed=error is None,error=error))
     torch.save(outputs,root/'outputs.pt')
     report=dict(rows=rows,mean_cold=float(np.mean([r['cold'] for r in rows])),mean_cached=float(np.mean([r['cached'] for r in rows])),
         mean_stages={k:float(np.mean([r['stages'].get(k,0) for r in rows])) for k in ('projection','encoder','predictor')},parity=parity)
     (root/'report.json').write_text(json.dumps(report,indent=2));print(json.dumps(report,indent=2))
+    assert all(r['passed'] for r in parity),'Prediction parity failed; measurements retained in report.json'
 
 
 if __name__=='__main__':main()
