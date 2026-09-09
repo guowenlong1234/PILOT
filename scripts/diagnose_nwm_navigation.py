@@ -47,6 +47,7 @@ def main():
     per_episode = {}
 
     def capture(self, *call_args, **kwargs):
+        noise_state = self.raenwm_runtime.generator.get_state()
         prediction = original(self, *call_args, **kwargs)
         calls[0] += 1
         if prediction is None or prediction.pred_tokens is None:
@@ -55,6 +56,11 @@ def main():
             return prediction
         runtime = self.raenwm_runtime
         batch = runtime.last_batch
+        from vlnce_baselines.nwm.raenwm_core.models import make_latent_noise
+        replay_generator = torch.Generator(device=runtime.device)
+        replay_generator.set_state(noise_state)
+        initial_noise = make_latent_noise(len(batch.records), 768, 16, runtime.device,
+            dtype=batch.context_latent.dtype, predict_cls_token=True, generator=replay_generator)
         cur_pos, cur_ori, previews = call_args[1:4]
         queries = self._build_raenwm_preview_queries(cur_pos, cur_ori, previews)
         lookup = {(q.env_index, q.query_id): q for q in queries}
@@ -75,6 +81,9 @@ def main():
                 poses = [(f.position, f.yaw) for f in frames]
                 poses.append((query.target_position, yaw))
                 images = []
+                before = self.envs.call_at(rec.env_index, 'get_agent_info')
+                navigable = self.envs.call_at(rec.env_index, 'check_navigability',
+                    {'node': query.target_position.tolist()})
                 for position, heading in poses:
                     rotation = [0., math.sin(heading/2), 0., math.cos(heading/2)]
                     error = (heading_from_quaternion(rotation)-heading+math.pi)%(2*math.pi)-math.pi
@@ -84,6 +93,8 @@ def main():
                          'source_rotation': rotation, 'keep_agent_at_new_pose': False})
                     rgb = obs['rgb']
                     images.append(np.asarray(rgb).copy())
+                after = self.envs.call_at(rec.env_index, 'get_agent_info')
+                assert before == after, 'Oracle rendering changed navigation pose/task state'
                 encoder = self.raenwm_low_level_synchronizer.encoder
                 raw_cls, raw_patch = encoder.forward_raw_cls_and_patch_latents({'rgb': np.stack(images)})
                 truth = pack_cls_patch(runtime.normalizer.normalize_cls(raw_cls),
@@ -100,6 +111,7 @@ def main():
                     'context_positions': [f.position.tolist() for f in frames],
                     'context_yaws': [f.yaw for f in frames],
                     'distance_m': rec.distance_m,
+                    'target_navigable': bool(navigable), 'render_preserved_agent_state': before == after,
                     'context_rerender_max_abs': source_error.max().item(),
                     'context_rerender_mean_abs': source_error.mean().item(),
                     'cls_pred_target_cos': cosine(predicted_cls, target_raw_cls, dim=0).item(),
@@ -110,6 +122,7 @@ def main():
                     'context': batch.context_latent[row:row+1].detach().float().cpu(),
                     'curr_delta': batch.curr_delta[row:row+1].detach().cpu(),
                     'rel_t': batch.rel_t[row:row+1].detach().cpu(),
+                    'initial_noise': initial_noise[row:row+1].detach().cpu(),
                     'pred_tokens': prediction.pred_tokens[row].detach().float().cpu(),
                     'truth_tokens': truth.detach().float().cpu(),
                     'normalizer_mean': runtime.normalizer.mean.cpu(),
