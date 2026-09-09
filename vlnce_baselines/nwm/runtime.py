@@ -405,8 +405,8 @@ class NwmPredictionRuntime:
         self,
         events,
         *,
-        raw_patch_latents: torch.Tensor,
-        raw_cls: torch.Tensor,
+        raw_patch_latents: Optional[torch.Tensor],
+        raw_cls: Optional[torch.Tensor],
     ) -> None:
         if self.context_source != LOW_LEVEL_CONTEXT_SOURCE:
             raise RuntimeError(
@@ -418,17 +418,22 @@ class NwmPredictionRuntime:
             event for event in events
             if isinstance(event, Mapping) and event.get("type") == "frame"
         ]
-        if int(raw_patch_latents.shape[0]) != len(frame_events):
+        pose_only = (getattr(self, "panorama_mode", "front") != "front"
+                     and raw_patch_latents is None and raw_cls is None)
+        if not pose_only and (raw_patch_latents is None or raw_cls is None):
+            raise ValueError("front context requires encoded CLS and patch latents")
+        if not pose_only and int(raw_patch_latents.shape[0]) != len(frame_events):
             raise ValueError("low-level patch count does not match frame events")
-        if int(raw_cls.shape[0]) != len(frame_events):
+        if not pose_only and int(raw_cls.shape[0]) != len(frame_events):
             raise ValueError("low-level CLS count does not match frame events")
-        normalized_patch = self.normalizer.normalize_patch(raw_patch_latents)
-        normalized_cls = self.normalizer.normalize_cls(raw_cls)
-        normalized_tokens = pack_cls_patch(normalized_cls, normalized_patch)
-        if tuple(normalized_tokens.shape[1:]) != (257, 768):
-            raise ValueError(
-                "low-level native context must encode as [N,257,768]"
-            )
+        if not pose_only:
+            normalized_patch = self.normalizer.normalize_patch(raw_patch_latents)
+            normalized_cls = self.normalizer.normalize_cls(raw_cls)
+            normalized_tokens = pack_cls_patch(normalized_cls, normalized_patch)
+            if tuple(normalized_tokens.shape[1:]) != (257, 768):
+                raise ValueError(
+                    "low-level native context must encode as [N,257,768]"
+                )
         for event in events:
             if not isinstance(event, Mapping):
                 raise ValueError("low-level context event must be a mapping")
@@ -445,10 +450,10 @@ class NwmPredictionRuntime:
                     raise ValueError("low-level frame_index is out of range")
                 self.adapter.update_context(
                     env_index=env_index,
-                    rgb=None,
+                    rgb=event.get("rgb") if pose_only else None,
                     position=event.get("position"),
                     yaw=float(event.get("yaw")),
-                    latent=normalized_tokens[frame_index],
+                    latent=None if pose_only else normalized_tokens[frame_index],
                 )
                 if getattr(self,"panorama_mode","front") != "front":
                     from .panorama_runtime import ObservedPanoramaFrame

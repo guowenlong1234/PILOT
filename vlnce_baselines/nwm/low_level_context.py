@@ -694,6 +694,7 @@ class LowLevelContextSynchronizer:
                             "position": _as_position3(event.get("position")),
                             "yaw": _wrap_to_pi(float(event.get("yaw"))),
                             **({"panorama": event["panorama"]} if "panorama" in event else {}),
+                            **({"rgb": frames[-1]} if getattr(self.runtime, "panorama_mode", "front") != "front" else {}),
                         }
                     )
                 else:
@@ -701,11 +702,18 @@ class LowLevelContextSynchronizer:
                         f"Unknown low-level context event type: {event_type!r}"
                     )
 
-        if frames and self.device.type == "cuda":
+        panorama_active = getattr(self.runtime, "panorama_mode", "front") != "front"
+        if frames and self.device.type == "cuda" and not panorama_active:
             torch.cuda.synchronize(self.device)
         started = time.perf_counter()
-        raw_cls, raw_patch, encode_batches = self._encode_frames(frames)
-        if frames and self.device.type == "cuda":
+        if panorama_active:
+            # Panorama prediction uses target-aligned views. Keep the recorded
+            # RGB and pose for adapter bookkeeping without encoding an unused
+            # front latent or imposing two device-wide barriers.
+            raw_cls, raw_patch, encode_batches = None, None, 0
+        else:
+            raw_cls, raw_patch, encode_batches = self._encode_frames(frames)
+        if frames and self.device.type == "cuda" and not panorama_active:
             torch.cuda.synchronize(self.device)
         encode_seconds = time.perf_counter() - started
         self.runtime.apply_low_level_context_events(
@@ -723,7 +731,7 @@ class LowLevelContextSynchronizer:
             "environment_count": float(num_envs),
             "reset_events": float(reset_events),
             "frame_events": float(len(frames)),
-            "encoded_frames": float(len(frames)),
+            "encoded_frames": 0.0 if panorama_active else float(len(frames)),
             "encode_batches": float(encode_batches),
             "encode_seconds": float(encode_seconds),
             "context_ready": float(ready),

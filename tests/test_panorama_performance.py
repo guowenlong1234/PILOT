@@ -25,3 +25,30 @@ def test_projection_cache_distinguishes_camera_geometry_and_is_bounded():
     perspective_from_cube(cube, 3, size=32)
     perspective_from_cube(cube, 3, size=32, hfov=80)
     assert _perspective_sampling_map.cache_info().misses == 32
+
+
+def test_panorama_history_accepts_raw_events_without_unused_latent_encoding():
+    from vlnce_baselines.nwm.runtime import NwmPredictionRuntime
+    from vlnce_baselines.nwm.etp_adapter import NwmEtpAdapter
+    from vlnce_baselines.nwm.low_level_context import LOW_LEVEL_CONTEXT_SOURCE
+    runtime = object.__new__(NwmPredictionRuntime)
+    runtime.panorama_mode = 'world_exact_select'
+    runtime.context_source = LOW_LEVEL_CONTEXT_SOURCE
+    runtime.adapter = NwmEtpAdapter()
+    runtime._panorama_frame_counter = 0
+    runtime.reset(1)
+    events = [{'type': 'reset', 'env_index': 0}]
+    for i in range(4):
+        events.append(dict(type='frame', env_index=0, frame_index=i,
+            position=[0., 0., -i*.25], yaw=0., rgb=np.full((224,224,3),i,np.uint8),
+            panorama=dict(format='observed_panorama_v1',cube_rgb=np.zeros((6,8,8,3),np.uint8),
+                native_world_rgb12=np.zeros((12,224,224,3),np.uint8))))
+    # No normalizer/encoder exists on this object: invoking one would fail.
+    runtime.apply_low_level_context_events(events,raw_patch_latents=None,raw_cls=None)
+    assert runtime.adapter.buffers[0].is_ready()
+    assert len(runtime.panorama_histories[0].frames) == 4
+    for i,f in enumerate(runtime.adapter.buffers[0].get_context()):
+        assert f.latent is None and np.all(f.rgb == i)
+    runtime.apply_low_level_context_events([events[0]],raw_patch_latents=None,raw_cls=None)
+    assert not runtime.adapter.buffers[0].is_ready()
+    assert not runtime.panorama_histories[0].frames
