@@ -10,7 +10,7 @@ import numpy as np
 
 
 SPACING = 0.24975892673356762
-FORMAT = 'nwm_observed_cube_virtual_context_v1'
+FORMAT = 'nwm_observed_panorama_virtual_context_v2'
 
 
 def wrap(angle):
@@ -75,6 +75,18 @@ def local_xy(source, target, yaw):
     delta = np.asarray(target, dtype=float)-np.asarray(source, dtype=float)
     c, s = math.cos(yaw), math.sin(yaw)
     return np.array([-c*delta[2]-s*delta[0], s*delta[2]-c*delta[0]])
+
+
+def observed_view(cube,yaw,native_world_rgb12=None):
+    """Use an actual recorded 30deg view when present, otherwise cube rays."""
+    if native_world_rgb12 is not None:
+        bank=np.asarray(native_world_rgb12)
+        if bank.dtype!=np.uint8 or bank.shape!=(12,224,224,3):
+            raise ValueError('native world views must be [12,224,224,3] uint8')
+        sector=int(np.floor(float(yaw)/(np.pi/6)+.5))%12
+        if abs(float(wrap(yaw-sector*np.pi/6)))<1e-6:
+            return bank[sector].copy()
+    return perspective_from_cube(cube,yaw)
 
 
 @dataclass(frozen=True)
@@ -155,7 +167,8 @@ def make_context_plan(positions, yaws, target_position, target_yaw, mode,
         float(view_yaws[source]),tuple(target),float(target_yaw),delta,rel_t,fallback)
 
 
-def materialize_context(cubes, plan):
+def materialize_context(cubes, plan, native_world_rgb12=None):
     if len(cubes) != 4:
         raise ValueError('four distinct observed time points are required')
-    return np.stack([perspective_from_cube(cubes[i],plan.view_yaws[i]) for i in plan.order])
+    return np.stack([observed_view(cubes[i],plan.view_yaws[i],
+        None if native_world_rgb12 is None else native_world_rgb12[i]) for i in plan.order])

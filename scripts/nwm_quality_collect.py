@@ -53,6 +53,13 @@ def main():
         requests=[]
         for f in frames:
             for quat in cube_quaternions():requests.append({'position':f.position.tolist(),'rotation':quat})
+        # Eight additional horizontal views plus four cardinal cube faces give
+        # an exact native 12-direction bank, avoiding reproject/encoder drift.
+        extra_sectors=[i for i in range(12) if i%3]
+        for f in frames:
+            for sector in extra_sectors:
+                yaw=sector*math.pi/6
+                requests.append({'position':f.position.tolist(),'rotation':[0,math.sin(yaw/2),0,math.cos(yaw/2)]})
         # Direct front and world30 views are projection/encoder validation
         # references at already visited poses, not alternate model inputs.
         targets=[]
@@ -67,15 +74,20 @@ def main():
         for t in targets:requests.append({'position':t['position'],'rotation':[0,math.sin(t['yaw']/2),0,math.cos(t['yaw']/2)]})
         rendered=self.envs.call_at(0,'get_nwm_quality_views',{'requests':requests})
         rgb=np.stack([x['rgb'] for x in rendered])
-        for t,obs in zip(targets,rendered[29:]):t['navigable']=obs['navigable']
+        for t,obs in zip(targets,rendered[61:]):t['navigable']=obs['navigable']
+        cube=rgb[:24].reshape(4,6,*rgb.shape[1:])
+        native=np.empty((4,12,*rgb.shape[1:]),dtype=np.uint8)
+        for fi in range(4):
+            for sector in range(12):
+                native[fi,sector]=cube[fi,sector//3] if sector%3==0 else rgb[24+fi*8+extra_sectors.index(sector)]
         did=len(report['decisions'])
         episode=self.envs.current_episodes()[0]
         payload={'episode':args.episode,'scene':str(episode.scene_id),'call':calls[0],
             'cube_format':'world_optical_center_locked_v2',
             'max_camera_center_error_m':max(x['camera_center_error_m'] for x in rendered),
-            'positions':pos,'yaws':yaws,'cube_rgb':rgb[:24].reshape(4,6,*rgb.shape[1:]),
-            'front_rgb':rgb[24:28],'projection_reference_rgb':rgb[28],
-            'projection_reference_yaw':beta,'target_rgb':rgb[29:],'targets':targets,
+            'positions':pos,'yaws':yaws,'cube_rgb':cube,'native_world_rgb12':native,
+            'front_rgb':rgb[56:60],'projection_reference_rgb':rgb[60],
+            'projection_reference_yaw':beta,'target_rgb':rgb[61:],'targets':targets,
             'original_context_tokens':batch.context_latent[0].detach().float().cpu(),
             'original_prediction_tokens':pred.pred_tokens.detach().float().cpu()}
         torch.save(payload,root/f'decision_{did:02d}.pt')

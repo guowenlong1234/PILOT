@@ -37,6 +37,14 @@ def test_cube_identity_is_exact():
     np.testing.assert_array_equal(perspective_from_cube(cube,np.pi/2,size=32),cube[1])
 
 
+def test_native_views_preserved_without_resampling():
+    from vlnce_baselines.nwm.panorama_context import observed_view
+    rng=np.random.default_rng(6)
+    bank=rng.integers(0,256,(12,224,224,3),dtype=np.uint8)
+    for sector in range(12):
+        np.testing.assert_array_equal(observed_view(colored_rays_cube(),sector*np.pi/6,bank),bank[sector])
+
+
 def test_reversed_anchor_preserves_target_and_recomputes_all_conditions():
     pos=np.array([[0,0,-i*.25] for i in range(4)])
     target=np.array([0.,0.,.5]);yaw=np.pi

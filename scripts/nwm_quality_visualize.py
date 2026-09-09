@@ -30,7 +30,7 @@ def main():
         for i,row in enumerate(data['rows']):
             if row['id'] in ids and row['seed']==11:predictions[(row['id'],row['mode'])]=data['tokens'][i].float()
     rows=json.loads((root/(args.name+'.json')).read_text())['rows'];lookup={(r['id'],r['mode'],r['seed']):r for r in rows}
-    from vlnce_baselines.nwm.panorama_context import perspective_from_cube
+    from vlnce_baselines.nwm.panorama_context import observed_view
     from vlnce_baselines.nwm.runtime import RaeNwmLatentNormalizer
     norm=RaeNwmLatentNormalizer('pretrained/raenwm_stage0/stat.pt')
     sys.path.insert(0,str(up/'RAE/src/stage1'));decoder_module=importlib.import_module('decoders')
@@ -58,7 +58,7 @@ def main():
             decoded=F.interpolate(decoded,(224,224),mode='bicubic',align_corners=False).clamp(0,1)
         rgb=(decoded.cpu().permute(0,2,3,1).numpy()*255).round().astype(np.uint8)
         plan=q['variants'][winner];source=plan['source_index']
-        source_rgb=perspective_from_cube(capture['cube_rgb'][source],plan['view_yaws'][source])
+        source_rgb=observed_view(capture['cube_rgb'][source],plan['view_yaws'][source],capture['native_world_rgb12'][source])
         panels=[capture['front_rgb'][-1],source_rgb,capture['target_rgb'][qi],*rgb]
         titles=['Original front source','Selected panorama source','Target RGB (fixed position/yaw)',
                 'Original NWM prediction','Selected NWM prediction','Target latent decoded (control)']

@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from .etp_adapter import RaeGhostInputRecord, RaeNwmInputBatch
-from .panorama_context import FORMAT, MODES, local_xy, make_context_plan, perspective_from_cube
+from .panorama_context import FORMAT, MODES, local_xy, make_context_plan, observed_view
 from .raenwm_core.models import pack_cls_patch
 from .runtime import build_native_cls_prediction
 from .types import NwmCondition, NwmPrediction
@@ -24,6 +24,7 @@ class ObservedPanoramaFrame:
     position: np.ndarray
     body_yaw: float
     cube_rgb: np.ndarray
+    native_world_rgb12: object = None
     _cache: OrderedDict = field(default_factory=OrderedDict,repr=False)
 
     def __post_init__(self):
@@ -34,6 +35,10 @@ class ObservedPanoramaFrame:
         if self.cube_rgb.dtype!=np.uint8 or self.cube_rgb.ndim!=4 or self.cube_rgb.shape[0]!=6 or self.cube_rgb.shape[-1]!=3 or self.cube_rgb.shape[1]!=self.cube_rgb.shape[2]:
             raise ValueError('observed cube must be [6,H,H,3] uint8')
         self.position.flags.writeable=False;self.cube_rgb.flags.writeable=False
+        if self.native_world_rgb12 is not None:
+            bank=np.asarray(self.native_world_rgb12).copy()
+            if bank.shape!=(12,224,224,3) or bank.dtype!=np.uint8:raise ValueError('invalid native direction bank')
+            bank.flags.writeable=False;self.native_world_rgb12=bank
 
 
 class PanoramaHistory:
@@ -105,7 +110,7 @@ class PanoramaPredictionRuntime:
         pending_items=list(pending.items())
         for start in range(0,len(pending_items),self.encode_batch_size):
             part=pending_items[start:start+self.encode_batch_size]
-            rgb=np.stack([perspective_from_cube(frame.cube_rgb,yaw) for _,(frame,_,yaw) in part])
+            rgb=np.stack([observed_view(frame.cube_rgb,yaw,frame.native_world_rgb12) for _,(frame,_,yaw) in part])
             cls,patch=self.encoder.forward_raw_cls_and_patch_latents({'rgb':rgb})
             tokens=pack_cls_patch(self.normalizer.normalize_cls(cls),self.normalizer.normalize_patch(patch)).detach().half().cpu()
             for token,(batchkey,(frame,cachekey,_)) in zip(tokens,part):

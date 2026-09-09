@@ -85,7 +85,7 @@ def make_encoder():
 
 
 def encode(args):
-    from vlnce_baselines.nwm.panorama_context import MODES,make_context_plan,perspective_from_cube
+    from vlnce_baselines.nwm.panorama_context import MODES,make_context_plan,perspective_from_cube,observed_view
     root=Path(args.output);spec=json.loads((root/'split.json').read_text());enc,norm=make_encoder()
     jobs=spec['jobs'][args.shard::args.shards];checks=[]
     for job in jobs:
@@ -97,6 +97,7 @@ def encode(args):
             data=torch.load(source,map_location='cpu',weights_only=False)
             if data.get('cube_format')!='world_optical_center_locked_v2':
                 raise ValueError('capture lacks verified common optical centers')
+            if 'native_world_rgb12' not in data:raise ValueError('native direction bank required')
             images=list(data['front_rgb']);keys={('front',i):i for i in range(4)}
             plans=[]
             for qi,target in enumerate(data['targets']):
@@ -109,7 +110,7 @@ def encode(args):
                         yaw=plan.view_yaws[i]
                         key=(i,round(float(yaw%(2*np.pi)),8))
                         if key not in keys:
-                            keys[key]=len(images);images.append(perspective_from_cube(data['cube_rgb'][i],yaw))
+                            keys[key]=len(images);images.append(observed_view(data['cube_rgb'][i],yaw,data['native_world_rgb12'][i]))
                         ids.append(keys[key])
                     variants[mode]={'ids':ids,'delta':plan.delta,'rel_t':plan.rel_t,
                         'source_index':plan.source_index,'source_yaw':plan.source_yaw,
@@ -127,6 +128,7 @@ def encode(args):
             check={'episode':job['episode'],'file':decision['file'],
                 'projection_rgb_mae':float(np.abs(ref.astype(float)-projected.astype(float)).mean()/255),
                 'projection_cls_cosine':F.cosine_similarity(cls[0],cls[1],dim=0).item(),
+                'native_reference_max_pixel_error':int(np.abs(ref.astype(int)-observed_view(data['cube_rgb'][-1],data['projection_reference_yaw'],data['native_world_rgb12'][-1]).astype(int)).max()),
                 'original_context_mean_abs':(features[:4]-data['original_context_tokens']).abs().mean().item(),
                 'max_camera_center_error_m':data['max_camera_center_error_m'],
                 'features':len(features),'queries':len(plans)}
