@@ -56,7 +56,10 @@ def main():
     by_angle={}
     for name,predicate in [('small_le45',lambda a:abs(a)<=45),('middle_45_90',lambda a:45<abs(a)<=90),('large_gt90',lambda a:abs(a)>90)]:
         subset=[x for x in paired if predicate(x['original_turn_deg'])]
-        by_angle[name]={'queries':len(subset),**{field:float(np.mean([x[field] for x in subset])) for field in ['base_cls_cosine','winner_cls_cosine','delta_cls_cosine','base_patch_cosine','winner_patch_cosine']} if subset else {'queries':0}
+        by_angle[name]={'queries':len(subset)}
+        if subset:
+            for field in ['base_cls_cosine','winner_cls_cosine','delta_cls_cosine','base_patch_cosine','winner_patch_cosine']:
+                by_angle[name][field]=float(np.mean([x[field] for x in subset]))
     result={'winner':winner,'confirmation_queries':len(paired),'scenes':len(per_scene),
         'noise_seeds':spec['confirmation_seeds'],'cls_improved_queries':sum(x['delta_cls_cosine']>0 for x in paired),
         'per_scene':per_scene,'uncertainty':uncertainty,'by_original_angle':by_angle,'paired_queries':paired,
