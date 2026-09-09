@@ -32,6 +32,9 @@ def test_weights_only_migration_allowed_but_resume_rejected():
     with pytest.raises(ValueError,match='metadata mismatch'):
         trainer._validate_raenwm_context_checkpoint_metadata({'raenwm_context_metadata':old},allow_missing=False)
     assert trainer._validate_raenwm_context_checkpoint_metadata({'raenwm_context_metadata':meta},allow_missing=False)==meta
+    cfg.defrost();cfg.MODEL.RAENWM.panorama_context_mode='front';cfg.freeze()
+    with pytest.raises(ValueError,match='metadata mismatch'):
+        trainer._validate_raenwm_context_checkpoint_metadata({'raenwm_context_metadata':meta},allow_missing=False)
 
 
 def test_prediction_routes_to_panorama_with_original_absolute_target():

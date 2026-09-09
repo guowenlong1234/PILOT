@@ -1,5 +1,6 @@
 from typing import Any, Dict, Optional, Tuple, List, Union
 import math
+import time
 import random
 import habitat
 import numpy as np
@@ -553,8 +554,11 @@ class VLNCEDaggerEnv(habitat.RLEnv):
                     continue
                 # Only past observed positions enter this path. No candidate
                 # or target pose is available to the history collector.
+                started = time.perf_counter()
                 views = self._render_nwm_rgb_views([
                     {"position":event["position"],"rotation":rotation} for rotation in quaternions])
+                payload["stats"]["panorama_render_count"] = payload["stats"].get("panorama_render_count",0) + len(views)
+                payload["stats"]["panorama_render_seconds"] = payload["stats"].get("panorama_render_seconds",0.) + time.perf_counter()-started
                 rgb = np.stack([v["rgb"] for v in views])
                 event["panorama"] = {"format":"observed_panorama_v1",
                     "cube_rgb":rgb[[0,3,6,9,12,13]],"native_world_rgb12":rgb[:12]}

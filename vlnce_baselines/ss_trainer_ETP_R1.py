@@ -837,6 +837,8 @@ class RLTrainer(BaseVLNCETrainer):
             for key, value in expected.items()
             if saved.get(key) != value
         }
+        if saved.get("panorama_context_mode","front") != expected.get("panorama_context_mode","front"):
+            mismatches["panorama_context_mode"] = (saved.get("panorama_context_mode","front"),expected.get("panorama_context_mode","front"))
         if mismatches and expected.get("panorama_context_mode") == "world_exact_select":
             panorama_keys = {key for key in expected if key.startswith("panorama_")}
             is_resume = bool(getattr(getattr(self.config,"IL",None),"is_requeue",False))

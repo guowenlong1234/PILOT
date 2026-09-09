@@ -39,6 +39,8 @@ LOW_LEVEL_CONTEXT_DIAGNOSTIC_NAMES = (
     "single_sensor_renders",
     "reused_rgb_frames",
     "replay_render_seconds",
+    "panorama_render_count",
+    "panorama_render_seconds",
 )
 
 
@@ -84,6 +86,8 @@ def summarize_low_level_context_diagnostics(
         "single_sensor_renders": values["single_sensor_renders"],
         "reused_rgb_frames": values["reused_rgb_frames"],
         "replay_render_seconds": values["replay_render_seconds"],
+        "panorama_render_count": values["panorama_render_count"],
+        "panorama_render_seconds": values["panorama_render_seconds"],
         "frames_per_drain": _diagnostic_ratio(frames, drains),
         "frames_per_environment": _diagnostic_ratio(
             frames, environments
@@ -296,6 +300,8 @@ class LowLevelContextEventBuffer:
             "single_sensor_renders": 0,
             "reused_rgb_frames": 0,
             "replay_render_seconds": 0.0,
+            "panorama_render_count": 0.0,
+            "panorama_render_seconds": 0.0,
         }
 
     def reset_trace(self) -> None:
@@ -630,6 +636,8 @@ class LowLevelContextSynchronizer:
             "single_sensor_renders": 0.0,
             "reused_rgb_frames": 0.0,
             "replay_render_seconds": 0.0,
+            "panorama_render_count": 0.0,
+            "panorama_render_seconds": 0.0,
         }
         context_size = int(self.runtime.adapter.config.context_size)
         for env_index, payload in enumerate(payloads):
@@ -728,4 +736,6 @@ class LowLevelContextSynchronizer:
             "single_sensor_renders": worker_stats["single_sensor_renders"],
             "reused_rgb_frames": worker_stats["reused_rgb_frames"],
             "replay_render_seconds": worker_stats["replay_render_seconds"],
+            "panorama_render_count": worker_stats["panorama_render_count"],
+            "panorama_render_seconds": worker_stats["panorama_render_seconds"],
         }
