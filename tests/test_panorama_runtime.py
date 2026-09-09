@@ -42,7 +42,7 @@ class Predictor:
 def test_prediction_keeps_target_pose_changes_anchor_and_reuses_shared_views():
     h=PanoramaHistory()
     for i in range(4):h.append(frame(i))
-    e,p=Encoder(),Predictor();runtime=PanoramaPredictionRuntime(encoder=e,normalizer=Normalizer(),predictor=p,mode='world_exact_select',device='cpu')
+    e,p=Encoder(),Predictor();runtime=PanoramaPredictionRuntime(encoder=e,normalizer=Normalizer(),predictor=p,mode='world_exact_select',device='cpu',require_native_views=False)
     targets=[PanoramaTarget(0,'a',(0.,0.,.5),np.pi),PanoramaTarget(0,'b',(0.,0.,1.),np.pi)]
     before=[f.position.copy() for f in h.frames]
     result=runtime.predict(targets,{0:h})

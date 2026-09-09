@@ -75,13 +75,14 @@ class PanoramaTarget:
 class PanoramaPredictionRuntime:
     def __init__(self,*,encoder,normalizer,predictor,mode,
                  device='cuda:0',encode_batch_size=16,prediction_batch_size=8,
-                 cached_views_per_frame=12):
+                 cached_views_per_frame=12,require_native_views=True):
         if mode not in MODES:raise ValueError('unknown panorama context mode')
         if min(encode_batch_size,prediction_batch_size,cached_views_per_frame)<1:raise ValueError('positive batch/cache sizes required')
         self.encoder=encoder;self.normalizer=normalizer;self.predictor=predictor
         self.mode=mode;self.device=torch.device(device)
         self.encode_batch_size=encode_batch_size;self.prediction_batch_size=prediction_batch_size
         self.cached_views_per_frame=cached_views_per_frame
+        self.require_native_views=bool(require_native_views)
         self.cache_identity=object()
         self.last_diagnostics={}
 
@@ -89,7 +90,9 @@ class PanoramaPredictionRuntime:
     def context_metadata(self):
         return {'format':FORMAT,'mode':self.mode,'context_size':4,
                 'cube_order':'yaw0_90_180_270_pitch+90_-90','source':'selected_last_camera',
-                'target':'absolute_pose_unchanged','cache_dtype':'float16'}
+                'target':'absolute_pose_unchanged','cache_dtype':'float16',
+                'require_native_views':self.require_native_views,
+                'view_extraction':'native_world_30deg_else_cube_bilinear'}
 
     @torch.no_grad()
     def predict(self,targets:Sequence[PanoramaTarget],histories,*,initial_noise=None,generator=None):
@@ -101,6 +104,8 @@ class PanoramaPredictionRuntime:
             frames=list(histories[target.env_index].frames)
             if len(frames)!=4:
                 skipped['context_not_ready']=skipped.get('context_not_ready',0)+1;continue
+            if self.require_native_views and any(f.native_world_rgb12 is None for f in frames):
+                raise ValueError('validated context requires the recorded native world direction bank')
             if self.mode=='front' and any(f.front_rgb is None for f in frames):
                 raise ValueError('baseline mode requires the four directly recorded front images')
             plan=make_context_plan([f.position for f in frames],[f.body_yaw for f in frames],
