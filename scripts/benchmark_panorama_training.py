@@ -23,6 +23,7 @@ def main():
     p.add_argument('--capture', action='store_true')
     p.add_argument('--sync-stages', action='store_true')
     p.add_argument('--audit', action='store_true')
+    p.add_argument('--context-mode',choices=('front','world_exact_select'),default='world_exact_select')
     args = p.parse_args()
     rank = int(os.environ.get('LOCAL_RANK', 0))
     world = int(os.environ.get('WORLD_SIZE', 1))
@@ -136,7 +137,7 @@ def main():
     opts.update({'IL.freeze_navigation_backbone':False,'IL.lr':2e-6,'IL.rgb_fusion_lr':1e-5,
         'IL.iters':args.updates,'IL.log_every':args.updates,'IL.batch_size':4,
         'IL.checkpoint_sync_enabled':False,'IL.is_requeue':False,
-        'MODEL.RAENWM.panorama_context_mode':'world_exact_select',
+        'MODEL.RAENWM.panorama_context_mode':args.context_mode,
         'CHECKPOINT_FOLDER':str(root/'checkpoints')+'/', 'TENSORBOARD_DIR':str(root/'tb')+'/',
         'RESULTS_DIR':str(root/'results')+'/'})
     sys.argv=['run.py','--local_rank',str(rank),'--exp_name','panorama_perf',
