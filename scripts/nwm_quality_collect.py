@@ -71,6 +71,8 @@ def main():
         did=len(report['decisions'])
         episode=self.envs.current_episodes()[0]
         payload={'episode':args.episode,'scene':str(episode.scene_id),'call':calls[0],
+            'cube_format':'world_optical_center_locked_v2',
+            'max_camera_center_error_m':max(x['camera_center_error_m'] for x in rendered),
             'positions':pos,'yaws':yaws,'cube_rgb':rgb[:24].reshape(4,6,*rgb.shape[1:]),
             'front_rgb':rgb[24:28],'projection_reference_rgb':rgb[28],
             'projection_reference_yaw':beta,'target_rgb':rgb[29:],'targets':targets,

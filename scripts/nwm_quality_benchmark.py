@@ -95,6 +95,8 @@ def encode(args):
             source=capture/decision['file'];dest=root/'encoded'/job['episode']/decision['file']
             if dest.exists():continue
             data=torch.load(source,map_location='cpu',weights_only=False)
+            if data.get('cube_format')!='world_optical_center_locked_v2':
+                raise ValueError('capture lacks verified common optical centers')
             images=list(data['front_rgb']);keys={('front',i):i for i in range(4)}
             plans=[]
             for qi,target in enumerate(data['targets']):
@@ -126,6 +128,7 @@ def encode(args):
                 'projection_rgb_mae':float(np.abs(ref.astype(float)-projected.astype(float)).mean()/255),
                 'projection_cls_cosine':F.cosine_similarity(cls[0],cls[1],dim=0).item(),
                 'original_context_mean_abs':(features[:4]-data['original_context_tokens']).abs().mean().item(),
+                'max_camera_center_error_m':data['max_camera_center_error_m'],
                 'features':len(features),'queries':len(plans)}
             checks.append(check)
             payload={'job':job,'source':str(source),'queries':plans,
