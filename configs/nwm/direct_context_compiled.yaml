@@ -1,0 +1,6 @@
+# Overlay AFTER configs/nwm/direct_context_fast.yaml.
+# Inductor quality verified on 11 scenes; enable explicitly for new runs.
+MODEL:
+  RAENWM:
+    torch_compile: True
+    compile_backend: inductor

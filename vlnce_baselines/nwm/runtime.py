@@ -294,7 +294,7 @@ class NwmPredictionRuntime:
                 device=self.device,
                 enable_decoder=False,
                 torch_compile=bool(getattr(config, 'torch_compile', False)),
-                compile_backend_name=str(getattr(config, 'compile_backend', 'native')),
+                compile_backend_name=str(getattr(config, 'compile_backend', 'inductor')),
                 num_steps=int(config.num_steps),
                 final_only_euler=bool(config.final_only_euler),
                 use_external_context_latents=True,

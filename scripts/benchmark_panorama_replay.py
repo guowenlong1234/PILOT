@@ -16,6 +16,7 @@ def main():
     p.add_argument('--captures',required=True);p.add_argument('--output',required=True)
     p.add_argument('--reference');p.add_argument('--repeats',type=int,default=3)
     p.add_argument('--compile-model',action='store_true')
+    p.add_argument('--compile-backend',choices=['native','inductor'],default='inductor')
     p.add_argument('--legacy-inductor',action='store_true',help='diagnostic only: reproduce the rejected compiler')
     p.add_argument('--prediction-batch-size',type=int,default=8)
     args=p.parse_args();root=Path(args.output);root.mkdir(parents=True,exist_ok=True)
@@ -29,7 +30,8 @@ def main():
         device='cuda:0',enable_decoder=False,num_steps=10,final_only_euler=False,use_external_context_latents=True)
     if args.compile_model:
         from vlnce_baselines.nwm.compile_runtime import compile_frozen_world_model
-        predictor.bundle.model,predictor.compile_backend=compile_frozen_world_model(predictor.bundle.model)
+        predictor.bundle.model,predictor.compile_backend=compile_frozen_world_model(
+            predictor.bundle.model,backend_name=args.compile_backend)
     elif args.legacy_inductor:
         predictor.bundle.model=torch.compile(predictor.bundle.model,mode='reduce-overhead')
     runtime=m.PanoramaPredictionRuntime(encoder=encoder,normalizer=normalizer,predictor=predictor,

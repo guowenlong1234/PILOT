@@ -222,7 +222,7 @@ class RaeNwmPredictor:
         num_steps=None,
         final_only_euler=False,
         use_external_context_latents=False,
-        compile_backend_name='native',
+        compile_backend_name='inductor',
     ):
         if enable_decoder:
             raise ValueError(
@@ -589,7 +589,7 @@ class RaeNwmHeadPredictor(RaeNwmPredictor):
         token_head_trainable=True,
         confidence_head_trainable=True,
         head_state_dict_override=None,
-        compile_backend_name='native',
+        compile_backend_name='inductor',
     ):
         super().__init__(
             config_path=config_path,

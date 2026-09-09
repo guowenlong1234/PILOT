@@ -24,7 +24,7 @@ def main():
     p.add_argument('--sync-stages', action='store_true')
     p.add_argument('--audit', action='store_true')
     p.add_argument('--compile-model', action='store_true')
-    p.add_argument('--compile-backend',choices=['native','inductor'],default='native')
+    p.add_argument('--compile-backend',choices=['native','inductor'],default='inductor')
     p.add_argument('--context-mode',choices=('front','world_exact_select'),default='world_exact_select')
     p.add_argument('--observation-source',choices=('cube','direct'),default='cube')
     p.add_argument('--visual-precision',choices=('float32','fp16','bf16'),default='float32')

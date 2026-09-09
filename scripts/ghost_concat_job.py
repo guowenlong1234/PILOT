@@ -41,8 +41,8 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--sync", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--compile-model", action="store_true", help="compile frozen NWM with native-arithmetic CUDA graphs")
-    parser.add_argument('--compile-backend',choices=['native','inductor'],default='native')
+    parser.add_argument("--compile-model", action="store_true", help="compile the frozen world model")
+    parser.add_argument('--compile-backend',choices=['native','inductor'],default='inductor')
     args = parser.parse_args()
     args.wait_ready = args.action == "watch"
     if args.policy_lr is None:
