@@ -1,4 +1,6 @@
 import numpy as np
+import pytest
+import torch
 
 from vlnce_baselines.nwm.panorama_context import (
     _perspective_sampling_map, perspective_from_cube,
@@ -52,3 +54,22 @@ def test_panorama_history_accepts_raw_events_without_unused_latent_encoding():
     runtime.apply_low_level_context_events([events[0]],raw_patch_latents=None,raw_cls=None)
     assert not runtime.adapter.buffers[0].is_ready()
     assert not runtime.panorama_histories[0].frames
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(),reason='GPU pixel parity requires CUDA')
+def test_gpu_projection_is_pixel_exact_for_native_and_arbitrary_headings():
+    from collections import OrderedDict
+    from vlnce_baselines.nwm.panorama_runtime import PanoramaPredictionRuntime,ObservedPanoramaFrame
+    from vlnce_baselines.nwm.panorama_context import observed_view
+    runtime=object.__new__(PanoramaPredictionRuntime)
+    runtime.device=torch.device('cuda:0');runtime.mode='world_exact_select'
+    runtime._projection_cache=OrderedDict()
+    rng=np.random.default_rng(73);views=[]
+    for i,yaw in enumerate([0,np.pi/6,.327,-2.172,np.pi,2*np.pi-.01]):
+        f=ObservedPanoramaFrame(str(i),'a',[0,0,0],0,
+            rng.integers(0,256,(6,224,224,3),dtype=np.uint8),
+            rng.integers(0,256,(12,224,224,3),dtype=np.uint8))
+        views.append((f,yaw))
+    expected=np.stack([observed_view(f.cube_rgb,yaw,f.native_world_rgb12) for f,yaw in views])
+    for _ in range(2):
+        np.testing.assert_array_equal(runtime._observed_rgb_batch(views).cpu().numpy(),expected)

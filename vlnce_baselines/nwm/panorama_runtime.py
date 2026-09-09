@@ -11,7 +11,10 @@ import numpy as np
 import torch
 
 from .etp_adapter import RaeGhostInputRecord, RaeNwmInputBatch
-from .panorama_context import FORMAT, MODES, local_xy, make_context_plan, observed_view
+from .panorama_context import (
+    FORMAT, MODES, local_xy, make_context_plan, observed_view,
+    _perspective_sampling_map, wrap,
+)
 from .raenwm_core.models import pack_cls_patch
 from .runtime import build_native_cls_prediction
 from .types import NwmCondition, NwmPrediction
@@ -85,6 +88,43 @@ class PanoramaPredictionRuntime:
         self.require_native_views=bool(require_native_views)
         self.cache_identity=object()
         self.last_diagnostics={}
+        self._projection_cache = OrderedDict()
+
+    def _observed_rgb_batch(self, views):
+        """Apply the same double-precision pixel interpolation in one GPU batch."""
+        if (self.mode == 'front' or self.device.type != 'cuda'
+                or len({frame.cube_rgb.shape for frame, _ in views}) > 1):
+            return np.stack([frame.front_rgb if self.mode == 'front' else
+                observed_view(frame.cube_rgb, yaw, frame.native_world_rgb12)
+                for frame, yaw in views])
+        result = torch.empty((len(views),224,224,3),dtype=torch.uint8,device=self.device)
+        projected=[];maps=[];indices=[];native=[];native_indices=[]
+        for index,(frame,yaw) in enumerate(views):
+            sector=int(np.floor(float(yaw)/(np.pi/6)+.5))%12
+            if frame.native_world_rgb12 is not None and abs(float(wrap(yaw-sector*np.pi/6)))<1e-6:
+                native.append(frame.native_world_rgb12[sector]);native_indices.append(index)
+                continue
+            key=(frame.cube_rgb.shape[1],float(yaw),224,90.)
+            if key not in self._projection_cache:
+                self._projection_cache[key]=tuple(torch.tensor(a,device=self.device)
+                    for a in _perspective_sampling_map(*key))
+                while len(self._projection_cache)>16:self._projection_cache.popitem(last=False)
+            self._projection_cache.move_to_end(key)
+            maps.append(self._projection_cache[key]);projected.append(frame.cube_rgb);indices.append(index)
+        if native:
+            result[native_indices]=torch.as_tensor(np.stack(native),device=self.device)
+        if projected:
+            cubes=torch.as_tensor(np.stack(projected),device=self.device)
+            face,y0,x0,y1,x1,wx,wy=[torch.stack([m[j] for m in maps]) for j in range(7)]
+            batch=torch.arange(len(projected),device=self.device)[:,None,None]
+            # Match NumPy operation order and float64 weights exactly; there
+            # is no reduced-precision image sampling or grid_sample rounding.
+            pixels=((1-wx)*(1-wy)*cubes[batch,face,y0,x0]
+                    +wx*(1-wy)*cubes[batch,face,y0,x1]
+                    +(1-wx)*wy*cubes[batch,face,y1,x0]
+                    +wx*wy*cubes[batch,face,y1,x1])
+            result[indices]=pixels.round().clamp(0,255).to(torch.uint8)
+        return result
 
     @property
     def context_metadata(self):
@@ -122,8 +162,7 @@ class PanoramaPredictionRuntime:
         pending_items=list(pending.items())
         for start in range(0,len(pending_items),self.encode_batch_size):
             part=pending_items[start:start+self.encode_batch_size]
-            rgb=np.stack([frame.front_rgb if self.mode=='front' else
-                observed_view(frame.cube_rgb,yaw,frame.native_world_rgb12) for _,(frame,_,yaw) in part])
+            rgb=self._observed_rgb_batch([(frame,yaw) for _,(frame,_,yaw) in part])
             # Match the verified FP32 visual representation inside SFT's outer
             # autocast too; this raw-only call never touches the navigation MLP.
             with torch.autocast(device_type=self.device.type,enabled=False):

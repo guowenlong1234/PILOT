@@ -51,6 +51,8 @@ def main():
     wrap(LowLevelContextSynchronizer,'drain','context_drain')
     wrap(LowLevelContextSynchronizer,'_encode_frames','front_encode')
     wrap(pano.PanoramaPredictionRuntime,'predict','panorama_total')
+    if hasattr(pano.PanoramaPredictionRuntime,'_observed_rgb_batch'):
+        wrap(pano.PanoramaPredictionRuntime,'_observed_rgb_batch','rgb_batch')
     wrap(RaeDinov2RgbEncoder,'forward_raw_cls_and_patch_latents','raw_dino_encode')
     wrap(RaeNwmPredictor,'predict_time_from_etp_batch','world_model')
     wrap(ETP,'forward','policy')

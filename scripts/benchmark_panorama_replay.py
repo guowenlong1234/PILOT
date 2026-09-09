@@ -36,6 +36,8 @@ def main():
             stages[key]+=time.perf_counter()-start;return result
         setattr(obj,name,call)
     wrap(m,'observed_view','projection')
+    if hasattr(runtime,'_observed_rgb_batch'):
+        wrap(runtime,'_observed_rgb_batch','projection')
     wrap(encoder,'forward_raw_cls_and_patch_latents','encoder')
     wrap(predictor,'predict_time_from_etp_batch','predictor')
     files=sorted(Path(args.captures).glob('capture*.pt'));assert files,'No captures'
