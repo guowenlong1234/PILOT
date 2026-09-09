@@ -218,6 +218,16 @@ def select(args):
     if path.exists():raise RuntimeError('selection already frozen')
     development=json.loads((root/(args.name+'.json')).read_text())
     if development['split']!='development':raise ValueError('selection only uses development')
+    spec=json.loads((root/'split.json').read_text())
+    if set(development['modes'])!=set(spec['selection_modes']) or development['seeds']!=[spec['selection_seed']]:
+        raise ValueError('development modes/seeds differ from fixed plan')
+    if {r['scene'] for r in development['rows']}!=set(spec['development_scenes']):
+        raise ValueError('development scene coverage differs from fixed plan')
+    reference={(r['id'],r['seed']) for r in development['rows'] if r['mode']=='front'}
+    for mode in development['modes']:
+        keys=[(r['id'],r['seed']) for r in development['rows'] if r['mode']==mode]
+        if len(keys)!=len(set(keys)) or set(keys)!=reference:
+            raise ValueError('unpaired or duplicated development queries')
     summary=development['summary'];baseline=summary['front']
     eligible=[m for m,s in summary.items() if s['patch_cosine']>=baseline['patch_cosine']-.01]
     winner=max(eligible,key=lambda m:summary[m]['cls_cosine'])
