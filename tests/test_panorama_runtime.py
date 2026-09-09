@@ -53,6 +53,10 @@ def test_prediction_keeps_target_pose_changes_anchor_and_reuses_shared_views():
     assert p.batches[0].curr_delta[0,0,0]>0
     assert result.meta['records'][0].condition.rel_t==pytest.approx(.5/.24975892673356762/128)
     runtime.predict(targets,{0:h});assert e.frames==4
+    for frame_value in h.frames:
+        for token in frame_value._cache.values():
+            assert token.dtype == torch.float16
+            assert token.untyped_storage().nbytes() == token.numel() * token.element_size()
     for a,b in zip(before,h.frames):np.testing.assert_array_equal(a,b.position)
 
 

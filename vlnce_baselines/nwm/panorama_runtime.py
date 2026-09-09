@@ -128,8 +128,14 @@ class PanoramaPredictionRuntime:
             # autocast too; this raw-only call never touches the navigation MLP.
             with torch.autocast(device_type=self.device.type,enabled=False):
                 cls,patch=self.encoder.forward_raw_cls_and_patch_latents({'rgb':rgb})
-            tokens=pack_cls_patch(self.normalizer.normalize_cls(cls),self.normalizer.normalize_patch(patch)).detach().half().cpu()
+            # The bounded per-frame cache lives on the inference device. Keep
+            # the same float16 quantization without a synchronous GPU->CPU->GPU
+            # round trip for every freshly encoded view.
+            tokens=pack_cls_patch(self.normalizer.normalize_cls(cls),self.normalizer.normalize_patch(patch)).detach().half()
             for token,(batchkey,(frame,cachekey,_)) in zip(tokens,part):
+                # Own one view's storage, rather than pinning an entire encode
+                # batch after the other views have been evicted.
+                token = token.clone()
                 features[batchkey]=token;frame._cache[cachekey]=token
                 while len(frame._cache)>self.cached_views_per_frame:frame._cache.popitem(last=False)
         self.last_diagnostics={'queries':len(targets),'predicted':len(plans),'encoded_views':len(pending),
