@@ -757,6 +757,29 @@ class VLNCEDaggerEnv(habitat.RLEnv):
         ))
         return obs
 
+    def get_nwm_quality_views(self, requests):
+        """Diagnostic RGB at explicit poses; does not step or update context.
+
+        Caller separates observed-history requests from oracle target labels.
+        Production context construction uses recorded images, never this API.
+        """
+        sim = self._env.sim
+        before = sim.get_agent_state()
+        result = []
+        for request in requests:
+            rgb = sim.get_sensor_observation_at(
+                request['position'], self._rotation_from_raenwm_values(request['rotation']),
+                sensor_uuid='rgb')
+            result.append({'rgb': np.asarray(rgb).copy(),
+                           'navigable': bool(sim.is_navigable(request['position']))})
+        after = sim.get_agent_state()
+        if not np.allclose(before.position, after.position, atol=1e-7, rtol=0):
+            raise RuntimeError('diagnostic rendering changed agent position')
+        if abs(float(np.dot(np.r_[before.rotation.imag,before.rotation.real],
+                            np.r_[after.rotation.imag,after.rotation.real]))) < 1-1e-7:
+            raise RuntimeError('diagnostic rendering changed agent rotation')
+        return result
+
     def current_dist_to_goal(self, is_train):
         init_state = self._env.sim.get_agent_state() 
         if is_train:
