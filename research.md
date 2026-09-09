@@ -6,6 +6,8 @@ ETP-R1 是一个 VLN-CE 项目：让智能体在连续三维环境里，根据�
 
 ## Quick Start And Environment
 
+本性能分支最新推荐为 `configs/nwm/direct_context_fast.yaml` 覆盖配置：直接历史位姿定向渲染、DINO/世界模型批次上限 64、FP16。训练机 12 步双卡复测 12.105 秒/更新，较上轮全景优化版下降 32.27%，较同轮旧 front 10.637 秒仍慢 13.79%。567 项回归及额外 13 项 GPU 检查通过；11 场景固定目标质量对照未见下降。详见 `docs/direct-context-fast-validation-20260909.md`。长训练仍停止，未合并主工作区。
+
 本工作区为 2026-09-09 建立的 `perf/panorama-training` 独立性能优化分支：笔记本 `/home/sia/project/ETP-R1-perf`、训练机 `/home/gwl/project/etpr1/ETP-R1-perf`。原 10000 步任务及配套等待队列已按用户要求停止。基准与优化记录见 `docs/panorama-training-performance-20260909.md`，真实产物保存在训练机 `data/logs/panorama_perf_20260909/`（数据盘软链接）。使用训练机既有 `etpnav_unified`；新目录的 DINO 资产和用于隔离检查的运行时具有独立文件路径，避免放宽项目所有权检查。
 
 README 原始说明要求创建 `etpr1` conda 环境，核心环境为 Python 3.6.12、PyTorch 1.9.1+cu111，并使用 Habitat-Sim 0.1.7 和 Habitat-Lab 0.1.7。该说明和本机已有 `etpnav` 环境只用于了解旧 CLIP 链路，不作为本次 RAE/DINOv2 工作的运行方案。
@@ -185,6 +187,10 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 - 测评机只有一张 RTX 3090 24GB。现有 ETPNav 任务占用 GPU 时，不得并行启动全量特征生成、预训练、SFT、GRPO 或完整评测，也不得擅自中断 ETPNav。
 
 ## Last Reviewed
+
+2026-09-09，完成直接渲染、大批次、混合精度最终验收。选定 direct/FP16/64/64，通过原生图像零像素差校准，开发集选定后在五场景126目标×三噪声复核；CLS 余弦 0.826675→0.829386，图块余弦 0.704895→0.707941。双卡12步吞吐和冻结权重审计通过，最终567项回归、13项GPU检查通过，CLI和覆盖配置已提供，所有基准已退出。报告 `docs/direct-context-fast-validation-20260909.md`。
+
+2026-09-09，按用户新授权实现按需直接渲染、更大 DINO/世界模型合批和混合精度。新增历史编号白名单与 reset 失效机制，批量按需渲染；随机噪声按固定八行分组，独立于执行批次。六步同规格基准从全景优化版 16.641 降至直接 FP32 13.244，再经世界模型合批和 FP16 降至 10.842 秒/更新。11 场景288目标质量对照中，复核五场景×三噪声的选定 FP16 64/64 方案无下降；推荐覆盖配置 `configs/nwm/direct_context_fast.yaml`，详情见 `docs/direct-context-fast-validation-20260909.md`。
 
 2026-09-09，补跑同规格旧 front 六步基准：9.969 秒/更新，对比优化后全景 16.641 秒。核实旧 runtime 将有效查询整批预测，新路径按 8 拆批；新目标定向视图还失去了原 front 特征的跨候选共享，并显式用 FP32 编码。六步 rank 0 世界模型累计 41.44→50.77 秒、原始 DINO 编码 3.81→10.10 秒，另有目标图像准备 8.01 秒。说明见性能报告补充对照小节；分批成本不能视为朝向修正的数学必然成本。
 
