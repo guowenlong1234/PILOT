@@ -8,6 +8,10 @@ export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_TH
 export GLOG_minloglevel=2 MAGNUM_LOG=quiet HABITAT_SIM_LOG=quiet
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8
 export MPLCONFIGDIR=/tmp/matplotlib-etpr1-rgb-optimization
+# The evaluation container runs a numeric UID without a passwd entry. Explicit
+# project-owned caches avoid getpass.getuser()/HOME lookups in the compilers.
+export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-$PWD/.runtime/inductor_cache}"
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$PWD/.runtime/triton_cache}"
 case "${1:?server or eval}" in
   server)
     shift
