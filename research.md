@@ -6,6 +6,8 @@ ETP-R1 是一个 VLN-CE 项目：让智能体在连续三维环境里，根据�
 
 ## Quick Start And Environment
 
+2026-09-09 晚间已重新启动 `ghost_concat_direct_compiled_10k_20260909` 长训练：主工作区选定合并版本，14200 基座重新初始化、双卡总批量 8、10000 步、每 200 步测评；直接渲染/FP16/64批次上限/Inductor，未包含已放弃的静态条件缓存和导航 SDPA。训练写入数据盘，单份流式同步到测评机。测评机离线补齐专用容器编译工具、修复数字 UID 的编译缓存路径，并通过 8 环境真实预检。操作记录见 `docs/ghost-concat-direct-compiled-10k-operations-20260909.md`。
+
 2026-09-09，按用户决定，将静态条件缓存和导航SDPA之前的 `75cbe1d` 合并到当前 `feature/e24-joint-sft`，合并提交 `372ba21`，保留直接渲染和世界模型编译。当前笔记本工作区为 `/home/sia/project/ETP-R1`，训练机对应 `/home/gwl/project/etpr1/ETP-R1`，使用既有 `etpnav_unified`；后面的性能分支测试数字属于历史试验。静态条件缓存和SDPA已被用户放弃，不作为待实施或待启用方案，相关实现未合入。
 
 本性能分支已验证可选世界模型编译：在 `direct_context_fast.yaml` 后合并 `configs/nwm/direct_context_compiled.yaml`，或为入口添加 `--compile-model --compile-backend inductor`。同轮 16 步双卡短测（剔除四步预热）从 11.296 降至 9.265 秒/更新，吞吐提高 21.92%；11 场景固定质量对照中，复核集 CLS/图块余弦变化仅约 -0.000090/-0.000063。首次编译有启动成本，含预热的 16 步总耗时仍比未编译略长。上次数值失败已复现并确认实际 BF16 中间舍入差异；原生算子 CUDA Graph 可保持零差异但训练更慢。详见 `docs/nwm-compile-validation-20260909.md`。编译仍需显式开启，正式长训练未启动。
@@ -191,6 +193,8 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 - 测评机只有一张 RTX 3090 24GB。现有 ETPNav 任务占用 GPU 时，不得并行启动全量特征生成、预训练、SFT、GRPO 或完整评测，也不得擅自中断 ETPNav。
 
 ## Last Reviewed
+
+2026-09-09 晚间，重启 `ghost_concat_direct_compiled_10k_20260909`：14200 基座、双卡总批量8、10000步、每200步同步测评，直接渲染/FP16/64批次上限/Inductor；保留选定合并版本，未引入静态条件缓存或导航SDPA。测评机专用容器离线安装G++并修复编译缓存目录后，7项相关测试和8环境8路线预检通过。正式第200步模型及恢复状态已保存，双端SHA一致，测评机已开始1839路线评测，训练继续推进。见 `docs/ghost-concat-direct-compiled-10k-operations-20260909.md`。
 
 2026-09-09，按用户决定排除静态条件缓存与SDPA，从实施前的 `75cbe1d` 合并到主工作区 `feature/e24-joint-sft`，合并提交 `372ba21`，Git tree与选定提交完全一致。保留用户 `.gitignore` 未提交修改，通过Git同步训练机主目录并完成568项CPU回归、11项GPU检查和双卡8次真实更新，全部退出0，两卡冻结/参数更新审计通过。源码未做额外改写，之后仅更新合并状态和测试文档。详见 `docs/perf-merge-validation-20260909.md`；正式长训练未启动。
 
