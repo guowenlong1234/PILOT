@@ -363,7 +363,9 @@ class NwmPredictionRuntime:
             mode=self.panorama_mode,device=self.device,
             encode_batch_size=int(getattr(self.config,"panorama_encode_batch_size",16)),
             prediction_batch_size=int(getattr(self.config,"panorama_prediction_batch_size",8)),
-            cached_views_per_frame=int(getattr(self.config,"panorama_cached_views_per_frame",12)))
+            cached_views_per_frame=int(getattr(self.config,"panorama_cached_views_per_frame",12)),
+            observation_source=str(getattr(self.config,"panorama_observation_source","cube")),
+            visual_precision=str(getattr(self.config,"panorama_visual_precision","float32")))
 
     def update_contexts(
         self,
@@ -458,13 +460,15 @@ class NwmPredictionRuntime:
                 if getattr(self,"panorama_mode","front") != "front":
                     from .panorama_runtime import ObservedPanoramaFrame
                     observed = event.get("panorama")
-                    if not isinstance(observed,Mapping) or observed.get("format") != "observed_panorama_v1":
+                    direct = getattr(self.config, 'panorama_observation_source', 'cube') == 'direct' if hasattr(self, 'config') else False
+                    expected_format = 'observed_direction_requests_v1' if direct else 'observed_panorama_v1'
+                    if not isinstance(observed,Mapping) or observed.get("format") != expected_format:
                         raise ValueError("default panorama context requires observed panorama events")
                     self._panorama_frame_counter += 1
                     self.panorama_histories[env_index].append(ObservedPanoramaFrame(
                         str(self._panorama_frame_counter),str(self._panorama_segments[env_index]),
-                        event["position"],float(event["yaw"]),observed["cube_rgb"],
-                        observed["native_world_rgb12"]))
+                        event["position"],float(event["yaw"]),observed.get("cube_rgb"),
+                        observed.get("native_world_rgb12"),render_token=observed.get('frame_id')))
             else:
                 raise ValueError(
                     f"Unknown low-level context event type: {event_type!r}"

@@ -170,6 +170,10 @@ def context_metadata_from_config(config: Any) -> Dict[str, Any]:
         )
     mode = panorama_mode_from_config(config)
     if mode != "front":
+        observation_source = str(getattr(config, "panorama_observation_source", "cube"))
+        precision = str(getattr(config, "panorama_visual_precision", "float32"))
+        if observation_source not in {"cube", "direct"} or precision not in {"float32", "fp16", "bf16"}:
+            raise ValueError("invalid panorama observation source or visual precision")
         metadata.update({
             "panorama_context_mode": mode,
             "panorama_format": "nwm_observed_panorama_virtual_context_v2",
@@ -177,6 +181,9 @@ def context_metadata_from_config(config: Any) -> Dict[str, Any]:
             "panorama_prediction_batch_size": int(getattr(config,"panorama_prediction_batch_size",8)),
             "panorama_cache_views": int(getattr(config,"panorama_cached_views_per_frame",12)),
         })
+        if observation_source != "cube" or precision != "float32":
+            metadata.update(panorama_observation_source=observation_source,
+                            panorama_visual_precision=precision)
     return metadata
 
 
@@ -623,6 +630,25 @@ class LowLevelContextSynchronizer:
                 "low-level NWM buffer count does not match active environments"
             )
         payloads = envs.call(["pop_raenwm_context_events"] * num_envs)
+        if getattr(getattr(self.runtime, "config", None), "panorama_observation_source", "cube") == "direct":
+            def render_observed(requests):
+                grouped = [[] for _ in range(envs.num_envs)]
+                indices = [[] for _ in range(envs.num_envs)]
+                for index, request in enumerate(requests):
+                    env_index = int(request['env_index'])
+                    if not 0 <= env_index < envs.num_envs:
+                        raise ValueError('direct view request has invalid environment')
+                    grouped[env_index].append(dict(frame_id=request['frame_id'],yaw=request['yaw']))
+                    indices[env_index].append(index)
+                results = envs.call(['render_raenwm_observed_directions'] * envs.num_envs,
+                                   [{'requests': rows} for rows in grouped])
+                images = [None] * len(requests)
+                for ids, result in zip(indices, results):
+                    if len(ids) != len(result['rgb']):
+                        raise ValueError('direct render returned wrong row count')
+                    for index, rgb in zip(ids, result['rgb']):images[index] = rgb
+                return np.stack(images)
+            self.runtime.panorama_predictor.render_observed = render_observed
         if not isinstance(payloads, (list, tuple)) or len(payloads) != num_envs:
             raise ValueError("low-level event read returned the wrong environment count")
 

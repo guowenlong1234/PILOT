@@ -24,6 +24,10 @@ def main():
     p.add_argument('--sync-stages', action='store_true')
     p.add_argument('--audit', action='store_true')
     p.add_argument('--context-mode',choices=('front','world_exact_select'),default='world_exact_select')
+    p.add_argument('--observation-source',choices=('cube','direct'),default='cube')
+    p.add_argument('--visual-precision',choices=('float32','fp16','bf16'),default='float32')
+    p.add_argument('--dino-batch',type=int,default=16)
+    p.add_argument('--nwm-batch',type=int,default=8)
     args = p.parse_args()
     rank = int(os.environ.get('LOCAL_RANK', 0))
     world = int(os.environ.get('WORLD_SIZE', 1))
@@ -91,7 +95,10 @@ def main():
                     for f in histories[i].frames] for i in {t.env_index for t in valid}}
                 torch.save({'histories':frames,'targets':valid},root/f'capture{captures[0]}.pt')
                 captures[0]+=1
-        return old_predict(self,targets,histories,**kw)
+        result=old_predict(self,targets,histories,**kw)
+        stats['direct_render'][0]+=self.last_diagnostics.get('direct_render_seconds',0.)
+        stats['direct_render'][1]+=self.last_diagnostics.get('direct_rendered_views',0)
+        return result
     pano.PanoramaPredictionRuntime.predict=predict
     old_interval=trainer_module.RLTrainer._train_interval
     old_step=trainer_module.step_amp_optimizer
@@ -114,6 +121,7 @@ def main():
         result=old_interval(self,*a,**kw)
         context={k:sum(v) for k,v in self.logs.items() if k.startswith('nwm_context_')}
         report=dict(rank=rank,world=world,steps=steps,warmup=args.warmup,
+            settings=vars(args),
             mean_step_seconds=float(np.mean(steps[args.warmup:])),stages=dict(stats),
             synchronized_stages=args.sync_stages,optimizer=groups,context=context,
             losses={k:list(v) for k,v in self.logs.items() if 'loss' in k.lower() or 'grad_norm' in k.lower()},
@@ -138,6 +146,10 @@ def main():
         'IL.iters':args.updates,'IL.log_every':args.updates,'IL.batch_size':4,
         'IL.checkpoint_sync_enabled':False,'IL.is_requeue':False,
         'MODEL.RAENWM.panorama_context_mode':args.context_mode,
+        'MODEL.RAENWM.panorama_observation_source':args.observation_source,
+        'MODEL.RAENWM.panorama_visual_precision':args.visual_precision,
+        'MODEL.RAENWM.panorama_encode_batch_size':args.dino_batch,
+        'MODEL.RAENWM.panorama_prediction_batch_size':args.nwm_batch,
         'CHECKPOINT_FOLDER':str(root/'checkpoints')+'/', 'TENSORBOARD_DIR':str(root/'tb')+'/',
         'RESULTS_DIR':str(root/'results')+'/'})
     sys.argv=['run.py','--local_rank',str(rank),'--exp_name','panorama_perf',
