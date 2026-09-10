@@ -12,6 +12,11 @@ import json
 from rgb_only_optimization import ROOT, BASE, common, execute
 
 CONFIG = "run_r2r/iter_train_rae_dino_ghost_concat.yaml"
+PERSISTENT_CONFIG = "run_r2r/iter_train_rae_dino_ghost_concat_persistent.yaml"
+SERVER_WORKSPACES = (
+    "/home/gwl/project/etpr1/ETP-R1",
+    "/home/gwl/project/etpr1/ETP-R1-persistent-ghost",
+)
 
 
 def main():
@@ -25,6 +30,12 @@ def main():
     parser.add_argument("--log-every", type=int, default=200)
     parser.add_argument("--checkpoint", help="required for evaluation")
     parser.add_argument("--alpha", type=float, default=1.0)
+    parser.add_argument(
+        "--ghost-concat-memory-mode", "--memory-mode",
+        choices=("current_step_only", "persistent_node_state"),
+        default="current_step_only",
+        help="per-step legacy fusion (default), or persistent ghost node memory for SFT/eval",
+    )
     parser.add_argument("--panorama-context-mode",choices=("auto","front","world_exact_select"),default="world_exact_select")
     parser.add_argument('--observation-source',choices=('cube','direct'))
     parser.add_argument('--visual-precision',choices=('float32','fp16','bf16'))
@@ -35,7 +46,7 @@ def main():
     parser.add_argument("--fusion-lr", type=float, default=1e-5)
     parser.add_argument("--eval-iterations", default="200,400,600,800,1000,1200,1400,1600,1800,2000")
     parser.add_argument("--ready-timeout", type=int, default=172800)
-    parser.add_argument("--output", default="data/logs/ghost_concat_20260908")
+    parser.add_argument("--output", default=None)
     parser.add_argument("--episodes", type=int, default=-1, help="positive counts are smoke tests only")
     parser.add_argument("--port", type=int, default=24851)
     parser.add_argument("--resume", action="store_true")
@@ -44,6 +55,11 @@ def main():
     parser.add_argument("--compile-model", action="store_true", help="compile the frozen world model")
     parser.add_argument('--compile-backend',choices=['native','inductor'],default='inductor')
     args = parser.parse_args()
+    persistent = args.ghost_concat_memory_mode == "persistent_node_state"
+    config_file = PERSISTENT_CONFIG if persistent else CONFIG
+    if args.output is None:
+        args.output = ("data/logs/ghost_concat_persistent" if persistent
+                       else "data/logs/ghost_concat_20260908")
     args.wait_ready = args.action == "watch"
     if args.policy_lr is None:
         args.policy_lr = 2e-6 if args.train_policy else 1e-5
@@ -61,14 +77,17 @@ def main():
         parser.error("Evaluation requires --checkpoint and one GPU")
     if args.action == "watch" and (args.machine != "eval" or "," in args.gpus or args.checkpoint):
         parser.error("Watcher uses the evaluation host, one GPU, and derived checkpoint paths")
-    expected = "/home/gwl/project/etpr1/ETP-R1" if args.machine == "server" else "/home/a6000/gwl/ETP-R1"
-    if not args.dry_run and str(ROOT) != expected:
+    expected = SERVER_WORKSPACES if args.machine == "server" else ("/home/a6000/gwl/ETP-R1",)
+    if not args.dry_run and str(ROOT) not in expected:
         parser.error("Wrong target project workspace: " + str(ROOT))
     prefix = "ghost_concat_v1_joint" if args.train_policy else "ghost_concat_v1"
+    if persistent:
+        prefix += "_persistent"
     train_name = prefix + "_train"
     name = train_name if args.action == "train" else prefix + "_eval"
     opts = common(args.gpus, args.batch if args.action == "train" else args.environments)
     opts.update({"MODEL.RAENWM.rgb_fusion_type": "ghost_concat",
+                 "MODEL.RAENWM.ghost_concat_memory_mode": args.ghost_concat_memory_mode,
                  "MODEL.RAENWM.panorama_context_mode": args.panorama_context_mode,
                  "MODEL.RAENWM.ghost_concat_hidden_dim": 1536,
                  "MODEL.RAENWM.rgb_fusion_enabled": True,
@@ -92,12 +111,12 @@ def main():
                      "IL.ckpt_to_load": BASE, "IL.checkpoint_sync_enabled": args.sync,
                      "IL.checkpoint_sync_destination": "a6000@10.10.10.2:/home/a6000/gwl/ETP-R1/" +
                          args.output + "/train/" + name + "/checkpoints/" + name})
-        execute(args, name, opts, BASE, "dagger", args.iters, config_file=CONFIG)
+        execute(args, name, opts, BASE, "dagger", args.iters, config_file=config_file)
     elif args.action == "eval":
         opts.update({"EVAL.CKPT_PATH_DIR": str(ROOT / args.checkpoint),
                      "EVAL.EPISODE_COUNT": args.episodes, "EVAL.SAVE_RESULTS": True,
                      "EVAL.USE_CKPT_CONFIG": False, "EVAL.fast_eval": False})
-        execute(args, name, opts, args.checkpoint, "eval", config_file=CONFIG)
+        execute(args, name, opts, args.checkpoint, "eval", config_file=config_file)
     else:
         iterations = [int(value) for value in args.eval_iterations.split(",")]
         if iterations != sorted(set(iterations)) or not iterations or min(iterations) < 1:
@@ -115,7 +134,7 @@ def main():
                 eval_opts = dict(opts)
                 eval_opts.update({"EVAL.CKPT_PATH_DIR": str(ROOT / checkpoint), "EVAL.EPISODE_COUNT": args.episodes,
                                   "EVAL.SAVE_RESULTS": True, "EVAL.USE_CKPT_CONFIG": False, "EVAL.fast_eval": False})
-                execute(args, eval_name, eval_opts, checkpoint, "eval", config_file=CONFIG)
+                execute(args, eval_name, eval_opts, checkpoint, "eval", config_file=config_file)
                 if not args.dry_run:
                     manifest = json.loads((ROOT / args.output / "eval" / eval_name / "manifest.json").read_text())
                     # Require exact original IDs, not merely the expected count.

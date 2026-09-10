@@ -1,4 +1,4 @@
-"""Temporary, batched prediction residuals on already encoded ghost features."""
+"""Batched prediction residuals with optional persistent ghost node state."""
 
 import math
 
@@ -84,21 +84,32 @@ def _empty_diagnostics(features):
         "eligible_candidate_count", "fused_candidate_count",
         "invalid_prediction_count", "fusion_delta_norm_sum",
         "fusion_delta_norm_square_sum", "fusion_delta_norm_count",
+        "persistent_writeback_count", "persistent_retained_state_count",
+        "persistent_state_norm_sum", "persistent_state_norm_count",
     )}
 
 
-def apply_ghost_concat_to_graph(nav_inputs, prediction, adapter):
-    """Return a new graph input, leaving persistent observations untouched.
+def apply_ghost_concat_to_graph(nav_inputs, prediction, adapter, gmaps=None):
+    """Return graph inputs and optionally commit valid residuals to live ghosts.
 
     CPU metadata identifies rows across all environments. GPU gathers, masks,
     one adapter forward, and an out-of-place index_copy process them together.
-    No per-ghost device transfers, scalar reads, or prediction cache are used.
+    Persistent writes use one batched validity transfer to CPU, with no
+    per-ghost scalar synchronization. No raw prediction cache is retained.
     Diagnostics are device scalars; the caller decides when to synchronize.
     """
     features = nav_inputs["gmap_img_fts"]
     if features.ndim != 3:
         raise ValueError("gmap_img_fts must have shape [B, L, D]")
     diagnostics = _empty_diagnostics(features)
+    persistent = {}
+    if gmaps is not None:
+        if len(gmaps) != features.shape[0]:
+            raise ValueError("gmaps length must match graph batch size")
+        persistent = {i: graph for i, graph in enumerate(gmaps)
+                      if graph.ghost_concat_memory_mode == "persistent_node_state"}
+    retained = sum(len(graph.ghost_concat_state_vps) for graph in persistent.values())
+    diagnostics["persistent_retained_state_count"] = features.new_tensor(retained).detach()
     pred_raw = getattr(prediction, "pred_cls_raw", None)
     if pred_raw is None:
         return nav_inputs, diagnostics
@@ -126,7 +137,7 @@ def apply_ghost_concat_to_graph(nav_inputs, prediction, adapter):
                 raise ValueError("Duplicate ghost id in graph: %s" % (key,))
             graph_lookup[key] = env_index * graph_len + col
 
-    graph_rows, prediction_rows, seen = [], [], set()
+    graph_rows, prediction_rows, matched_keys, seen = [], [], [], set()
     for row, record in enumerate(records):
         key = (int(record.env_index), str(record.ghost_vp))
         if key in seen:
@@ -135,6 +146,7 @@ def apply_ghost_concat_to_graph(nav_inputs, prediction, adapter):
         if key in graph_lookup:
             graph_rows.append(graph_lookup[key])
             prediction_rows.append(row)
+            matched_keys.append(key)
     if not graph_rows:
         return nav_inputs, diagnostics
 
@@ -156,10 +168,35 @@ def apply_ghost_concat_to_graph(nav_inputs, prediction, adapter):
     safe_predicted = torch.where(eligible[:, None], predicted, torch.zeros_like(predicted))
     fused, row_diagnostics = adapter(safe_observed, safe_predicted)
     valid = eligible & row_diagnostics["valid_mask"]
+    # Scaling by observation count must also remain finite in the accumulator.
+    counts = [persistent[e].ghost_embeds[g][1]
+              if e in persistent and g in persistent[e].ghost_embeds else 1
+              for e, g in matched_keys]
+    if persistent:
+        scaled = fused * fused.new_tensor(counts)[:, None]
+        valid = valid & torch.isfinite(scaled).all(-1)
     replacements = torch.where(valid[:, None], fused, observed)
     output = dict(nav_inputs)
     output["gmap_img_fts"] = flat_features.index_copy(0, graph_index, replacements).reshape_as(features)
     applied = valid if adapter.alpha != 0.0 else torch.zeros_like(valid)
+    if persistent and adapter.alpha != 0.0:
+        # This is the only GPU-to-CPU synchronization needed for dictionary writes.
+        write_flags = applied.detach().cpu().tolist()
+        written, previously_retained, state_norms = 0, 0, []
+        for row, ((env, vp), should_write) in enumerate(zip(matched_keys, write_flags)):
+            graph = persistent.get(env)
+            if not should_write or graph is None or vp not in graph.ghost_embeds:
+                continue
+            previously_retained += int(vp in graph.ghost_concat_state_vps)
+            graph.write_ghost_concat_state(vp, fused[row], validated=True)
+            state_norms.append(fused[row].detach().float().norm().double())
+            written += 1
+        diagnostics["persistent_writeback_count"] = features.new_tensor(written).detach()
+        diagnostics["persistent_retained_state_count"] = features.new_tensor(
+            retained - previously_retained).detach()
+        diagnostics["persistent_state_norm_count"] = features.new_tensor(written).detach()
+        if state_norms:
+            diagnostics["persistent_state_norm_sum"] = torch.stack(state_norms).sum()
     norms = torch.where(applied, row_diagnostics["fusion_delta_norm"], 0).double()
     diagnostics.update({
         "eligible_candidate_count": eligible.sum().detach(),
