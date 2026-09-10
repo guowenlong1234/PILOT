@@ -180,3 +180,76 @@ def test_multi_environment_writeback_is_local_to_valid_live_ghost():
     torch.testing.assert_close(graphs[0].get_node_embeds("g0"), torch.full((4,), 3.))
     torch.testing.assert_close(output["gmap_img_fts"][1], batch["gmap_img_fts"][1])
     assert stats["persistent_writeback_count"] == 1
+
+
+def test_later_loss_without_prediction_reaches_earlier_fusion_parameters():
+    graph = _graph()
+    _observe(graph, [[1.] * 4])
+    adapter = _adapter()
+    apply_ghost_concat_to_graph(_inputs(graph), _pred(), adapter, [graph])
+    _observe(graph, [[5.] * 4])
+    output, stats = apply_ghost_concat_to_graph(_inputs(graph), None, adapter, [graph])
+    output["gmap_img_fts"][0, 1].square().sum().backward()
+    gradient = adapter.residual.layers[-1].bias.grad
+    assert gradient is not None and torch.isfinite(gradient).all()
+    assert gradient.abs().sum() > 0
+    assert stats["persistent_writeback_count"] == 0
+    assert stats["persistent_retained_state_count"] == 1
+
+
+def test_optimizer_updates_use_new_rollout_graphs_without_reusing_old_autograd():
+    adapter = _adapter()
+    optimizer = torch.optim.SGD(adapter.parameters(), lr=.01)
+    original = adapter.residual.layers[-1].bias.detach().clone()
+    for _ in range(2):
+        graph = _graph()
+        _observe(graph, [[1.] * 4])
+        optimizer.zero_grad(set_to_none=True)
+        apply_ghost_concat_to_graph(_inputs(graph), _pred(), adapter, [graph])
+        _observe(graph, [[5.] * 4])
+        output, _ = apply_ghost_concat_to_graph(_inputs(graph), None, adapter, [graph])
+        output["gmap_img_fts"][0, 1].square().sum().backward()
+        assert all(parameter.grad is None or torch.isfinite(parameter.grad).all()
+                   for parameter in adapter.parameters())
+        assert adapter.residual.layers[-1].bias.grad.abs().sum() > 0
+        optimizer.step()
+        del graph, output
+    assert not torch.equal(original, adapter.residual.layers[-1].bias)
+
+
+def test_paused_environment_remapping_writes_to_surviving_graph():
+    graphs = [_graph(), _graph(), _graph()]
+    for index, graph in enumerate(graphs):
+        _observe(graph, [[float(index + 1)] * 4])
+    paused = graphs.pop(1)
+    paused_state = paused.ghost_embeds["g0"]
+    survivor = graphs[1]
+    first_state = graphs[0].ghost_embeds["g0"]
+    inputs = [_inputs(graph) for graph in graphs]
+    batch = {key: (sum([item[key] for item in inputs], []) if key == "gmap_vp_ids"
+                   else torch.cat([item[key] for item in inputs], dim=0))
+             for key in inputs[0]}
+    prediction = SimpleNamespace(
+        pred_cls_raw=torch.ones(1, 4),
+        meta={"records": [SimpleNamespace(env_index=1, ghost_vp="g0")]},
+    )
+    _, stats = apply_ghost_concat_to_graph(batch, prediction, _adapter(), graphs)
+    assert paused.ghost_embeds["g0"] is paused_state
+    assert graphs[0].ghost_embeds["g0"] is first_state
+    torch.testing.assert_close(survivor.get_node_embeds("g0"), torch.full((4,), 5.))
+    assert stats["persistent_writeback_count"] == 1
+
+
+def test_arrival_uses_real_visited_node_observation_and_deletes_ghost_state():
+    graph = _graph()
+    _observe(graph, [[1.] * 4])
+    apply_ghost_concat_to_graph(_inputs(graph), _pred(), _adapter(), [graph])
+    torch.testing.assert_close(graph.get_node_embeds("g0"), torch.full((4,), 3.))
+    graph.delete_ghost("g0")
+    actual_observation = torch.tensor([11., 12., 13., 14.])
+    graph.update_graph(
+        "0", 2, "1", np.asarray([1., 0., 0.]), actual_observation,
+        [], [], torch.empty(0, 4), None,
+    )
+    assert graph.get_node_embeds("1") is actual_observation
+    assert not graph.ghost_concat_state_vps and "g0" not in graph.ghost_embeds

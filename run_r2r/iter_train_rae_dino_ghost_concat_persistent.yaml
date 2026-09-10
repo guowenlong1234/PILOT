@@ -38,7 +38,7 @@ IL:
   load_from_ckpt: True
   is_requeue: False
   ckpt_to_load: pretrained/active_lookahead/base_iter14200.pth
-  checkpoint_sync_enabled: True
+  checkpoint_sync_enabled: False
   checkpoint_sync_destination: 'a6000@10.10.10.2:/home/a6000/gwl/ETP-R1/data/logs/ghost_concat_persistent_sft/checkpoints/etpr1_ghost_concat_persistent_sft'
   amp_init_scale: 16384.0
   resumable_checkpoints: True

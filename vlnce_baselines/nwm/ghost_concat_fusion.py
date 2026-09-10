@@ -182,21 +182,24 @@ def apply_ghost_concat_to_graph(nav_inputs, prediction, adapter, gmaps=None):
     if persistent and adapter.alpha != 0.0:
         # This is the only GPU-to-CPU synchronization needed for dictionary writes.
         write_flags = applied.detach().cpu().tolist()
-        written, previously_retained, state_norms = 0, 0, []
+        written, previously_retained, written_rows = 0, 0, []
         for row, ((env, vp), should_write) in enumerate(zip(matched_keys, write_flags)):
             graph = persistent.get(env)
             if not should_write or graph is None or vp not in graph.ghost_embeds:
                 continue
             previously_retained += int(vp in graph.ghost_concat_state_vps)
             graph.write_ghost_concat_state(vp, fused[row], validated=True)
-            state_norms.append(fused[row].detach().float().norm().double())
+            written_rows.append(row)
             written += 1
         diagnostics["persistent_writeback_count"] = features.new_tensor(written).detach()
         diagnostics["persistent_retained_state_count"] = features.new_tensor(
             retained - previously_retained).detach()
         diagnostics["persistent_state_norm_count"] = features.new_tensor(written).detach()
-        if state_norms:
-            diagnostics["persistent_state_norm_sum"] = torch.stack(state_norms).sum()
+        if written_rows:
+            write_index = torch.tensor(written_rows, device=features.device, dtype=torch.long)
+            diagnostics["persistent_state_norm_sum"] = (
+                fused.detach().index_select(0, write_index).double().norm(dim=-1).sum()
+            )
     norms = torch.where(applied, row_diagnostics["fusion_delta_norm"], 0).double()
     diagnostics.update({
         "eligible_candidate_count": eligible.sum().detach(),
