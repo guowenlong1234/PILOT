@@ -6,7 +6,7 @@ ETP-R1 是一个 VLN-CE 项目：让智能体在连续三维环境里，根据�
 
 ## Quick Start And Environment
 
-2026-09-10，本独立工作区分支 `feature/persistent-ghost-state` 新增可选的融合节点状态持久化：`ghost_concat_memory_mode=persistent_node_state`，按真实观测次数递推合并旧融合状态与新观测，当前预测再融合写回；整段 rollout 保留跨步梯度。旧模式为缺省 `current_step_only`。训练机独立工作区 `/home/gwl/project/etpr1/ETP-R1-persistent-ghost`，使用 `etpnav_unified`，运行时独立复制。已完成 CPU 针对性验证；两张 GPU 正被既有训练占用，真实单卡/双卡/恢复/短评测仍待验收。入口、检查点契约、测试与产物位置见 `docs/persistent-ghost-state-implementation-20260910.md`。本分支不改论文、不启动长训练。
+2026-09-10，本独立工作区分支 `feature/persistent-ghost-state` 新增可选的融合节点状态持久化：`ghost_concat_memory_mode=persistent_node_state`，按真实观测次数递推合并旧融合状态与新观测，当前预测再融合写回；整段 rollout 保留跨步梯度。旧模式为缺省 `current_step_only`。训练机独立工作区 `/home/gwl/project/etpr1/ETP-R1-persistent-ghost`，使用 `etpnav_unified`，运行时独立复制。已完成训练机 119 项不同 CPU 测试（117 项回归＋2 项审计故障注入）；两张 GPU 正被既有训练占用，真实单卡/双卡/恢复/短评测仍待验收。入口、检查点契约、测试与产物位置见 `docs/persistent-ghost-state-implementation-20260910.md`。本分支不改论文、不启动长训练。
 
 
 2026-09-09 晚间已重新启动 `ghost_concat_direct_compiled_10k_20260909` 长训练：主工作区选定合并版本，14200 基座重新初始化、双卡总批量 8、10000 步、每 200 步测评；直接渲染/FP16/64批次上限/Inductor，未包含已放弃的静态条件缓存和导航 SDPA。训练写入数据盘，单份流式同步到测评机。测评机离线补齐专用容器编译工具、修复数字 UID 的编译缓存路径，并通过 8 环境真实预检。操作记录见 `docs/ghost-concat-direct-compiled-10k-operations-20260909.md`。

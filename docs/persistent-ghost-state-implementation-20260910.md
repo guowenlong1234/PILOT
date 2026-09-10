@@ -60,7 +60,26 @@ env CUDA_VISIBLE_DEVICES= bash scripts/rgb_only_optimization_runtime.sh server -
 首轮覆盖 persistent/fusion/trainer/joint/job、graph candidate preview、frozen navigation 与 online checkpoint：73 passed，退出码 0，日志 `unit.log`。
 额外旧路径回归覆盖 raenwm RGB fusion、RGB workflow、NWM prediction runtime、panorama runtime、joint optimizer、RGB projection：45 passed，退出码 0，日志 `regression.log`。其中 joint 的5项与首轮重复，不能把两轮相加作为独立测试总数。
 
-补充验收测试覆盖第二步无预测的跨步梯度、同一融合网络连续两次优化且使用新图、暂停环境后的索引重排，以及真实到达节点不继承 ghost 状态。最终结果见本文后续验证条目。
+补充验收测试覆盖第二步无预测的跨步梯度、同一融合网络连续两次优化且使用新图、暂停环境后的索引重排，以及真实到达节点不继承 ghost 状态。最终合并去重执行 117 项通过（`final_tests.log`，退出码 0）。另外真实审计钩子的两项 CPU 测试通过（`audit_tests.log`，退出码 0）：既能确认跨步保留，也能抓住“导航输入已融合但图未写回”的故意缺陷。共 119 项不同测试通过；模拟 rollout 审计不代替真实 Habitat/GPU 验收。
+
+最终回归命令（工作区为训练机独立工作区）：
+
+```bash
+env CUDA_VISIBLE_DEVICES= bash scripts/rgb_only_optimization_runtime.sh server -m pytest -q \
+  tests/test_ghost_concat_persistent.py tests/test_ghost_concat_fusion.py \
+  tests/test_ghost_concat_trainer.py tests/test_ghost_concat_joint.py \
+  tests/test_ghost_concat_job.py tests/test_graph_map_candidate_preview.py \
+  tests/test_rgb_fusion_frozen_navigation.py tests/test_online_checkpoint.py \
+  tests/test_raenwm_rgb_fusion.py tests/test_rgb_fusion_only_workflow.py \
+  tests/test_nwm_prediction_runtime.py tests/test_panorama_runtime.py \
+  tests/test_rgb_projection.py
+env CUDA_VISIBLE_DEVICES= bash scripts/rgb_only_optimization_runtime.sh server -m pytest -q \
+  tests/test_persistent_rollout_audit.py
+```
+
+实现提交 `68d8469`，行为审计与生命周期测试提交 `b20d501`，审计故障注入测试提交 `d4906d1`，均已推送中央裸仓库并快进同步训练机。
+
+`scripts/check_ghost_concat_rollout.py` 支持新旧模式。它重新读取图字典，核对写回状态等于导航融合输入、计数不变、已访问节点不变；报告无预测保留、写回次数与范数。若真实轨迹未出现跨步无预测情况，报告 `cross_step_retention_exercised=false`，不能将其当作该情形已验收。
 
 ## GPU 待验收步骤
 
