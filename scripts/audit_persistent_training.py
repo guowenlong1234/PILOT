@@ -3,7 +3,7 @@
 
 Pass --report-dir followed by regular run.py arguments. Optional
 --stop-after-save deliberately exits 75 after a complete checkpoint on the
-initial run; repeat the same command with IL.is_requeue True to test recovery.
+    initial run; repeat the same command with IL.is_requeue True to test recovery.
 This tool is for isolated short validation jobs only.
 """
 import argparse
@@ -66,6 +66,9 @@ def main():
         )
         assert all(audit[k] for k in ('frozen_visual_unchanged', 'frozen_waypoint_unchanged', 'frozen_world_unchanged')), audit
         report['intervals'].append(audit)
+        # Only rank zero saves checkpoints. Persist other ranks' evidence before
+        # the launcher terminates them after rank zero's planned exit.
+        (root / f'rank{rank}.json').write_text(json.dumps(report, indent=2) + '\n')
         return result
 
     def save(self, iteration, *a, **kw):
