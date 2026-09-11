@@ -3,7 +3,7 @@
 
 Pass --report-dir followed by regular run.py arguments. Optional
 --stop-after-save deliberately exits 75 after a complete checkpoint on the
-    initial run; repeat the same command with IL.is_requeue True to test recovery.
+initial run; repeat the same command with IL.is_requeue True to test recovery.
 This tool is for isolated short validation jobs only.
 """
 import argparse

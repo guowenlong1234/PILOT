@@ -1,5 +1,7 @@
 # 持久化融合候选节点状态：实现与验证
 
+2026-09-11 更新：训练机真实单卡、双卡、保存恢复及 R2R/RxR 短评测已完成，均通过；下文的“GPU 待验收”是 9 月 10 日历史状态。当前验收证据见 `docs/persistent-ghost-gpu-validation-20260911.md`。
+
 ## 范围与当前状态
 
 2026-09-10 按已确认的计划，从 `e4aa771` 建立 `feature/persistent-ghost-state`。
