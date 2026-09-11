@@ -3,6 +3,7 @@ from dataclasses import dataclass, replace
 import numpy as np
 from copy import deepcopy
 import networkx as nx
+import torch
 import matplotlib.pyplot as plt
 from habitat.tasks.utils import cartesian_to_polar
 from habitat.utils.geometry_utils import quaternion_rotate_vector, quaternion_from_coeff
@@ -147,7 +148,12 @@ class FloydGraph(object):
 
 
 class GraphMap(object):
-    def __init__(self, has_real_pos, loc_noise, merge_ghost, ghost_aug):
+    def __init__(self, has_real_pos, loc_noise, merge_ghost, ghost_aug,
+                 ghost_concat_memory_mode="current_step_only"):
+        if ghost_concat_memory_mode not in ("current_step_only", "persistent_node_state"):
+            raise ValueError("Unknown ghost_concat_memory_mode: %s" % ghost_concat_memory_mode)
+        self.ghost_concat_memory_mode = ghost_concat_memory_mode
+        self.ghost_concat_state_vps = set()
 
         self.graph_nx = nx.Graph()
 
@@ -260,7 +266,32 @@ class GraphMap(object):
             for preview in previews
         ]
 
+    def write_ghost_concat_state(self, vp, fused_state, *, validated=False):
+        """Replace the live state without treating a prediction as an observation.
+
+        The accumulator stores state * real observation count, so the next real
+        observation merges as (count * state + observation) / (count + 1).
+        Keep autograd history throughout the rollout. ``validated`` is reserved
+        for the batched fusion caller, which checks finiteness before writing.
+        """
+        if self.ghost_concat_memory_mode != "persistent_node_state":
+            raise ValueError("Ghost state writeback requires persistent_node_state")
+        if vp not in self.ghost_embeds:
+            raise KeyError("Unknown ghost vp: %s" % vp)
+        accumulator, count = self.ghost_embeds[vp]
+        if fused_state.shape != accumulator.shape or count <= 0:
+            raise ValueError("Ghost state shape/count mismatch")
+        if fused_state.device != accumulator.device or fused_state.dtype != accumulator.dtype:
+            raise ValueError("Ghost state device/dtype mismatch")
+        replacement = fused_state * count
+        if not validated and not bool(torch.isfinite(replacement).all()):
+            return False
+        self.ghost_embeds[vp] = [replacement, count]
+        self.ghost_concat_state_vps.add(vp)
+        return True
+
     def delete_ghost(self, vp):
+        self.ghost_concat_state_vps.discard(vp)
         self.ghost_pos.pop(vp)
         self.ghost_mean_pos.pop(vp)
         self.ghost_embeds.pop(vp)

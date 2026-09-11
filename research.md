@@ -6,6 +6,11 @@ ETP-R1 是一个 VLN-CE 项目：让智能体在连续三维环境里，根据�
 
 ## Quick Start And Environment
 
+2026-09-11，持久候选状态已在训练机独立工作区通过真实单卡更新、双卡总批量8更新、第2步恢复至第4步、冻结权重审计及R2R四路线/RxR单路线验证。实际覆盖跨步无预测保留；展开配置核对，长训相对9月9日实验仅改变候选记忆模式，其他计算参数一致。详细证据见 `docs/persistent-ghost-gpu-validation-20260911.md`。下方9月10日GPU待验收记录是历史状态。
+
+2026-09-10，本独立工作区分支 `feature/persistent-ghost-state` 新增可选的融合节点状态持久化：`ghost_concat_memory_mode=persistent_node_state`，按真实观测次数递推合并旧融合状态与新观测，当前预测再融合写回；整段 rollout 保留跨步梯度。旧模式为缺省 `current_step_only`。训练机独立工作区 `/home/gwl/project/etpr1/ETP-R1-persistent-ghost`，使用 `etpnav_unified`，运行时独立复制。已完成训练机 119 项不同 CPU 测试（117 项回归＋2 项审计故障注入）；两张 GPU 正被既有训练占用，真实单卡/双卡/恢复/短评测仍待验收。入口、检查点契约、测试与产物位置见 `docs/persistent-ghost-state-implementation-20260910.md`。本分支不改论文、不启动长训练。
+
+
 2026-09-09 晚间已重新启动 `ghost_concat_direct_compiled_10k_20260909` 长训练：主工作区选定合并版本，14200 基座重新初始化、双卡总批量 8、10000 步、每 200 步测评；直接渲染/FP16/64批次上限/Inductor，未包含已放弃的静态条件缓存和导航 SDPA。训练写入数据盘，单份流式同步到测评机。测评机离线补齐专用容器编译工具、修复数字 UID 的编译缓存路径，并通过 8 环境真实预检。操作记录见 `docs/ghost-concat-direct-compiled-10k-operations-20260909.md`。
 
 2026-09-09，按用户决定，将静态条件缓存和导航SDPA之前的 `75cbe1d` 合并到当前 `feature/e24-joint-sft`，合并提交 `372ba21`，保留直接渲染和世界模型编译。当前笔记本工作区为 `/home/sia/project/ETP-R1`，训练机对应 `/home/gwl/project/etpr1/ETP-R1`，使用既有 `etpnav_unified`；后面的性能分支测试数字属于历史试验。静态条件缓存和SDPA已被用户放弃，不作为待实施或待启用方案，相关实现未合入。

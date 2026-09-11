@@ -157,6 +157,10 @@ RGB_FUSION_DIAGNOSTIC_TOTAL_NAMES = (
     "nwm_seconds",
     "grad_norm_sum",
     "grad_norm_count",
+    "persistent_writeback_count",
+    "persistent_retained_state_count",
+    "persistent_state_norm_sum",
+    "persistent_state_norm_count",
 )
 _RGB_FUSION_DIAGNOSTIC_TOTAL_INDEX = {
     name: index
@@ -197,6 +201,11 @@ def summarize_rgb_fusion_diagnostic_totals(totals, *, world_size=1):
     fused = float(totals["fused_candidates"])
     nwm_seconds = float(totals["nwm_seconds"])
     return {
+        "RGB_fusion_persistent_writebacks": float(totals.get("persistent_writeback_count", 0)),
+        "RGB_fusion_persistent_retained_states": float(totals.get("persistent_retained_state_count", 0)),
+        "RGB_fusion_persistent_state_norm_mean": _safe_diagnostic_ratio(
+            totals.get("persistent_state_norm_sum", 0), totals.get("persistent_state_norm_count", 0)
+        ),
         "RGB_fusion_query_requested": query_requested,
         "RGB_fusion_query_success": query_success,
         "RGB_fusion_query_success_rate": _safe_diagnostic_ratio(
@@ -918,6 +927,13 @@ class RLTrainer(BaseVLNCETrainer):
     def _ghost_concat_enabled(self):
         return self._raenwm_rgb_fusion_enabled() and self._rgb_fusion_type() == "ghost_concat"
 
+    def _ghost_concat_memory_mode(self):
+        mode = str(getattr(self.config.MODEL.RAENWM,
+                           "ghost_concat_memory_mode", "current_step_only")).strip().lower()
+        if mode not in {"current_step_only", "persistent_node_state"}:
+            raise ValueError("Unsupported ghost concat memory mode: " + mode)
+        return mode
+
     def _ghost_concat_joint_enabled(self):
         return self._ghost_concat_enabled() and not self._navigation_backbone_frozen()
 
@@ -943,8 +959,14 @@ class RLTrainer(BaseVLNCETrainer):
                 "layer_dims": [1536, width, width, 768],
                 "observation": "raw_graph_ghost_mean",
                 "prediction": "dinov2_raw_cls",
-                "memory": "current_step_only",
+                "memory": self._ghost_concat_memory_mode(),
             }
+            if self._ghost_concat_memory_mode() == "persistent_node_state":
+                contract["ghost_concat"].update({
+                    "observation": "observation_count_weighted_fused_state",
+                    "state_update_version": "weighted_observation_then_residual_v1",
+                    "gradient": "full_rollout",
+                })
             contract["fusion_alpha"] = float(self.config.MODEL.RAENWM.rgb_fusion_alpha)
             if not self._navigation_backbone_frozen():
                 il = self.config.IL
@@ -984,6 +1006,9 @@ class RLTrainer(BaseVLNCETrainer):
             "condition_source_pose": "query_current",
         }))
         saved.setdefault("fusion_type", "residual_gate")
+        if isinstance(saved.get("ghost_concat"), dict):
+            saved["ghost_concat"] = dict(saved["ghost_concat"])
+            saved["ghost_concat"].setdefault("memory", "current_step_only")
         # A clean baseline has no adapter and is the intentional B/C start.
         if checkpoint.get("raenwm_rgb_fusion_adapter_state_dict") is not None:
             if saved["fusion_type"] != expected["fusion_type"]:
@@ -1025,6 +1050,7 @@ class RLTrainer(BaseVLNCETrainer):
                 "rae_dinov2 and output_size=768"
             )
         if fusion_type == "ghost_concat":
+            self._ghost_concat_memory_mode()  # Fail before creating an incompatible adapter.
             if self._active_lookahead_enabled():
                 raise ValueError("Ghost concat requires E24 disabled")
             if not bool(getattr(raenwm_config, "predict_cls_token", False)):
@@ -1039,8 +1065,10 @@ class RLTrainer(BaseVLNCETrainer):
                     zero_init=bool(getattr(raenwm_config, "rgb_fusion_zero_init", True)),
                     alpha=float(getattr(raenwm_config, "rgb_fusion_alpha", 1.0)),
                 ).to(self.device)
-                logger.info("Ghost concat: 1536 -> %d -> %d -> 768, batched current-step graph input only",
-                            self.raenwm_rgb_fusion_adapter.hidden_dim, self.raenwm_rgb_fusion_adapter.hidden_dim)
+                logger.info("Ghost concat: 1536 -> %d -> %d -> 768, memory=%s",
+                            self.raenwm_rgb_fusion_adapter.hidden_dim,
+                            self.raenwm_rgb_fusion_adapter.hidden_dim,
+                            self._ghost_concat_memory_mode())
             else:
                 self.raenwm_rgb_fusion_adapter = RaeNwmRgbFusionAdapter(
                     input_dim=768,
@@ -1122,6 +1150,10 @@ class RLTrainer(BaseVLNCETrainer):
         totals[index["nwm_seconds"]].add_(query_values[2])
 
         diagnostic_key_map = {
+            "persistent_writeback_count": "persistent_writeback_count",
+            "persistent_retained_state_count": "persistent_retained_state_count",
+            "persistent_state_norm_sum": "persistent_state_norm_sum",
+            "persistent_state_norm_count": "persistent_state_norm_count",
             "eligible_candidate_count": "eligible_candidates",
             "fused_candidate_count": "fused_candidates",
             "gate_sum": "gate_sum",
@@ -1316,8 +1348,8 @@ class RLTrainer(BaseVLNCETrainer):
         }
         self.last_raenwm_prediction = prediction
         if self._ghost_concat_enabled():
-            # Defer fusion until after the pure-observation graph update.
-            # The prediction is a local rollout value, never graph history.
+            # Aggregate all new observations before fusing once per candidate.
+            # Persistent mode then writes the fused state back to the graph.
             return prediction
         self.last_raenwm_rgb_fusion_diagnostics = (
             apply_rgb_fusion_to_current_candidates(
@@ -1335,8 +1367,10 @@ class RLTrainer(BaseVLNCETrainer):
         return prediction
 
     def _apply_ghost_concat_prediction(self, nav_inputs, prediction):
+        graphs = (self.gmaps if self._ghost_concat_memory_mode() == "persistent_node_state"
+                  else None)
         fused_inputs, diagnostics = apply_ghost_concat_to_graph(
-            nav_inputs, prediction, self.raenwm_rgb_fusion_adapter
+            nav_inputs, prediction, self.raenwm_rgb_fusion_adapter, graphs
         )
         # Count all current unique ghost queries, including contexts that were
         # not ready. Counting only successful prediction rows makes coverage
@@ -3477,7 +3511,11 @@ class RLTrainer(BaseVLNCETrainer):
         self.gmaps = [GraphMap(have_real_pos, 
                                self.config.IL.loc_noise, 
                                self.config.MODEL.merge_ghost, 
-                               ghost_aug) for _ in range(self.envs.num_envs)]
+                               ghost_aug,
+                               ghost_concat_memory_mode=(
+                                   self._ghost_concat_memory_mode()
+                                   if self._ghost_concat_enabled() else "current_step_only"
+                               )) for _ in range(self.envs.num_envs)]
         prev_vp = [None] * self.envs.num_envs
         self._initialize_raenwm_runtime(self.envs.num_envs)
         self._sync_raenwm_low_level_contexts()

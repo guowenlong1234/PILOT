@@ -118,3 +118,65 @@ def test_coverage_includes_queries_without_ready_prediction(monkeypatch):
     assert obj._apply_ghost_concat_prediction(nav_inputs, None) is nav_inputs
     assert recorded[0]["eligible_candidate_count"] == 7
     assert recorded[0]["fused_candidate_count"] == 2
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_memory_mode_mismatch_rejects_adapter_even_without_resume(resume):
+    obj = trainer()
+    old = obj._rgb_fusion_navigation_contract()
+    obj.config.MODEL.RAENWM.ghost_concat_memory_mode = "persistent_node_state"
+    obj.config.IL.is_requeue = resume
+    with pytest.raises(ValueError, match="architecture/feature"):
+        obj._validate_rgb_fusion_navigation_contract({
+            "raenwm_rgb_fusion_adapter_state_dict": {},
+            "rgb_fusion_navigation_contract": old,
+        })
+
+
+def test_persistent_baseline_initialization_and_matching_resume():
+    obj = trainer()
+    obj.config.MODEL.RAENWM.ghost_concat_memory_mode = "persistent_node_state"
+    obj._validate_rgb_fusion_navigation_contract({})
+    saved = obj._rgb_fusion_navigation_contract()
+    assert saved["ghost_concat"]["gradient"] == "full_rollout"
+    assert saved["ghost_concat"]["state_update_version"] == "weighted_observation_then_residual_v1"
+    obj.config.IL.is_requeue = True
+    checkpoint = {"raenwm_rgb_fusion_adapter_state_dict": {},
+                  "rgb_fusion_navigation_contract": saved}
+    obj._validate_rgb_fusion_navigation_contract(checkpoint)
+    checkpoint["rgb_fusion_navigation_contract"]["ghost_concat"]["state_update_version"] = "other"
+    with pytest.raises(ValueError, match="architecture/feature"):
+        obj._validate_rgb_fusion_navigation_contract(checkpoint)
+
+
+def test_missing_legacy_memory_field_means_current_step_only():
+    obj = trainer()
+    saved = obj._rgb_fusion_navigation_contract()
+    del saved["ghost_concat"]["memory"]
+    obj.config.IL.is_requeue = True
+    obj._validate_rgb_fusion_navigation_contract({
+        "raenwm_rgb_fusion_adapter_state_dict": {}, "rgb_fusion_navigation_contract": saved,
+    })
+    assert "memory" not in saved["ghost_concat"]  # No mutation of caller metadata.
+
+
+def test_persistent_trainer_passes_active_environment_graphs(monkeypatch):
+    obj = trainer()
+    obj.config.MODEL.RAENWM.ghost_concat_memory_mode = "persistent_node_state"
+    obj.gmaps = [object(), object()]
+    obj.last_candidate_q0_prediction_diagnostics = {}
+    obj._accumulate_rgb_fusion_diagnostics = lambda *args: None
+    def apply(inputs, prediction, adapter, graphs):
+        assert graphs is obj.gmaps
+        return inputs, {}
+    monkeypatch.setattr(trainer_module, "apply_ghost_concat_to_graph", apply)
+    inputs = {}
+    assert obj._apply_ghost_concat_prediction(inputs, None) is inputs
+
+
+def test_unknown_memory_mode_fails_before_adapter_creation():
+    obj = trainer()
+    obj.config.MODEL.RAENWM.ghost_concat_memory_mode = "typo"
+    with pytest.raises(ValueError, match="memory mode"):
+        obj._initialize_raenwm_rgb_fusion_adapter()
+    assert obj.raenwm_rgb_fusion_adapter is None

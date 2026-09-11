@@ -2,6 +2,10 @@
 
 2026-09-08。修改前快照提交为 `a7ead28`，之后按用户确认的拼接方案实现；不采用此前提议的“复制全景、单候选对照再相减”。
 
+## 2026-09-10：可选持久节点状态
+
+独立分支 `feature/persistent-ghost-state` 增加 `ghost_concat_memory_mode=persistent_node_state`：保存融合后的节点状态，下一步按观测次数与新观测加权合并。缺省 `current_step_only` 不变。下文的“纯观测图/不跨步”说明适用于旧模式；新模式的梯度、检查点兼容及验证状态见 [持久节点状态实现记录](persistent-ghost-state-implementation-20260910.md)。GPU 验收尚待训练机资源释放。
+
 ## 2026-09-09：默认使用目标朝向全景上下文
 
 当前`run_r2r/iter_train_rae_dino_ghost_concat.yaml`及`scripts/ghost_concat_job.py`默认使用`MODEL.RAENWM.panorama_context_mode=world_exact_select`。这次已接通实际导航链路：环境只在已访问的低级历史位姿采集共光心球面/12方向视图，运行时按固定目标朝向取四帧、选择正序/倒序参考起点，并重算相对条件。每步纯观测图和ghost拼接结构保持原合同。
