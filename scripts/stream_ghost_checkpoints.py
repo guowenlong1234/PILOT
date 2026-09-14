@@ -42,8 +42,10 @@ def main():
             iterations = [int(value) for value in args.iterations.split(',')]
         except ValueError:
             p.error('iterations must be comma-separated integers')
-        if not iterations or iterations != sorted(set(iterations)) or min(iterations) < 1 or max(iterations) > args.iters:
-            p.error('iterations must be unique, ascending and within the training range')
+        if (not iterations or iterations != sorted(set(iterations)) or
+                min(iterations) < 1 or max(iterations) > args.iters or
+                any(value % args.every for value in iterations)):
+            p.error('iterations must be unique, ascending checkpoints within the training range')
     prefix = 'ghost_concat_v1_joint'
     if args.memory_mode == 'persistent_node_state':
         prefix += '_persistent'

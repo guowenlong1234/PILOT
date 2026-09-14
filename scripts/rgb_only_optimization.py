@@ -37,6 +37,20 @@ DEFAULT_ROOT = "data/logs/rgb_only_optimization_20260907"
 VERSIONS = ("import sys,torch,transformers,habitat,habitat_sim; "
             "print(dict(python=sys.version,torch=torch.__version__,cuda=torch.version.cuda,"
             "transformers=transformers.__version__,habitat=habitat.__version__,habitat_sim=habitat_sim.__version__))")
+NVML_VERSION_MISMATCH = "Driver/library version mismatch"
+CUDA_RESOURCE_FALLBACK = r'''import json, torch
+devices = []
+for index in range(torch.cuda.device_count()):
+    with torch.cuda.device(index):
+        free, total = torch.cuda.mem_get_info(index)
+        value = (torch.ones(256, device="cuda") * 2).sum()
+        if value.item() != 512:
+            raise RuntimeError("CUDA verification calculation returned an unexpected result")
+        torch.cuda.synchronize(index)
+        devices.append({"visible_index": index, "name": torch.cuda.get_device_name(index),
+                        "memory_used_mib": (total - free) / (1024 * 1024),
+                        "memory_total_mib": total / (1024 * 1024)})
+print(json.dumps({"torch": torch.__version__, "cuda": torch.version.cuda, "devices": devices}))'''
 
 
 def now():
@@ -71,6 +85,30 @@ def runtime(machine, arguments, gpus):
     return ["env", "CUDA_VISIBLE_DEVICES=" + gpus, *inner]
 
 
+def _server_cuda_resource_fallback(gpus, mismatch):
+    probe = subprocess.run(runtime("server", ["-c", CUDA_RESOURCE_FALLBACK], gpus),
+                           cwd=ROOT, capture_output=True, text=True)
+    if probe.returncode:
+        raise RuntimeError("CUDA resource fallback failed after NVML version mismatch: " +
+                           (probe.stderr.strip() or probe.stdout.strip()))
+    try:
+        state = json.loads(probe.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as exc:
+        raise RuntimeError("CUDA resource fallback returned invalid output") from exc
+    selected = [gpu for gpu in gpus.split(",") if gpu]
+    devices = state.get("devices", [])
+    if len(devices) != len(selected):
+        raise RuntimeError(f"CUDA resource fallback saw {len(devices)} devices, expected {len(selected)}")
+    print("nvidia_smi_fallback=runtime_cuda reason=" + repr(mismatch.strip()) +
+          f" torch={state.get('torch')} cuda={state.get('cuda')}", flush=True)
+    for physical, device in zip(selected, devices):
+        used = float(device["memory_used_mib"])
+        print(f"GPU {physical}, {device['name']}, memory.used={used:.1f} MiB "
+              "(runtime CUDA fallback verified calculation and synchronization)", flush=True)
+        if used > 1024:
+            raise RuntimeError("Selected GPU is occupied; worker exits without launching")
+
+
 @contextlib.contextmanager
 def resources(machine, gpus):
     locks = []
@@ -91,12 +129,21 @@ def resources(machine, gpus):
             if any(re.search(r"(?:torchrun|run\.py|train\.py)", line)
                    for line in protected.stdout.splitlines()):
                 raise RuntimeError("Protected ETPNav task is running; retry when resources are free")
-        gpu_state = output(["nvidia-smi", "--id=" + gpus,
-                            "--query-gpu=index,name,memory.used,utilization.gpu", "--format=csv,noheader,nounits"])
-        print(gpu_state, flush=True)
-        for line in gpu_state.splitlines():
-            if int(line.split(",")[-2]) > 1024:
-                raise RuntimeError("Selected GPU is occupied; worker exits without launching")
+        gpu_query = ["nvidia-smi", "--id=" + gpus,
+                     "--query-gpu=index,name,memory.used,utilization.gpu", "--format=csv,noheader,nounits"]
+        gpu_probe = subprocess.run(gpu_query, cwd=ROOT, capture_output=True, text=True)
+        if gpu_probe.returncode:
+            mismatch = "\n".join(part for part in (gpu_probe.stdout, gpu_probe.stderr) if part)
+            if machine == "server" and NVML_VERSION_MISMATCH in mismatch:
+                _server_cuda_resource_fallback(gpus, mismatch)
+            else:
+                raise RuntimeError("nvidia-smi resource check failed: " + mismatch.strip())
+        else:
+            gpu_state = gpu_probe.stdout.strip()
+            print(gpu_state, flush=True)
+            for line in gpu_state.splitlines():
+                if int(line.split(",")[-2]) > 1024:
+                    raise RuntimeError("Selected GPU is occupied; worker exits without launching")
         yield
     finally:
         for lock in locks:
