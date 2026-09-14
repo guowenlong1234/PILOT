@@ -27,6 +27,8 @@ def main():
     p.add_argument('--output', required=True)
     p.add_argument('--iters', type=int, default=10000)
     p.add_argument('--every', type=int, default=200)
+    p.add_argument('--memory-mode', choices=['current_step_only', 'persistent_node_state'], default='current_step_only')
+    p.add_argument('--iterations', help='Explicit ascending subset of checkpoints to deliver')
     args = p.parse_args()
     if str(ROOT) != '/home/gwl/project/etpr1/ETP-R1':
         p.error('Run in the training machine project workspace')
@@ -34,13 +36,25 @@ def main():
         p.error('output must be project-relative')
     if min(args.every, args.iters) < 1 or args.iters % args.every:
         p.error('iters must be a positive multiple of every')
+    iterations = list(range(args.every, args.iters + 1, args.every))
+    if args.iterations:
+        try:
+            iterations = [int(value) for value in args.iterations.split(',')]
+        except ValueError:
+            p.error('iterations must be comma-separated integers')
+        if not iterations or iterations != sorted(set(iterations)) or min(iterations) < 1 or max(iterations) > args.iters:
+            p.error('iterations must be unique, ascending and within the training range')
+    prefix = 'ghost_concat_v1_joint'
+    if args.memory_mode == 'persistent_node_state':
+        prefix += '_persistent'
+    name = prefix + '_train'
     root = ROOT / args.output
     root.mkdir(parents=True, exist_ok=True)
     lock = (root / 'delivery.lock').open('a')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    relative = Path(args.output) / 'train' / NAME / 'checkpoints' / NAME
-    train_manifest = root / 'train' / NAME / 'manifest.json'
-    for iteration in range(args.every, args.iters + 1, args.every):
+    relative = Path(args.output) / 'train' / name / 'checkpoints' / name
+    train_manifest = root / 'train' / name / 'manifest.json'
+    for iteration in iterations:
         source = ROOT / relative / f'ckpt.iter{iteration}.pth'
         # Models are atomically published and retained; old optimizer states
         # may already be pruned while evaluation is catching up.
@@ -53,7 +67,7 @@ def main():
             time.sleep(30)
         digest = sha(source)
         destination = REMOTE / relative / source.name
-        manifest = REMOTE / args.output / 'eval' / f'ghost_concat_v1_joint_eval_iter{iteration}' / 'manifest.json'
+        manifest = REMOTE / args.output / 'eval' / f'{prefix}_eval_iter{iteration}' / 'manifest.json'
         code = 'import pathlib,sys; p=pathlib.Path(sys.argv[1]); print(p.read_text() if p.exists() else "{}")'
         result = json.loads(remote_python(code, manifest))
         if result.get('status') != 'completed':
@@ -82,7 +96,7 @@ print('verified_replica_released')
 '''
         print(remote_python(cleanup, destination, digest).strip(), flush=True)
         save(root / 'delivery.json', dict(iteration=iteration, sha256=digest,
-             status='completed' if iteration == args.iters else 'running', original=str(source)))
+             status='completed' if iteration == iterations[-1] else 'running', original=str(source), requested_iterations=iterations))
 
 
 if __name__ == '__main__':

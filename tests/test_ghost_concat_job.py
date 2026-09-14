@@ -60,9 +60,10 @@ def test_persistent_joint_train_separates_names_paths_and_sync(monkeypatch, job)
     assert kwargs["config_file"] == job.PERSISTENT_CONFIG
 
 
-def test_persistent_watch_uses_matching_checkpoint_names(monkeypatch, job):
+@pytest.mark.parametrize("machine", ["server", "eval"])
+def test_persistent_watch_uses_matching_checkpoint_names(monkeypatch, job, machine):
     calls = invoke(monkeypatch, job, [
-        "watch", "--machine", "eval", "--dry-run", "--train-policy",
+        "watch", "--machine", machine, "--dry-run", "--train-policy",
         "--ghost-concat-memory-mode", "persistent_node_state",
         "--output", "data/logs/persistent_smoke", "--eval-iterations", "2,4",
     ])

@@ -75,8 +75,8 @@ def main():
         parser.error("Training uses the server project environment")
     if args.action == "eval" and (not args.checkpoint or "," in args.gpus):
         parser.error("Evaluation requires --checkpoint and one GPU")
-    if args.action == "watch" and (args.machine != "eval" or "," in args.gpus or args.checkpoint):
-        parser.error("Watcher uses the evaluation host, one GPU, and derived checkpoint paths")
+    if args.action == "watch" and ("," in args.gpus or args.checkpoint):
+        parser.error("Watcher uses one GPU and derived checkpoint paths")
     expected = SERVER_WORKSPACES if args.machine == "server" else ("/home/a6000/gwl/ETP-R1",)
     if not args.dry_run and str(ROOT) not in expected:
         parser.error("Wrong target project workspace: " + str(ROOT))
