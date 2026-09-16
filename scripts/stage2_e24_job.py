@@ -28,7 +28,15 @@ def main():
     with gzip.open(ROOT/f'data/datasets/R2R_VLNCE_v1-3_preprocessed_xlmr/{a.split}/{a.split}.json.gz','rt') as f: data=json.load(f)
     ids=sorted(str(ep['episode_id']) for ep in data['episodes'])
     ids=ids[a.part::a.parts]
-    if a.episodes>0:ids=ids[:a.episodes]
+    if a.episodes>0:
+        # Smoke subsets cover scenes before taking another episode per scene,
+        # so an eight-environment preflight exercises the actual worker count.
+        from collections import defaultdict
+        groups=defaultdict(list); allowed=set(ids)
+        for ep in data['episodes']:
+            if str(ep['episode_id']) in allowed:groups[str(ep['scene_id'])].append(str(ep['episode_id']))
+        groups=[sorted(v) for _,v in sorted(groups.items())]
+        ids=[g[i] for i in range(max(map(len,groups))) for g in groups if i<len(g)][:a.episodes]
     if a.action=='validate':
         code='from vlnce_baselines.nwm.active_lookahead.stage2_data import validate_dataset; import json; m=validate_dataset('+repr(str(root/'episodes'))+','+repr(ids)+'); print(json.dumps({k:v for k,v in m.items() if k!="entries"}))'
         return subprocess.call(runtime(a.machine,['-c',code],a.gpu),cwd=ROOT)
