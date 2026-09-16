@@ -73,3 +73,22 @@ def test_validated_preset_rejects_missing_native_observations():
     runtime=PanoramaPredictionRuntime(encoder=Encoder(),normalizer=Normalizer(),predictor=Predictor(),mode='world_exact_select',device='cpu')
     with pytest.raises(ValueError,match='native world direction bank'):
         runtime.predict([PanoramaTarget(0,'a',(0,0,-2),0)],{0:h})
+
+
+def test_stage2_snapshot_captures_actual_reversed_context_without_changing_prediction():
+    h=PanoramaHistory()
+    for i in range(4):h.append(frame(i))
+    e,p=Encoder(),Predictor()
+    runtime=PanoramaPredictionRuntime(encoder=e,normalizer=Normalizer(),predictor=p,
+        mode='world_exact_select',device='cpu',require_native_views=False)
+    target=PanoramaTarget(0,'g1',(0.,0.,.5),np.pi)
+    noise=torch.zeros(1,257,768)
+    base=runtime.predict([target],{0:h},initial_noise=noise)
+    runtime.capture_stage2_snapshots=True
+    captured=runtime.predict([target],{0:h},initial_noise=noise)
+    assert torch.equal(base.pred_tokens,captured.pred_tokens)
+    snap=captured.meta['stage2_snapshots'][0]
+    assert snap['order']==[3,2,1,0]
+    assert torch.equal(snap['context_latents'].float(),p.batches[-1].context_latent[0])
+    assert snap['target_yaw']==pytest.approx(np.pi)
+    assert snap['context_latents'].device.type=='cpu'

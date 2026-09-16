@@ -3734,6 +3734,14 @@ class RLTrainer(BaseVLNCETrainer):
             if self._stage2_collect_enabled():
                 self.stage2_collector.collect_step(nav_inputs, nav_outs, txt_embeds, txt_masks, no_vp_left, stepk)
 
+            if self.config.MODEL.STAGE2_COLLECT.trace:
+                for trace_i, trace_ep in enumerate(self.envs.current_episodes()):
+                    print("STAGE2_BASE_TRACE " + json.dumps(dict(
+                        episode=str(trace_ep.episode_id), step=int(stepk),
+                        action=int(nav_logits[trace_i].argmax()),
+                        logits=nav_logits[trace_i,:len(nav_inputs['gmap_vp_ids'][trace_i])].detach().cpu().tolist(),
+                    )), flush=True)
+
             active_deltas = None
             e24_joint_pack = None
             if self._active_lookahead_enabled():
