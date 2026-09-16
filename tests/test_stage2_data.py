@@ -40,3 +40,22 @@ def test_partial_episode_not_published(tmp_path):
     w=EpisodeWriter(tmp_path,{});w.append('a','s',torch.ones(4,768),row())
     assert not list(tmp_path.glob('*.pt'))
     with pytest.raises(ValueError,match='coverage'):validate_dataset(tmp_path,['a'])
+
+
+def test_absent_future_and_stop_do_not_create_supervision(tmp_path):
+    r=row();r['future_valid_mask'].zero_();r['base_stop']=True
+    w=EpisodeWriter(tmp_path,{});w.append('a','s',torch.ones(4,768),r);w.complete('a',{})
+    with pytest.raises(ValueError,match='no trainable'):validate_dataset(tmp_path,['a'])
+    b=collate_stage2([dict(r,text_tokens=torch.ones(4,768))])
+    loss=offline_decision_aware_loss(torch.zeros(1,5),b['teacher_rank_in_topk'],
+        **{k:b[k] for k in ('topk_valid_mask','teacher_valid','teacher_stop','no_vp_left','base_stop','base_logits','ghost_valid_mask','topk_base_indices','teacher_base_index')},config=OfflineDecisionLossConfig())
+    assert loss.loss.item()==0
+
+
+def test_multi_root_rejects_train_dev_mix(tmp_path):
+    roots=[]
+    for split in ('train','val_unseen'):
+        root=tmp_path/split;roots.append(root)
+        w=EpisodeWriter(root,{'split':split});w.append(split,'s',torch.ones(4,768),row());w.complete(split,{})
+        validate_dataset(root,[split])
+    with pytest.raises(ValueError,match='incompatible'):Stage2Dataset(roots)

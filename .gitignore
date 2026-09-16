@@ -31,3 +31,6 @@ __pycache__/
 /paper_rewriting_output/**/*.docx
 /paper_rewriting_output/**/*.bak_fonts
 /paper_rewriting_output/final_paper/figures/*.png
+
+# Isolated stage2 input models remain local.
+/stage2_assets/

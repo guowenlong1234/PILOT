@@ -47,6 +47,8 @@ class Stage2Collector:
         # collection owns no optimizer or scheduler and never calls backward.
         trainer.optimizer=None;trainer.scheduler=None
         self.before=capture_base_tensor_manifest(self.modules)
+        self.versions={name: [(t, t._version) for t in list(m.parameters())+list(m.buffers())]
+                       for name,m in self.modules.items()}
         self.trace=[]
 
     def bind_runtime(self,runtime):
@@ -61,6 +63,7 @@ class Stage2Collector:
             if self.world_model.training or any(p.requires_grad for p in self.world_model.parameters()):
                 raise RuntimeError('world model is not frozen')
             self.runtime_before = capture_base_tensor_manifest({'world_model': self.world_model})
+            self.versions['world_model']=[(t,t._version) for t in list(self.world_model.parameters())+list(self.world_model.buffers())]
         rows={} if prediction is None else {
             (s['env_index'],str(s['query_id'])):(s,prediction.pred_latent[j].detach().cpu().half().contiguous())
             for j,s in enumerate(prediction.meta.get('stage2_snapshots',[]))}
@@ -172,6 +175,9 @@ class Stage2Collector:
                     logits=logits[i,:len(nav_inputs['gmap_vp_ids'][i])].cpu().tolist()))
 
     def complete_episode(self,episode,metrics):
+        for name,tensors in self.versions.items():
+            if any(t._version != version for t,version in tensors):
+                raise RuntimeError(f'frozen tensor mutated before episode publication: {name}')
         r=self.writer.complete(episode,metrics); self.counts['episodes']+=1
         atomic_json(Path(self.cfg.output)/'progress.json',dict(self.counts))
         print('STAGE2_EPISODE',json.dumps(r),flush=True)

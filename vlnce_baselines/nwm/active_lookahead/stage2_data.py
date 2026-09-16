@@ -5,6 +5,7 @@ No optimizer or training entry point is implemented in this collection phase.
 """
 import hashlib
 import json
+import shutil
 from collections import OrderedDict
 from pathlib import Path
 import torch
@@ -81,6 +82,8 @@ class EpisodeWriter:
         name = hashlib.sha256(episode.encode()).hexdigest()[:24] + '.pt'
         path = self.root / name
         if path.exists(): raise FileExistsError(f'duplicate episode {episode}')
+        if shutil.disk_usage(self.root).free < 20*1024**3:
+            raise OSError('less than 20 GiB remains; refusing another shard')
         tmp = path.with_suffix('.pt.tmp'); torch.save(item, tmp); tmp.replace(path)
         record = dict(episode_id=episode, scene_id=item['scene_id'], file=name,
             rows=len(item['rows']), bytes=path.stat().st_size, sha256=sha256(path),
