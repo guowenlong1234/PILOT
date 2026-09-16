@@ -92,7 +92,10 @@ class Stage2Collector:
             k=len(ranked); local={idx:j for j,idx in enumerate(ghosts)}
             row=dict(step=int(step),ghost_ids=[ids[j] for j in ghosts],global_indices=ghosts,
                 topk_base_indices=torch.tensor([local[j] for j in ranked],dtype=torch.long),
-                base_logits=logits[i,ghosts].cpu().float(),base_stop=int(logits[i].argmax())==0,
+                base_logits=logits[i,ghosts].cpu().float(),
+                model_base_stop=int(logits[i].argmax())==0,
+                forced_stop=step==tr.max_len-1 or bool(no_vp_left[i]),
+                base_stop=int(logits[i].argmax())==0 or step==tr.max_len-1 or bool(no_vp_left[i]),
                 no_vp_left=bool(no_vp_left[i]),owner_embeddings=nav_outs['gmap_embeds'][i,ranked].detach().cpu().half(),
                 future_tokens=torch.zeros(k,257,768,dtype=torch.float16),future_valid_mask=torch.zeros(k,dtype=torch.bool),
                 candidate_q0_geometry=torch.zeros(k,3),q1_conditions=torch.zeros(k,4),
