@@ -3734,7 +3734,7 @@ class RLTrainer(BaseVLNCETrainer):
             if self._stage2_collect_enabled():
                 self.stage2_collector.collect_step(nav_inputs, nav_outs, txt_embeds, txt_masks, no_vp_left, stepk)
 
-            if self.config.MODEL.STAGE2_COLLECT.trace:
+            if bool(getattr(getattr(self.config.MODEL, "STAGE2_COLLECT", None), "trace", False)):
                 for trace_i, trace_ep in enumerate(self.envs.current_episodes()):
                     print("STAGE2_BASE_TRACE " + json.dumps(dict(
                         episode=str(trace_ep.episode_id), step=int(stepk),
