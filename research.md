@@ -6,7 +6,7 @@ ETP-R1 是一个 VLN-CE 项目：让智能体在连续三维环境里，根据�
 
 ## Quick Start And Environment
 
-2026-09-16：新分支 `feature/stage2-e24-offline`，独立工作区 `ETP-R1-stage2-e24`。按 `docs/plans/2026-09-16-stage2-e24-training-plan.md` 实施，范围止于可训练离线数据采集与校验，不启动E24优化训练。基座选6400，stage1全冻结，数据使用预测future。实施与验证进行中。
+2026-09-16：新分支 `feature/stage2-e24-offline`，独立工作区 `ETP-R1-stage2-e24`。按 `docs/plans/2026-09-16-stage2-e24-training-plan.md` 实施，范围止于可训练离线数据采集与校验，不启动E24优化训练。基座选6400，stage1全冻结，数据使用预测future。实施与验证进行中；代码及现场记录见 `docs/stage2-offline-collection-operations-20260916.md`。已完成真实2路线及编译16路线零扰动对照、模型冻结和实际E24只前向验证，准备全量采集。
 
 2026-09-11，持久候选状态已在训练机独立工作区通过真实单卡更新、双卡总批量8更新、第2步恢复至第4步、冻结权重审计及R2R四路线/RxR单路线验证。实际覆盖跨步无预测保留；展开配置核对，长训相对9月9日实验仅改变候选记忆模式，其他计算参数一致。详细证据见 `docs/persistent-ghost-gpu-validation-20260911.md`。下方9月10日GPU待验收记录是历史状态。
 
