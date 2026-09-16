@@ -123,9 +123,22 @@ def validate_dataset(root, expected_ids=None):
 
 class Stage2Dataset(Dataset):
     def __init__(self, root, cache_size=2):
-        self.root=Path(root); manifest=json.loads((self.root/'dataset_manifest.json').read_text())
-        if manifest['status']!='validated': raise ValueError('unvalidated dataset')
-        self.index=[(r['file'],i) for r in manifest['entries'] for i in range(r['rows'])]
+        roots=[Path(r) for r in root] if isinstance(root,(list,tuple)) else [Path(root)]
+        self.root=Path('/')
+        self.index=[];seen=set();contract=None
+        for source in roots:
+            manifest=json.loads((source/'dataset_manifest.json').read_text())
+            if manifest['status']!='validated': raise ValueError('unvalidated dataset')
+            if sha256(source/'provenance.json')!=manifest['provenance_sha256']:
+                raise ValueError('dataset provenance changed')
+            provenance=json.loads((source/'provenance.json').read_text())
+            identity={k:provenance.get(k) for k in ('stage1_sha256','assets','split','feature_space','context_contract','behavior')}
+            if contract is not None and contract!=identity:raise ValueError('incompatible dataset roots')
+            contract=identity
+            for r in manifest['entries']:
+                if r['episode_id'] in seen:raise ValueError('duplicate episode across dataset roots')
+                seen.add(r['episode_id'])
+                self.index.extend((str((source/r['file']).resolve()),i) for i in range(r['rows']))
         self.cache=OrderedDict(); self.cache_size=max(1,cache_size)
     def __len__(self): return len(self.index)
     def __getitem__(self,index):
