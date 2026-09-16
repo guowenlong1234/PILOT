@@ -59,3 +59,9 @@ def test_multi_root_rejects_train_dev_mix(tmp_path):
         w=EpisodeWriter(root,{'split':split});w.append(split,'s',torch.ones(4,768),row());w.complete(split,{})
         validate_dataset(root,[split])
     with pytest.raises(ValueError,match='incompatible'):Stage2Dataset(roots)
+
+
+def test_coverage_metadata_is_verified_from_tensors(tmp_path):
+    w=EpisodeWriter(tmp_path,{});w.append('a','s',torch.ones(4,768),row());r=w.complete('a',{})
+    meta=(tmp_path/r['file']).with_suffix('.json');r['future_valid']=100;meta.write_text(json.dumps(r))
+    with pytest.raises(ValueError,match='coverage metadata'):validate_dataset(tmp_path,['a'])

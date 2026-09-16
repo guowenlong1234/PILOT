@@ -111,6 +111,11 @@ def validate_dataset(root, expected_ids=None):
         for step, row in enumerate(obj['rows']):
             validate_row(row, obj['text_tokens'])
             if row['step'] != step: raise ValueError('step order mismatch')
+        measured=dict(future_slots=sum(len(x['future_valid_mask']) for x in obj['rows']),
+                      future_valid=sum(int(x['future_valid_mask'].sum()) for x in obj['rows']),
+                      trainable_rows=sum(bool(x['future_valid_mask'].any()) and x['teacher_valid']
+                          and not x['teacher_stop'] and not x['base_stop'] and not x['no_vp_left'] for x in obj['rows']))
+        if any(r[k]!=v for k,v in measured.items()):raise ValueError('shard coverage metadata mismatch')
         ids.add(r['episode_id']); entries.append(r)
     if expected_ids is not None and ids != set(map(str, expected_ids)):
         raise ValueError(f'episode coverage mismatch: missing={len(set(map(str,expected_ids))-ids)}, extra={len(ids-set(map(str,expected_ids)))}')
