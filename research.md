@@ -6,6 +6,8 @@ ETP-R1 是一个 VLN-CE 项目：让智能体在连续三维环境里，根据�
 
 ## Quick Start And Environment
 
+2026-09-16：新分支 `feature/stage2-e24-offline`，独立工作区 `ETP-R1-stage2-e24`。按 `docs/plans/2026-09-16-stage2-e24-training-plan.md` 实施，范围止于可训练离线数据采集与校验，不启动E24优化训练。基座选6400，stage1全冻结，数据使用预测future。实施与验证进行中。
+
 2026-09-11，持久候选状态已在训练机独立工作区通过真实单卡更新、双卡总批量8更新、第2步恢复至第4步、冻结权重审计及R2R四路线/RxR单路线验证。实际覆盖跨步无预测保留；展开配置核对，长训相对9月9日实验仅改变候选记忆模式，其他计算参数一致。详细证据见 `docs/persistent-ghost-gpu-validation-20260911.md`。下方9月10日GPU待验收记录是历史状态。
 
 2026-09-10，本独立工作区分支 `feature/persistent-ghost-state` 新增可选的融合节点状态持久化：`ghost_concat_memory_mode=persistent_node_state`，按真实观测次数递推合并旧融合状态与新观测，当前预测再融合写回；整段 rollout 保留跨步梯度。旧模式为缺省 `current_step_only`。训练机独立工作区 `/home/gwl/project/etpr1/ETP-R1-persistent-ghost`，使用 `etpnav_unified`，运行时独立复制。已完成训练机 119 项不同 CPU 测试（117 项回归＋2 项审计故障注入）；两张 GPU 正被既有训练占用，真实单卡/双卡/恢复/短评测仍待验收。入口、检查点契约、测试与产物位置见 `docs/persistent-ghost-state-implementation-20260910.md`。本分支不改论文、不启动长训练。
