@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 from rgb_only_optimization import ROOT, common, resources, runtime, sha, save, VERSIONS
 
 BASE_REL='data/logs/ghost_concat_persistent_compiled_10k_20260911/train/ghost_concat_v1_joint_persistent_train/checkpoints/ghost_concat_v1_joint_persistent_train/ckpt.iter6400.pth'
@@ -43,6 +44,13 @@ def main():
     prov=root/'provenance.json'
     if prov.exists() and json.loads(prov.read_text())!=provenance:raise ValueError('immutable collection provenance changed')
     save(prov,provenance)
+    # A crash after tensor publication but before metadata publication leaves
+    # an uncommitted shard. Preserve it, then replay the whole episode.
+    episode_root=root/'episodes'
+    for path in list(episode_root.glob('*.pt'))+list(episode_root.glob('*.pt.tmp')):
+        if path.suffix=='.pt' and path.with_suffix('.json').exists():continue
+        quarantine=root/'uncommitted';quarantine.mkdir(exist_ok=True)
+        path.rename(quarantine/(str(time.time_ns())+'_'+path.name))
     done=set()
     for path in (root/'episodes').glob('*.json'):
         d=json.loads(path.read_text())
@@ -71,7 +79,10 @@ def main():
     cmd=['run.py','--exp_name','stage2_collect','--run-type','eval','--exp-config','run_r2r/iter_train_rae_dino_ghost_concat_persistent.yaml']
     for key,value in opts.items():cmd.extend([key,str(value)])
     command=runtime(a.machine,cmd,a.gpu)
-    save(root/'launch.json',dict(command=command,provenance=provenance,pending_episodes=todo))
+    launch=dict(command=command,provenance=provenance,pending_episodes=todo,
+                resume_policy='complete_episode_only; stage1 RNG restarts for remaining episodes')
+    save(root/'launch.json',launch)
+    save(root/'attempts'/f'{time.time_ns()}.json',launch)
     if a.dry_run:print(json.dumps(command));return 0
     with resources(a.machine,a.gpu):
         with (root/'run.log').open('a') as log:
