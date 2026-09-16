@@ -224,7 +224,7 @@ class PanoramaPredictionRuntime:
             initial_noise=torch.cat([make_latent_noise(min(8,len(plans)-i),768,16,self.device,
                 dtype=torch.float32,predict_cls_token=True,generator=generator)
                 for i in range(0,len(plans),8)])
-        predictions=[];records=[];provenance=[]
+        predictions=[];records=[];provenance=[];snapshots=[]
         for start in range(0,len(plans),self.prediction_batch_size):
             part=plans[start:start+self.prediction_batch_size];part_records=[]
             for target,plan,_ in part:
@@ -242,8 +242,20 @@ class PanoramaPredictionRuntime:
                 rel_t=torch.tensor([p.rel_t for _,p,_ in part],device=self.device),
                 condition_tensor=torch.tensor([(*p.delta,p.rel_t) for _,p,_ in part],device=self.device),
                 records=part_records,skipped={})
+            if getattr(self, 'capture_stage2_snapshots', False):
+                for j, (target, plan, keys) in enumerate(part):
+                    snapshots.append(dict(
+                        env_index=target.env_index, query_id=target.query_id,
+                        context_latents=batch.context_latent[j].detach().cpu().half().contiguous(),
+                        source_position=np.asarray(plan.source_position).copy(),
+                        source_yaw=float(plan.source_yaw), target_yaw=float(plan.target_yaw),
+                        target_position=np.asarray(plan.target_position).copy(),
+                        horizon=float(plan.rel_t)*128,
+                        order=list(plan.order), view_yaws=list(plan.view_yaws),
+                        context_metadata=self.context_metadata,
+                    ))
             result=self.predictor.predict_time_from_etp_batch(batch,generator=generator,
                 initial_noise=None if initial_noise is None else initial_noise[start:start+len(part)])
             predictions.append(result.pred_latent);records.extend(part_records)
         return build_native_cls_prediction(torch.cat(predictions),normalizer=self.normalizer,
-            meta={'records':records,'sources':provenance,'skipped':skipped,'context':self.context_metadata})
+            meta={'records':records,'sources':provenance,'skipped':skipped,'context':self.context_metadata,'stage2_snapshots':snapshots})

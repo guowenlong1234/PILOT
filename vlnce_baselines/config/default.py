@@ -261,6 +261,13 @@ _C.MODEL.RAENWM.rgb_fusion_align_navigation_cls = False
 
 # Predicted Top-5 q1 lookahead with a jointly trained E24 residual scorer.
 # Every switch is off by default so legacy R1 behavior is unchanged.
+_C.MODEL.STAGE2_COLLECT = CN()
+_C.MODEL.STAGE2_COLLECT.enabled = False
+_C.MODEL.STAGE2_COLLECT.output = ""
+_C.MODEL.STAGE2_COLLECT.provenance = ""
+_C.MODEL.STAGE2_COLLECT.seed = 20260916
+_C.MODEL.STAGE2_COLLECT.trace = False
+
 _C.MODEL.ACTIVE_LOOKAHEAD = CN()
 _C.MODEL.ACTIVE_LOOKAHEAD.enabled = False
 _C.MODEL.ACTIVE_LOOKAHEAD.source = "dino_cwp_nwm"

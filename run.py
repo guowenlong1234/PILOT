@@ -66,6 +66,8 @@ def run_exp(exp_name: str, exp_config: str,
     """
 
     config = get_config(exp_config, opts)
+    if config.MODEL.STAGE2_COLLECT.enabled and run_type != "eval":
+        raise ValueError("stage2 collection is eval-only; training is not authorized in this phase")
     config.defrost()
 
     config.TENSORBOARD_DIR += exp_name

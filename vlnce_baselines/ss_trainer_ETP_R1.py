@@ -3220,6 +3220,9 @@ class RLTrainer(BaseVLNCETrainer):
         )
         self.policy.eval()
         self.waypoint_predictor.eval()
+        if self._stage2_collect_enabled():
+            from vlnce_baselines.nwm.active_lookahead.stage2_collect import Stage2Collector
+            self.stage2_collector = Stage2Collector(self)
 
         if self.config.EVAL.EPISODE_COUNT == -1:
             eps_to_eval = sum(self.envs.number_of_episodes)
@@ -3240,6 +3243,8 @@ class RLTrainer(BaseVLNCETrainer):
         evaluation_elapsed_seconds = time.perf_counter() - evaluation_started
 
         self.envs.close()
+        if self._stage2_collect_enabled():
+            self.stage2_collector.finish()
 
         if self.world_size > 1:
             distr.barrier()
@@ -3446,6 +3451,9 @@ class RLTrainer(BaseVLNCETrainer):
         ori = [x[1] for x in pos_ori]
         return pos, ori
 
+    def _stage2_collect_enabled(self):
+        return bool(getattr(getattr(self.config.MODEL, "STAGE2_COLLECT", None), "enabled", False))
+
     def rollout(self, mode, ml_weight=None, sample_ratio=None):
         if mode == 'train':
             feedback = 'sample'
@@ -3506,6 +3514,7 @@ class RLTrainer(BaseVLNCETrainer):
             mode == 'train'
             or bool(self.config.VIDEO_OPTION)
             or self._active_lookahead_enabled()
+            or self._stage2_collect_enabled()
         )
         ghost_aug = self.config.IL.ghost_aug if mode == 'train' else 0
         self.gmaps = [GraphMap(have_real_pos, 
@@ -3518,6 +3527,8 @@ class RLTrainer(BaseVLNCETrainer):
                                )) for _ in range(self.envs.num_envs)]
         prev_vp = [None] * self.envs.num_envs
         self._initialize_raenwm_runtime(self.envs.num_envs)
+        if self._stage2_collect_enabled():
+            self.stage2_collector.bind_runtime(self.raenwm_runtime)
         self._sync_raenwm_low_level_contexts()
         if (
             self._active_lookahead_enabled()
@@ -3582,6 +3593,7 @@ class RLTrainer(BaseVLNCETrainer):
                 mode == 'train'
                 or self.config.VIDEO_OPTION
                 or self._active_lookahead_enabled()
+                or self._stage2_collect_enabled()
             ):
                 navigation_states = self.envs.call(
                     ["get_navigation_state"] * self.envs.num_envs,
@@ -3703,6 +3715,9 @@ class RLTrainer(BaseVLNCETrainer):
                         source_high_level_step=int(stepk),
                     )
 
+            if self._stage2_collect_enabled():
+                self.stage2_collector.cache_q0(candidate_q0_prediction, candidate_previews, wp_outputs, stepk)
+
             nav_inputs = self._nav_gmap_variable(cur_vp, cur_pos, cur_ori, task_type)
             if ghost_concat_enabled:
                 nav_inputs = self._apply_ghost_concat_prediction(nav_inputs, candidate_q0_prediction)
@@ -3715,6 +3730,9 @@ class RLTrainer(BaseVLNCETrainer):
             nav_outs = self.policy.net(**nav_inputs)
             nav_logits = nav_outs['global_logits']
             nav_probs = F.softmax(nav_logits, 1)
+
+            if self._stage2_collect_enabled():
+                self.stage2_collector.collect_step(nav_inputs, nav_outs, txt_embeds, txt_masks, no_vp_left, stepk)
 
             active_deltas = None
             e24_joint_pack = None
@@ -3920,6 +3938,8 @@ class RLTrainer(BaseVLNCETrainer):
                     if ep_id in self.stat_eps:
                         print("ERROR!!!!!!!!!! ", ep_id)
                     self.stat_eps[ep_id] = metric
+                    if self._stage2_collect_enabled():
+                        self.stage2_collector.complete_episode(str(ep_id), metric)
                     self.pbar.update()
 
             # record path
