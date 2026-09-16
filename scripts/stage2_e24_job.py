@@ -59,6 +59,8 @@ def main():
         'MODEL.RAENWM.compile_backend':'inductor','MODEL.RAENWM.panorama_context_mode':'world_exact_select',
         'MODEL.RAENWM.panorama_observation_source':'direct','MODEL.RAENWM.panorama_visual_precision':'fp16',
         'MODEL.RAENWM.panorama_encode_batch_size':64,'MODEL.RAENWM.panorama_prediction_batch_size':64,
+        'MODEL.ACTIVE_LOOKAHEAD.dino_cwp_checkpoint_path':'pretrained/active_lookahead/dino_cwp_best.pt',
+        'MODEL.ACTIVE_LOOKAHEAD.dino_cwp_checkpoint_sha256':'6a45291219907dd027203d224f3f8400631651a83bd01c45b1dea55d93ec0979',
         'MODEL.STAGE2_COLLECT.enabled':a.action=='collect', 'MODEL.STAGE2_COLLECT.output':str(root/'episodes'),
         'MODEL.STAGE2_COLLECT.provenance':str(prov),'MODEL.STAGE2_COLLECT.trace':a.trace,
         'EVAL.SPLIT':a.split,'EVAL.EPISODE_ID':todo,'EVAL.EPISODE_COUNT':-1,

@@ -175,6 +175,6 @@ class Stage2Collector:
         after=capture_base_tensor_manifest(self.modules)
         comparison=compare_base_tensor_manifests(self.before,after)
         atomic_json(Path(self.cfg.output)/'freeze_report.json',dict(comparison=comparison,counts=dict(self.counts),
-            before=self.before,after=after,optimizer_created=False,training_started=False))
+            before=self.before,after=after,optimizer_steps=0,training_started=False))
         if self.cfg.trace:atomic_json(Path(self.cfg.output)/'trace.json',self.trace)
         if not comparison['exact_match']:raise RuntimeError('frozen stage1 changed')
