@@ -55,6 +55,12 @@ class Stage2Collector:
         self.runtime=runtime
 
     def cache_q0(self,prediction,previews,wp,step):
+        bundle = self.runtime.predictor.bundle
+        if bundle is not None and self.runtime_before is None:
+            self.world_model = getattr(bundle.model, '_orig_mod', bundle.model)
+            if self.world_model.training or any(p.requires_grad for p in self.world_model.parameters()):
+                raise RuntimeError('world model is not frozen')
+            self.runtime_before = capture_base_tensor_manifest({'world_model': self.world_model})
         rows={} if prediction is None else {
             (s['env_index'],str(s['query_id'])):(s,prediction.pred_latent[j].detach().cpu().half().contiguous())
             for j,s in enumerate(prediction.meta.get('stage2_snapshots',[]))}
@@ -174,6 +180,11 @@ class Stage2Collector:
         if self.writer.pending:raise RuntimeError('unfinished episodes remain')
         after=capture_base_tensor_manifest(self.modules)
         comparison=compare_base_tensor_manifests(self.before,after)
+        if self.runtime_before is not None:
+            world_after=capture_base_tensor_manifest({'world_model': self.world_model})
+            world_comparison=compare_base_tensor_manifests(self.runtime_before,world_after)
+            if not world_comparison['exact_match']:raise RuntimeError('frozen world model changed')
+            atomic_json(Path(self.cfg.output)/'world_freeze.json',world_comparison)
         atomic_json(Path(self.cfg.output)/'freeze_report.json',dict(comparison=comparison,counts=dict(self.counts),
             before=self.before,after=after,optimizer_steps=0,training_started=False))
         if self.cfg.trace:atomic_json(Path(self.cfg.output)/'trace.json',self.trace)

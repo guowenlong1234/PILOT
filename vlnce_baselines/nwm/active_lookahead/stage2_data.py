@@ -98,7 +98,7 @@ def validate_dataset(root, expected_ids=None):
     for meta in sorted(root.glob('*.json')):
         if meta.name in ('provenance.json','dataset_manifest.json','freeze_report.json'): continue
         r = json.loads(meta.read_text())
-        if 'file' not in r: continue
+        if not isinstance(r,dict) or 'file' not in r: continue
         path = root / r['file']
         if sha256(path) != r['sha256']: raise ValueError(f'SHA mismatch: {path}')
         obj = load(path)
