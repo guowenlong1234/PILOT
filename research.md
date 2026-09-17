@@ -8,6 +8,8 @@ ETP-R1 是一个 VLN-CE 项目：让智能体在连续三维环境里，根据�
 
 2026-09-17：按用户新授权继续E24离线训练阶段，范围为正式训练入口、短训练/跨进程恢复验收、完整train训练及完整dev离线评价，暂不接回在线导航。继续使用本独立分支和双机自有环境，训练数据保持在训练机，开发数据保持在测评机。固定配置、验收和实际运行状态见 `docs/stage2-offline-training-operations-20260917.md`；下方“未启动训练”描述的是9月16日采集交付时的历史状态。
 
+本轮已完成：源码506023d，BF16单卡E24训练10epoch/18300更新，74点全dev评价退出0。首选4750步改对105/改坏81，净+24，离线移动准确率59.8476%→60.0269%；配对95%提升区间跨0，尚无稳定收益证据。最后18300步净-40，后期退化；模型、完整恢复状态与结果保留在双机独立实验目录。本轮未进行完整导航，不能把离线准确率当SR/SPL。
+
 2026-09-16：新分支 `feature/stage2-e24-offline`、三机独立工作区 `ETP-R1-stage2-e24` 已完成本轮离线数据任务。基座固定持久组6400，stage1全冻结；训练机两卡采集完整10819条train路线，82674行/58556有效损失行，约147.02GiB；测评机采集1839条dev路线，15703行/10997有效损失行，约27.96GiB。三份流水线均ready，精确ID覆盖及61/11场景隔离通过，971+314状态张量不变，实际E24前向/损失验收及62项回归通过。所有采集进程已退出，未启动E24训练。采集源码 `1de707d`；文件位置、manifest SHA、操作与审计见 `docs/stage2-offline-collection-operations-20260916.md`；后续训练仍按 `docs/plans/2026-09-16-stage2-e24-training-plan.md` 推进。
 
 2026-09-11，持久候选状态已在训练机独立工作区通过真实单卡更新、双卡总批量8更新、第2步恢复至第4步、冻结权重审计及R2R四路线/RxR单路线验证。实际覆盖跨步无预测保留；展开配置核对，长训相对9月9日实验仅改变候选记忆模式，其他计算参数一致。详细证据见 `docs/persistent-ghost-gpu-validation-20260911.md`。下方9月10日GPU待验收记录是历史状态。
@@ -58,6 +60,10 @@ README 原始说明要求创建 `etpr1` conda 环境，核心环境为 Python 3.
 - `copy_extra_files.py`: 将额外数据、checkpoint 等资源复制到项目目录；内含可选的 Habitat 数据软链接逻辑。
 
 ## Core Scripts And Entry Points
+
+- `scripts/train_stage2_e24.py`：只读取预测future缓存、只更新E24的正式离线训练；两份完整train分片必需，精确恢复使用完整 `state_step_*.pt`，头模型不能用于恢复。
+- `scripts/run_stage2_offline_preflight.py` / `check_stage2_resume.py`：真实20步与10+10步跨进程恢复逐位验收。`stage2_offline_worker.py` 使用项目既有GPU锁和运行环境托管单个任务。
+- `scripts/evaluate_stage2_e24.py`：在完整val_unseen开发缓存上评价改对/改坏/净改善，不运行模拟器。`watch_stage2_offline_eval.py` 从训练机沿专线发布头模型、调用测评机专用环境并形成完整曲线与固定规则选点。
 
 - `CUDA_VISIBLE_DEVICES=0,1,2,3 bash pretrain_src/run_pt/run_mix_server.bash 2333`: 联合预训练。
 - `CUDA_VISIBLE_DEVICES=0,1,2,3 bash run_r2r/main_server.bash dagger 2333`: R2R 在线 SFT。
@@ -202,6 +208,8 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 - 测评机只有一张 RTX 3090 24GB。现有 ETPNav 任务占用 GPU 时，不得并行启动全量特征生成、预训练、SFT、GRPO 或完整评测，也不得擅自中断 ETPNav。
 
 ## Last Reviewed
+
+2026-09-17，核查并实现 `stage2_training.py`、`stage2_evaluation.py` 和对应训练/恢复/评价/托管脚本，修复E24最终残差在混合精度下的索引写入类型。训练机39项、测评机30项相关检查通过；真实BF16连续20步与10+10步恢复逐位一致；完整dev零修正动作全部相同。正式离线训练与固定g=1开发评价的最终状态和证据见 `docs/stage2-offline-training-operations-20260917.md`。
 
 2026-09-09 晚间，重启 `ghost_concat_direct_compiled_10k_20260909`：14200 基座、双卡总批量8、10000步、每200步同步测评，直接渲染/FP16/64批次上限/Inductor；保留选定合并版本，未引入静态条件缓存或导航SDPA。测评机专用容器离线安装G++并修复编译缓存目录后，7项相关测试和8环境8路线预检通过。正式第200步模型及恢复状态已保存，双端SHA一致，测评机已开始1839路线评测，训练继续推进。见 `docs/ghost-concat-direct-compiled-10k-operations-20260909.md`。
 
