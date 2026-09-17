@@ -22,6 +22,7 @@ from rgb_only_optimization import ROOT, now, save, sha
 HOST = 'a6000@10.10.10.2'
 EVAL_ROOT = '/home/a6000/gwl/ETP-R1-stage2-e24'
 DEV = 'data/logs/stage2_e24/formal_dev/episodes'
+DEV_MANIFEST_SHA = '25d9666e89e482186b9d6f7436dcf5c9934f82cd9265fa0658c0f1ec632ba93d'
 HEAD_PATTERN = re.compile(r'head_step_(\d+)\.pt$')
 
 
@@ -85,10 +86,11 @@ class Watcher:
         remote_commit = self.remote(['git', 'rev-parse', 'HEAD']).strip()
         if remote_commit != self.status['source_commit']:
             raise RuntimeError('Training/evaluation source commits differ')
-        self.remote_python('import pathlib,sys; '
-                           'assert (pathlib.Path(sys.argv[1])/"dataset_manifest.json").is_file(); '
+        self.remote_python('import pathlib,sys,hashlib; '
+                           'm=pathlib.Path(sys.argv[1])/"dataset_manifest.json"; '
+                           'assert hashlib.sha256(m.read_bytes()).hexdigest()==sys.argv[3], "Dev manifest changed"; '
                            'p=pathlib.Path(sys.argv[2]); p.mkdir(parents=True,exist_ok=True)',
-                           DEV, self.remote_run)
+                           DEV, self.remote_run, DEV_MANIFEST_SHA)
         save(self.out / 'watcher.json', self.status)
 
     def evaluate(self, head, step):
@@ -145,6 +147,9 @@ class Watcher:
             raw = self.remote(['cat', report])
             metrics = json.loads(raw)
             validate_report(metrics, step)
+            row = metrics['results'][0]
+            if row['checkpoint_sha256'] != digest or row['checkpoint'] != remote_head:
+                raise ValueError('Result checkpoint path/SHA differs from transferred head')
             local_report = self.out / f'metrics_step_{step:06d}.json'
             save(local_report, metrics)
             save(self.out / f'worker_step_{step:06d}.json', worker)
@@ -218,6 +223,9 @@ def validate_report(report, step):
     """Validate the evaluator's full-data, fixed-g=1 contract before selection."""
     if report.get('status') != 'complete' or len(report.get('results', [])) != 1:
         raise ValueError('Expected exactly one complete fixed-g=1 result')
+    dataset = report.get('dataset', [])
+    if len(dataset) != 1 or dataset[0]['manifest_sha256'] != DEV_MANIFEST_SHA:
+        raise ValueError('Result does not cover the fixed development manifest')
     row = report['results'][0]
     if int(row['global_step']) != step or float(row['gain']) != 1.0:
         raise ValueError('Evaluation report step/gain does not match requested head')

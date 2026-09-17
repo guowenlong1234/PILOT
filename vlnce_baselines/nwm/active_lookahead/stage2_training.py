@@ -90,7 +90,7 @@ class EpisodeBlockSampler:
                 provenance_sha256=manifest['provenance_sha256'], provenance=provenance))
         parts = [p['provenance'] for p in self.provenance]
         if any('parts' in p for p in parts):
-            expected_parts = parts[0]['parts']
+            expected_parts = next(p['parts'] for p in parts if 'parts' in p)
             if any(p.get('parts') != expected_parts for p in parts) or {p.get('part') for p in parts} != set(range(expected_parts)):
                 raise ValueError('all collection partitions are required')
         if not self.entries or self.total_rows < 1:

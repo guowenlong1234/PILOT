@@ -339,7 +339,7 @@ class InterleavedCrossModalTopKFutureLogitResidualHead(nn.Module):
         score_input = torch.cat(score_parts, dim=-1)
         selected_raw = self.score_mlp(score_input).squeeze(-1)
         raw_dense = owner_embeddings.new_zeros(batch, topk) + zero
-        raw_dense[rows, slots] = selected_raw
+        raw_dense[rows, slots] = selected_raw.to(dtype=raw_dense.dtype)
         delta = self.delta_max * torch.tanh(raw_dense)
         return FutureHeadOutput(
             raw_dense,

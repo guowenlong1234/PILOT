@@ -28,7 +28,12 @@ def versions():
         try:
             result[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
-            result[package] = 'package metadata unavailable'
+            module_name = {'habitat-lab':'habitat', 'habitat-sim':'habitat_sim'}.get(package, package)
+            try:
+                module = __import__(module_name)
+                result[package] = getattr(module, '__version__', 'version attribute unavailable')
+            except ImportError:
+                result[package] = 'not installed'
     return result
 
 
@@ -112,7 +117,7 @@ def main():
                 result = compute_loss(delta.float(), batch)
                 if not torch.isfinite(result.loss):
                     raise FloatingPointError(f'non-finite loss before update {step+1}')
-                if result.valid_sample_count == 0:
+                if result.valid_sample_count == 0 and result.decision_sample_count == 0 and result.absent_noop_candidate_count == 0:
                     print(json.dumps(dict(event='skip_empty_loss', sampler=sampler.state_dict())), flush=True)
                     continue
                 if scaler is None:
