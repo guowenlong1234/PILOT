@@ -14,6 +14,7 @@ def main():
     parser.add_argument('--output', required=True)
     parser.add_argument('--precision', choices=['fp32', 'bf16', 'fp16'], default='bf16')
     parser.add_argument('--gpu', default='0')
+    parser.add_argument('--variant', choices=['baseline', 'B', 'C'], default='baseline')
     args = parser.parse_args()
     out = Path(args.output).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -21,7 +22,7 @@ def main():
         raise FileExistsError('preflight requires an empty directory')
     base = ['scripts/train_stage2_e24.py', *args.roots, '--batch-size', '32',
             '--max-steps', '20', '--save-every', '10', '--log-every', '1',
-            '--precision', args.precision]
+            '--precision', args.precision, '--variant', args.variant]
     jobs = [
         ('continuous', base + ['--output', str(out/'continuous')]),
         ('interrupted', base + ['--output', str(out/'resumed'), '--stop-after-steps', '10']),

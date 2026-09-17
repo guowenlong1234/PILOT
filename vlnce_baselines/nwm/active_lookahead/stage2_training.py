@@ -1,4 +1,5 @@
 """Deterministic E24-only offline training; no policy or world model is loaded."""
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -24,19 +25,34 @@ LOSS_CONFIG = OfflineDecisionLossConfig(training_stage='offline', objective='dec
     correct_row_weight=2., wrong_row_weight=1., decision_row_policy='all_teacher_topk', residual_bound=1.)
 
 
+def experiment_configs(variant='baseline'):
+    if variant not in ('baseline', 'B', 'C'):
+        raise ValueError('unknown offline comparison variant')
+    model = dict(MODEL_CONFIG)
+    loss = LOSS_CONFIG
+    if variant == 'B':
+        loss = replace(loss, decision_row_policy='all_move_with_future')
+    if variant == 'C':
+        model['candidate_context_mode'] = 'all_present'
+    return model, loss
+
+
 def forward_delta(head, batch):
     log_probs = torch.log_softmax(batch['base_logits'].masked_fill(~batch['ghost_valid_mask'], -torch.inf), dim=1)
-    selected = log_probs.gather(1, batch['topk_base_indices'].clamp_min(0)).masked_fill(~batch['topk_valid_mask'], 0)
+    present = batch['topk_base_indices'].ge(0)
+    context_mask = present if getattr(head, 'candidate_context_mode', 'future_valid') == 'all_present' else batch['topk_valid_mask']
+    selected = log_probs.gather(1, batch['topk_base_indices'].clamp_min(0)).masked_fill(~context_mask, 0)
     return head.forward_topk_from_log_probs(batch['owner_embeddings'], batch['text_tokens'],
         batch['future_tokens'], selected, batch['topk_valid_mask'],
-        text_token_mask=batch['text_token_mask'], candidate_geometry=batch['candidate_q0_geometry']).delta
+        text_token_mask=batch['text_token_mask'], candidate_geometry=batch['candidate_q0_geometry'],
+        candidate_present_mask=present).delta
 
 
-def compute_loss(delta, batch):
+def compute_loss(delta, batch, config=LOSS_CONFIG):
     return offline_decision_aware_loss(delta, batch['teacher_rank_in_topk'],
         **{k: batch[k] for k in ('topk_valid_mask', 'teacher_valid', 'teacher_stop',
         'no_vp_left', 'base_stop', 'base_logits', 'ghost_valid_mask',
-        'topk_base_indices', 'teacher_base_index')}, config=LOSS_CONFIG)
+        'topk_base_indices', 'teacher_base_index')}, config=config)
 
 
 def usable_row(row):
@@ -191,9 +207,11 @@ def atomic_torch_save(path, payload):
     tmp.replace(path)
 
 
-def save_training_checkpoint(output, head, optimizer, scaler, sampler, step, contract):
+def save_training_checkpoint(output, head, optimizer, scaler, sampler, step, contract, *, model_config=None, loss_config=None):
     output = Path(output)
-    common = dict(global_step=step, model_config=MODEL_CONFIG, loss_config=LOSS_CONFIG.to_dict(),
+    model_config = MODEL_CONFIG if model_config is None else model_config
+    loss_config = LOSS_CONFIG if loss_config is None else loss_config
+    common = dict(global_step=step, model_config=model_config, loss_config=loss_config.to_dict(),
         contract=contract, future_head_state_dict={k:v.detach().cpu() for k,v in head.state_dict().items()})
     atomic_torch_save(output/f'head_step_{step:06d}.pt', dict(common, format_version='stage2-e24-head-v1', resume_forbidden=True))
     full = dict(common, format_version='stage2-e24-training-v1', optimizer=optimizer.state_dict(),
@@ -209,11 +227,13 @@ def save_training_checkpoint(output, head, optimizer, scaler, sampler, step, con
     return destination
 
 
-def restore_training_checkpoint(path, head, optimizer, scaler, sampler, contract):
+def restore_training_checkpoint(path, head, optimizer, scaler, sampler, contract, *, model_config=None, loss_config=None):
+    model_config = MODEL_CONFIG if model_config is None else model_config
+    loss_config = LOSS_CONFIG if loss_config is None else loss_config
     state = load(path)
     if state.get('format_version') != 'stage2-e24-training-v1' or state.get('resume_forbidden'):
         raise ValueError('checkpoint cannot resume training')
-    if state['contract'] != contract or state['model_config'] != MODEL_CONFIG or state['loss_config'] != LOSS_CONFIG.to_dict():
+    if state['contract'] != contract or state['model_config'] != model_config or state['loss_config'] != loss_config.to_dict():
         raise ValueError('resume data/model/config/source contract differs')
     if state['scheduler'] is not None or (state['scaler'] is None) != (scaler is None):
         raise ValueError('resume scheduler/scaler differs')

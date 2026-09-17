@@ -56,10 +56,12 @@ def predict(head, batch):
     logits = logits.clone()
     logits[empty] = 0
     lp = torch.log_softmax(logits, 1)
-    selected = lp.gather(1, batch['topk_base_indices'].clamp_min(0)).masked_fill(~batch['topk_valid_mask'], 0)
+    present = batch['topk_base_indices'].ge(0)
+    context_mask = present if getattr(head, 'candidate_context_mode', 'future_valid') == 'all_present' else batch['topk_valid_mask']
+    selected = lp.gather(1, batch['topk_base_indices'].clamp_min(0)).masked_fill(~context_mask, 0)
     return head.forward_topk_from_log_probs(batch['owner_embeddings'], batch['text_tokens'],
         batch['future_tokens'], selected, batch['topk_valid_mask'], text_token_mask=batch['text_token_mask'],
-        candidate_geometry=batch['candidate_q0_geometry']).delta
+        candidate_geometry=batch['candidate_q0_geometry'], candidate_present_mask=present).delta
 
 
 def validate_checkpoint(checkpoint, dev_provenance):

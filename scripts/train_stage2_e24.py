@@ -17,7 +17,7 @@ import torch
 from vlnce_baselines.nwm.active_lookahead.residual_head import InterleavedCrossModalTopKFutureLogitResidualHead
 from vlnce_baselines.nwm.active_lookahead.stage2_data import atomic_json, collate_stage2
 from vlnce_baselines.nwm.active_lookahead.stage2_training import (
-    MODEL_CONFIG, EpisodeBlockSampler, forward_delta, compute_loss, seed_everything,
+    experiment_configs, EpisodeBlockSampler, forward_delta, compute_loss, seed_everything,
     save_training_checkpoint, restore_training_checkpoint, model_fingerprint,
 )
 
@@ -42,6 +42,7 @@ def main():
     parser.add_argument('roots', nargs='+')
     parser.add_argument('--output', required=True)
     parser.add_argument('--resume')
+    parser.add_argument('--variant', choices=['baseline', 'B', 'C'], default='baseline')
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--lr', type=float, default=2e-5)
@@ -78,7 +79,9 @@ def main():
     contract = dict(dataset=sampler.provenance, train_config=config, git_commit=git_commit,
         experiment=str(output), optimizer=dict(name='AdamW', lr=args.lr, betas=[.9,.999], eps=1e-8, weight_decay=.01),
         gradient_clip=10., scheduler=None, versions=versions(), trainable_module='E24_only', initialization='fresh_seeded')
-    head = InterleavedCrossModalTopKFutureLogitResidualHead(**MODEL_CONFIG).to(args.device)
+    model_config, loss_config = experiment_configs(args.variant)
+    contract.update(model_config=model_config, loss_config=loss_config.to_dict())
+    head = InterleavedCrossModalTopKFutureLogitResidualHead(**model_config).to(args.device)
     optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, betas=(.9,.999), eps=1e-8, weight_decay=.01)
     optimizer_ids = {id(p) for group in optimizer.param_groups for p in group['params']}
     if optimizer_ids != {id(p) for p in head.parameters() if p.requires_grad}:
@@ -88,7 +91,7 @@ def main():
         optimizer_exactly_e24=True, initial_sha256=model_fingerprint(head), nonzero_gradient_modules={})
     atomic_json(audit_path, audit)
     scaler = torch.cuda.amp.GradScaler() if args.precision == 'fp16' else None
-    step = restore_training_checkpoint(args.resume, head, optimizer, scaler, sampler, contract) if args.resume else 0
+    step = restore_training_checkpoint(args.resume, head, optimizer, scaler, sampler, contract, model_config=model_config, loss_config=loss_config) if args.resume else 0
     atomic_json(output/'contract.json', contract)
     target = min(args.max_steps, math.ceil(sampler.total_rows/args.batch_size)*args.max_epochs)
     print(json.dumps(dict(event='start', step=step, target=target, usable_rows=sampler.total_rows,
@@ -114,7 +117,7 @@ def main():
                 with ctx:
                     delta = forward_delta(head, batch)
                 # Loss reductions and unbounded base-logit comparisons stay FP32.
-                result = compute_loss(delta.float(), batch)
+                result = compute_loss(delta.float(), batch, config=loss_config)
                 if not torch.isfinite(result.loss):
                     raise FloatingPointError(f'non-finite loss before update {step+1}')
                 if result.valid_sample_count == 0 and result.decision_sample_count == 0 and result.absent_noop_candidate_count == 0:
@@ -163,11 +166,11 @@ def main():
                     start = time.monotonic()
                     sums, window_rows, window_steps = {}, 0, 0
                 if step % args.save_every == 0:
-                    save_training_checkpoint(output, head, optimizer, scaler, sampler, step, contract)
+                    save_training_checkpoint(output, head, optimizer, scaler, sampler, step, contract, model_config=model_config, loss_config=loss_config)
                     last_saved = step
                     atomic_json(output/'status.json', dict(status='running', step=step, target=target))
             if step != last_saved:
-                save_training_checkpoint(output, head, optimizer, scaler, sampler, step, contract)
+                save_training_checkpoint(output, head, optimizer, scaler, sampler, step, contract, model_config=model_config, loss_config=loss_config)
             audit['final_sha256'] = model_fingerprint(head)
             audit['final_step'] = step
             atomic_json(audit_path, audit)
