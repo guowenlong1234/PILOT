@@ -20,15 +20,14 @@ from ..etp_adapter import RaeSourceContextSnapshot, RaeLatentTargetRequest
 
 
 class Stage2Collector:
-    def __init__(self, trainer):
-        self.trainer=trainer; cfg=trainer.config.MODEL.STAGE2_COLLECT
+    def __init__(self, trainer, *, prediction_only=False):
+        self.trainer=trainer; cfg=trainer.config.MODEL.STAGE2_ONLINE if prediction_only else trainer.config.MODEL.STAGE2_COLLECT
         if trainer._active_lookahead_enabled() or not trainer._ghost_concat_enabled():
             raise ValueError('stage2 collection requires ghost concat and old E24 disabled')
         if trainer._ghost_concat_memory_mode()!='persistent_node_state':
             raise ValueError('stage2 requires persistent node state')
         self.cfg=cfg;self.counts=Counter();self.runtime=None;self.runtime_before=None
-        provenance=json.loads(Path(cfg.provenance).read_text())
-        self.writer=EpisodeWriter(cfg.output,provenance)
+        self.writer=None if prediction_only else EpisodeWriter(cfg.output,json.loads(Path(cfg.provenance).read_text()))
         # Construction can consume global random state; preserve it explicitly.
         rng=torch.get_rng_state(); cuda=torch.cuda.get_rng_state_all()
         try:
@@ -83,7 +82,7 @@ class Stage2Collector:
             graph.stage2_q0=cache
 
     @torch.no_grad()
-    def collect_step(self,nav_inputs,nav_outs,text,text_mask,no_vp_left,step):
+    def predict_step(self,nav_inputs,nav_outs,text,text_mask,no_vp_left,step):
         tr=self.trainer; rt=self.runtime; episodes=tr.envs.current_episodes()
         logits=nav_outs['global_logits'].detach(); payloads=[]; requests=[]; destinations=[]; noises=[]
         prepared=[]
@@ -160,6 +159,12 @@ class Stage2Collector:
                 payloads[i]['invalid_reason'][slot]='valid'
         if not torch.equal(rng_before,rt.generator.get_state()):raise RuntimeError('q1 consumed stage1 RNG')
         self.counts['q1_requested']+=len(requests)
+        return payloads
+
+    @torch.no_grad()
+    def collect_step(self,nav_inputs,nav_outs,text,text_mask,no_vp_left,step):
+        payloads=self.predict_step(nav_inputs,nav_outs,text,text_mask,no_vp_left,step)
+        tr=self.trainer; episodes=tr.envs.current_episodes(); logits=nav_outs['global_logits'].detach()
         # Teacher sampling must not consume the navigation's Python RNG.
         state=random.getstate()
         try:
@@ -186,7 +191,7 @@ class Stage2Collector:
         print('STAGE2_EPISODE',json.dumps(r),flush=True)
 
     def finish(self):
-        if self.writer.pending:raise RuntimeError('unfinished episodes remain')
+        if self.writer is not None and self.writer.pending:raise RuntimeError('unfinished episodes remain')
         after=capture_base_tensor_manifest(self.modules)
         comparison=compare_base_tensor_manifests(self.before,after)
         if self.runtime_before is not None:

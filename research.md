@@ -6,6 +6,8 @@ ETP-R1 是一个 VLN-CE 项目：让智能体在连续三维环境里，根据�
 
 ## Quick Start And Environment
 
+2026-09-20：按用户授权接入离线最佳4750评分头×1.5（±1裁剪），开始R2R在线导航对照。新增`STAGE2_ONLINE`独立开关与`stage2_online.py`，复用采集器无教师的`predict_step`；只在eval启用、参数冻结、停止隔离。测评机继续使用本独立工作区/容器/环境，先重放输入和零倍率动作验证，再同配置完整基线与E24对照。
+
 2026-09-20收尾：A/B/C已全部完成，B/C各6000步、24点完整开发集评价。最佳净改善原方案+24，A+27（4750×1.5），B+12（5000），C+19（5250）；暂无明确替换原方案的收益证据。恢复、采样顺序和最终权重/优化器审计通过。完整结论见 `docs/stage2-abc-comparison-20260917.md`，本地小型报告为 `data/logs/stage2_abc_report_20260917/`。
 
 2026-09-17下午：按用户要求执行A/B/C离线对照。`train_stage2_e24.py --variant B`只扩大完整候选决策监督；`--variant C`只让全部真实Top-5候选参与比较，future有效mask继续限制可修改动作。默认baseline不变；各实验的模型和损失配置均写入checkpoint/恢复合同。A采用既有4750/4000头的六档有界倍率；B/C各6000步，seed2，每250步评价，详见 `docs/stage2-abc-comparison-20260917.md`。

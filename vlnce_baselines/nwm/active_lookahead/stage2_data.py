@@ -158,17 +158,18 @@ class Stage2Dataset(Dataset):
         return dict(episode['rows'][i],text_tokens=episode['text_tokens'])
 
 
-def collate_stage2(rows):
+def collate_stage2(rows, *, include_targets=True):
     b=len(rows); k=5; g=max(1,max(len(r['ghost_ids']) for r in rows)); t=max(len(r['text_tokens']) for r in rows)
     out=dict(owner_embeddings=torch.zeros(b,k,768), future_tokens=torch.zeros(b,k,257,768),
         candidate_q0_geometry=torch.zeros(b,k,3), q1_conditions=torch.zeros(b,k,4),
         text_tokens=torch.zeros(b,t,768), text_token_mask=torch.zeros(b,t,dtype=torch.bool),
         base_logits=torch.zeros(b,g), ghost_valid_mask=torch.zeros(b,g,dtype=torch.bool),
         topk_base_indices=torch.full((b,k),-1,dtype=torch.long), topk_valid_mask=torch.zeros(b,k,dtype=torch.bool))
-    for key in ('teacher_valid','teacher_stop','no_vp_left','base_stop'):
-        out[key]=torch.tensor([r[key] for r in rows],dtype=torch.bool)
-    for key in ('teacher_base_index','teacher_rank_in_topk'):
-        out[key]=torch.tensor([r[key] for r in rows],dtype=torch.long)
+    if include_targets:
+        for key in ('teacher_valid','teacher_stop','no_vp_left','base_stop'):
+            out[key]=torch.tensor([r[key] for r in rows],dtype=torch.bool)
+        for key in ('teacher_base_index','teacher_rank_in_topk'):
+            out[key]=torch.tensor([r[key] for r in rows],dtype=torch.long)
     for i,r in enumerate(rows):
         n=len(r['ghost_ids']); q=len(r['topk_base_indices']); l=len(r['text_tokens'])
         for key in ('owner_embeddings','future_tokens','candidate_q0_geometry','q1_conditions','topk_base_indices'):

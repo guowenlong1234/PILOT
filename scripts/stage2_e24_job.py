@@ -15,16 +15,22 @@ BASE_SHA='4c729c84bf4338452da4d459fc82734dcbb5f72ac6a2b574ee8f20e1080bc2fe'
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action',choices=['collect','validate','baseline'])
+    p.add_argument('action',choices=['collect','validate','baseline','online'])
     p.add_argument('--machine',choices=['server','eval'],default='server')
     p.add_argument('--gpu',default='0');p.add_argument('--environments',type=int,default=4)
     p.add_argument('--split',choices=['train','val_unseen'],default='train')
     p.add_argument('--output',required=True);p.add_argument('--checkpoint',required=True)
     p.add_argument('--episodes',type=int,default=-1);p.add_argument('--part',type=int,default=0);p.add_argument('--parts',type=int,default=1)
+    p.add_argument('--head',default='');p.add_argument('--gain',type=float,default=1.5)
     p.add_argument('--trace',action='store_true');p.add_argument('--no-compile',action='store_true')
     p.add_argument('--dry-run',action='store_true');a=p.parse_args()
     if a.gpu not in ('0','1') or not 0<=a.part<a.parts or a.environments<1: p.error('invalid resources/partition')
-    root=Path(a.output).resolve(); root.mkdir(parents=True,exist_ok=True)
+    root=Path(a.output).resolve()
+    if a.action in ('online','baseline') and root.exists() and any(root.iterdir()):
+        raise FileExistsError('navigation comparison requires a new empty output directory')
+    if a.action=='online' and (a.split!='val_unseen' or a.gain not in (0.,1.5)):
+        raise ValueError('online experiment is fixed to val_unseen and gain0/1.5')
+    root.mkdir(parents=True,exist_ok=True)
     with gzip.open(ROOT/f'data/datasets/R2R_VLNCE_v1-3_preprocessed_xlmr/{a.split}/{a.split}.json.gz','rt') as f: data=json.load(f)
     ids=sorted(str(ep['episode_id']) for ep in data['episodes'])
     ids=ids[a.part::a.parts]
@@ -49,6 +55,8 @@ def main():
         commit=commit,split=a.split,part=a.part,parts=a.parts,episode_ids=ids,seed=20260916,
         feature_space='raw_cls+normalized_patch_fp16',context_contract='stage2_panorama_q0_snapshot_v1',
         behavior='stage1_argmax',environments=a.environments,compile=not a.no_compile)
+    if a.action=='online':
+        provenance.update(behavior='stage2_argmax_stop_isolated',head_sha256=sha(a.head),gain=a.gain,residual_bound=1.)
     prov=root/'provenance.json'
     if prov.exists() and json.loads(prov.read_text())!=provenance:raise ValueError('immutable collection provenance changed')
     save(prov,provenance)
@@ -84,6 +92,10 @@ def main():
         'EVAL.USE_CKPT_CONFIG':False,'TASK_CONFIG.DATASET.SUFFIX':'',
         'RESULTS_DIR':str(root/'results')+'/', 'TENSORBOARD_DIR':str(root/'tensorboard')+'/',
         'CHECKPOINT_FOLDER':str(root/'checkpoints')+'/'})
+    if a.action=='online':
+        opts.update({'MODEL.STAGE2_ONLINE.enabled':True,'MODEL.STAGE2_ONLINE.output':str(root/'online'),
+            'MODEL.STAGE2_ONLINE.head':str(Path(a.head).resolve()),'MODEL.STAGE2_ONLINE.head_sha256':provenance['head_sha256'],
+            'MODEL.STAGE2_ONLINE.gain':a.gain,'MODEL.STAGE2_ONLINE.trace':a.trace})
     cmd=['run.py','--exp_name','stage2_collect','--run-type','eval','--exp-config','run_r2r/iter_train_rae_dino_ghost_concat_persistent.yaml']
     for key,value in opts.items():cmd.extend([key,str(value)])
     command=runtime(a.machine,cmd,a.gpu)
@@ -97,8 +109,9 @@ def main():
             result=subprocess.run(runtime(a.machine,['-c',VERSIONS],a.gpu),cwd=ROOT,stdout=log,stderr=subprocess.STDOUT)
             if result.returncode:return result.returncode
             save(root/'status.json',dict(status='running',pid=os.getpid(),pending=len(todo)))
+            started=time.monotonic()
             result=subprocess.run(command,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT)
-            save(root/'status.json',dict(status='collected' if result.returncode==0 else 'failed',exit_code=result.returncode))
+            save(root/'status.json',dict(status=('collected' if a.action=='collect' else 'completed') if result.returncode==0 else 'failed',exit_code=result.returncode,elapsed_seconds=time.monotonic()-started))
             return result.returncode
 
 if __name__=='__main__':sys.exit(main())
