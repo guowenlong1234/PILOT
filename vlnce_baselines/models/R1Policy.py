@@ -153,6 +153,7 @@ class ETP(Net):
             else torch.device("cpu")
         )
         self.device = device
+        self.checkpoint_navigation = bool(getattr(model_config, "checkpoint_navigation", False))
         raenwm_config = getattr(model_config, "RAENWM", None)
         self.raenwm_enabled = bool(
             getattr(raenwm_config, "enabled", False)
@@ -547,13 +548,22 @@ class ETP(Net):
             return outs
 
         elif mode == 'navigation':
-            outs = self.vln_bert.forward_navigation(
-                txt_embeds, txt_masks, 
+            inputs = (
+                txt_embeds, txt_masks,
                 gmap_vp_ids, gmap_step_ids,
-                gmap_img_fts, gmap_pos_fts, 
-                gmap_masks, gmap_visited_masks, gmap_pair_dists, gmap_task_embeddings
+                gmap_img_fts, gmap_pos_fts,
+                gmap_masks, gmap_visited_masks, gmap_pair_dists, gmap_task_embeddings,
             )
-            return outs
+            if (
+                self.training and torch.is_grad_enabled()
+                and getattr(self, 'checkpoint_navigation', False)
+            ):
+                from torch.utils.checkpoint import checkpoint
+                return checkpoint(
+                    self.vln_bert.forward_navigation, *inputs,
+                    use_reentrant=False, preserve_rng_state=True,
+                )
+            return self.vln_bert.forward_navigation(*inputs)
 
 # class BertLayerNorm(nn.Module):
 #     def __init__(self, hidden_size, eps=1e-12):

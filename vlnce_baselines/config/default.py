@@ -175,6 +175,7 @@ _C.RL.POLICY.OBS_TRANSFORMS.RESIZER_PER_SENSOR.SIZES = [
 # MODELING CONFIG
 # -----------------------------------------------------------------------------
 _C.MODEL = CN()
+_C.MODEL.checkpoint_navigation = False
 _C.MODEL.policy_name = "CMAPolicy"  # or "Seq2SeqPolicy"
 _C.MODEL.ablate_depth = False
 _C.MODEL.ablate_rgb = False
