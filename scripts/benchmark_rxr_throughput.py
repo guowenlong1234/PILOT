@@ -9,6 +9,7 @@ from pathlib import Path
 import platform
 import runpy
 import sys
+import subprocess
 import time
 
 import torch
@@ -47,16 +48,27 @@ def main():
                 if args.lean_dino or args.compile_dino:
                     kw['output_hidden_states'] = False
                 return original_forward(*a, **kw)
-            self.backbone.forward = (
-                torch.compile(forward, dynamic=True) if args.compile_dino else forward
-            )
+            if args.compile_dino:
+                compiled = torch.compile(forward, dynamic=True)
+                def dispatch(pixels, **kw):
+                    # PyTorch 2.2's antialiased interpolation needs concrete
+                    # image dimensions; only the image batch is dynamic.
+                    torch._dynamo.mark_static(pixels, [1, 2, 3])
+                    return compiled(pixels, **kw)
+                self.backbone.forward = dispatch
+            else:
+                self.backbone.forward = forward
         RaeDinov2RgbEncoder.__init__ = encoder_init
     if args.compile_depth:
         from vlnce_baselines.models.encoders.resnet_encoders import VlnResnetDepthEncoder
         original_depth_init = VlnResnetDepthEncoder.__init__
         def depth_init(self, *a, **kw):
             original_depth_init(self, *a, **kw)
-            self.visual_encoder.forward = torch.compile(self.visual_encoder.forward, dynamic=True)
+            compiled = torch.compile(self.visual_encoder.forward, dynamic=True)
+            def dispatch(observations):
+                torch._dynamo.mark_static(observations['depth'], [1, 2, 3])
+                return compiled(observations)
+            self.visual_encoder.forward = dispatch
         VlnResnetDepthEncoder.__init__ = depth_init
     root = Path(args.output).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -113,6 +125,7 @@ def main():
         result = original_interval(self, *a, **kw)
         measured = steps[args.warmup:]
         report = dict(rank=rank, world=world, settings=vars(args), steps=steps,
+                      source_commit=subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip(),
                       seconds=sum(s['seconds'] for s in measured),
                       actions=sum(s['actions'] for s in measured),
                       mean_update_seconds=sum(s['seconds'] for s in measured)/len(measured),
