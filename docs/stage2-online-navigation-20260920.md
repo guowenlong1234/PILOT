@@ -31,3 +31,32 @@
 最佳倍率短测也退出0：16条路线，111个决策，实际改变3次移动选择；q1成功267槽，停止隔离和导航/世界模型/评分头冻结检查通过。这16条的SR和SPL与基线相同，仅作接入检查，不作为效果结论。
 
 测评机监督于2026-09-20 09:39:07开始`full_base`，完成后自动运行`full_best`，每组完整1839路线。运行中的计算源码固定a14b8e1。启动后已确认GPU有计算负载、日志持续增长；完整指标待两组完成后补充。最近监督启动记录为`navigation_v1_resume2.json`，原始失败及续跑记录均保留。
+
+## 全量E24首次中止与几何边界修复
+
+完整纯基线已完成1839路线，退出0：SR62.8603%、SPL54.8048%、nDTW67.4795%；整个进程3354.67秒（约55.91分钟）。原始基线日志未记录反正弦越界警告或Traceback。
+
+E24首次全量于2026-09-20 10:52:56中止，已完成358路线。首个异常是`graph_utils.py::calculate_vp_rel_pos_fts`中的`np.arcsin(-dx/xz_dist)`输入越界警告，随后候选分数含NaN，被Top-K入口拒绝。末尾BrokenPipeError为进程退出后的连带错误；没有用部分路线计算全量成绩，也没有把NaN改成0继续走。
+
+修复c259182：仅对反正弦输入超出[-1,1]的边界做裁剪，合法范围内保留原表达式的值与类型，不改角度约定、网络、权重或改分倍率。测评机44项几何/地图/持久状态/在线相关测试退出0，覆盖距离计算单ULP误差、正负坐标轴、相同位置，以及正常float32/float64输入原输出逐项一致。日志`geometry_tests.log`。
+
+恢复流程先复跑16路线纯基线，要求与原短程基线全部113步分数/动作及导航指标逐位一致；通过后将失败的`navigation_v1/full_best`归档为`full_best_geometry_failure_358`，从头重跑全部1839条E24路线，原完整基线保留。失败任务没有可恢复的完整模拟器和随机状态，因此不能只拼接剩余1481条路线冒充同一次评测。
+
+恢复入口及PID、精确命令保存在`geometry_recovery_launch.json`，当前阶段见`geometry_recovery_status.json`；短程一致性结果为`geometry_parity.json`。只有两组完整、有限且数据覆盖一致的结果才会进入最终报告。此前源代码a14b8e1后，86e29d9仅增加逐路线前瞻诊断和报告，不改变评分计算；本轮几何修复为c259182。
+
+### 恢复检查未通过，改为同版本成对重跑
+
+`geometry_baseline_check`完成16路线，导航动作和全部路线指标与旧短程基线相同，但113步中97步的分数未逐位复现旧记录，最大绝对差0.003911。正常几何输入的函数级检查仍完全一致；该次跨运行数值差异的底层来源尚未确认，不能据此声称几何修复改变了正常公式，也不能继续声称历史数值差异已唯一归因于评分头执行流。
+
+原`geometry_recovery_status.json`按门控标为failed，**没有**执行原计划的归档/单组续跑；第一轮失败产物仍在`navigation_v1/full_best`，原全量基线仍在`navigation_v1/full_base`。
+
+为避免把历史运行的数值差异混入正式对照，启动独立`navigation_v2_geometry`：全部使用c259182，同机同配置重新执行16路线纯基线→零倍率→最佳倍率检查；只有逐步分数/动作和路线指标门控通过后，才自动执行新的完整1839路线纯基线与最佳E24两组。旧结果保留作历史参考，不与新组混算。启动PID和完整命令在`navigation_v2_geometry_launch.json`，当前状态以`navigation_v2_geometry/pipeline.json`为准。
+
+本次44项检查命令（专用容器内，退出0）：
+
+```bash
+bash scripts/rgb_only_optimization_runtime.sh eval -m pytest -q \
+  tests/test_graph_geometry_domain.py tests/test_graph_map_candidate_preview.py \
+  tests/test_ghost_concat_persistent.py tests/test_stage2_online.py \
+  tests/test_ghost_concat_trainer.py
+```
