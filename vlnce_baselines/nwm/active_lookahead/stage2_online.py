@@ -59,6 +59,7 @@ class Stage2Online(Stage2Collector):
         self.modules['head']=self.head
         self.before=capture_base_tensor_manifest(self.modules)
         self.versions['head']=[(t,t._version) for t in list(self.head.parameters())+list(self.head.buffers())]
+        self.episode_diagnostics={}
         self.head_stream=torch.cuda.Stream(device=trainer.device)
         self.started=time.perf_counter(); self.online_seconds=0.
         Path(cfg.output).mkdir(parents=True,exist_ok=True)
@@ -85,6 +86,7 @@ class Stage2Online(Stage2Collector):
                     torch.is_autocast_enabled(),torch.get_autocast_gpu_dtype()):
             raise RuntimeError('E24 head changed global precision state')
         dense=torch.zeros_like(nav_outs['global_logits'])
+        episodes=self.trainer.envs.current_episodes()
         for i,row in enumerate(rows):
             valid=row['future_valid_mask']; k=len(valid)
             if not row['base_stop']:
@@ -95,9 +97,16 @@ class Stage2Online(Stage2Collector):
             chosen=base if row['base_stop'] else ghosts[int((scores[ghosts]+dense[i,ghosts]).argmax())]
             self.counts['rows']+=1; self.counts['action_flips']+=int(chosen!=base)
             self.counts['future_valid_slots']+=int(valid.sum())
+            episode=str(episodes[i].episode_id)
+            diagnostic=self.episode_diagnostics.setdefault(episode,dict(scene=str(episodes[i].scene_id),
+                decisions=0,action_flips=0,future_valid_slots=0,invalid_reasons={}))
+            diagnostic['decisions']+=1; diagnostic['action_flips']+=int(chosen!=base)
+            diagnostic['future_valid_slots']+=int(valid.sum())
+            for reason in row['invalid_reason']:
+                diagnostic['invalid_reasons'][reason]=diagnostic['invalid_reasons'].get(reason,0)+1
             if row['base_stop'] and bool(dense[i].any()): raise RuntimeError('STOP residual must be zero')
             if self.trace_file:
-                self.trace_file.write(json.dumps(dict(episode=str(self.trainer.envs.current_episodes()[i].episode_id),
+                self.trace_file.write(json.dumps(dict(episode=episode,
                     step=step,base_action=base,action=chosen,forced_stop=row['forced_stop'],
                     logits=scores[:len(nav_inputs['gmap_vp_ids'][i])].cpu().tolist(),
                     delta=dense[i,:len(nav_inputs['gmap_vp_ids'][i])].cpu().tolist()))+'\n')
@@ -109,11 +118,13 @@ class Stage2Online(Stage2Collector):
         for name,tensors in self.versions.items():
             if any(t._version!=version for t,version in tensors):
                 raise RuntimeError('frozen online tensor mutated: '+name)
+        self.episode_diagnostics[episode]['completed']=True
         self.counts['episodes']+=1
         atomic_json(Path(self.cfg.output)/'progress.json',dict(self.counts))
 
     def finish(self):
         super().finish()
+        atomic_json(Path(self.cfg.output)/'episode_diagnostics.json',self.episode_diagnostics)
         if self.trace_file: self.trace_file.close()
         atomic_json(Path(self.cfg.output)/'online_summary.json',dict(counts=dict(self.counts),
             elapsed_seconds=time.perf_counter()-self.started,online_seconds=self.online_seconds,
