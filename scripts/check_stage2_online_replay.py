@@ -21,7 +21,9 @@ with torch.inference_mode():
   expected=(1.5*expected.float()).clamp(-1,1).masked_fill(~b['topk_valid_mask'],0)
   # Remove targets entirely: inference cannot depend on teacher labels.
   no_labels=[{k:v for k,v in r.items() if not k.startswith('teacher_')} for r in part]
-  actual=score_rows(head,no_labels,'cuda',1.5)
+  stream=torch.cuda.Stream(); current=torch.cuda.current_stream(); stream.wait_stream(current)
+  with torch.cuda.stream(stream): actual=score_rows(head,no_labels,'cuda',1.5)
+  current.wait_stream(stream); actual.record_stream(current)
   assert torch.equal(actual,expected),float((actual-expected).abs().max())
   assert torch.count_nonzero(score_rows(head,no_labels,'cuda',0))==0
 atomic_json(a.report,dict(status='passed',rows=len(rows),bitwise_equal=True,teacher_fields_removed=True,zero_gain_exact=True))
