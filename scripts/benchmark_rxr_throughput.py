@@ -123,29 +123,41 @@ def main():
         encoder_parity = {}
         if args.audit:
             net = getattr(self.policy.net, 'module', self.policy.net)
-            generator = torch.Generator().manual_seed(20260920)
-            for label, encoder, shape, key in [
-                ('rgb', net.rgb_encoder.backbone, (12,3,224,224), None),
-                ('depth', net.depth_encoder.visual_encoder, (12,256,256,1), 'depth'),
-            ]:
+            def monitor_encoder(label, encoder):
                 eager = getattr(encoder, '_benchmark_eager_forward', getattr(encoder, '_visual_eager_forward', None))
                 if eager is None:
-                    continue
-                encoder.eval()
-                value = torch.rand(shape, generator=generator).to(self.device)
-                value = {key:value} if key else value
-                with torch.no_grad(), torch.autocast('cuda'):
-                    if key:
-                        reference, actual = eager(value), encoder(value)
-                    else:
-                        reference = eager(value, output_hidden_states=False).last_hidden_state
-                        actual = encoder(value, output_hidden_states=True).last_hidden_state
-                reference, actual = reference.float(), actual.float()
-                relative = ((reference-actual).norm()/reference.norm().clamp_min(1e-8)).item()
-                encoder_parity[label] = dict(relative_l2=relative,
-                    max_abs=(reference-actual).abs().max().item(),
-                    finite=torch.isfinite(actual).all().item())
-                assert relative < 0.002 and encoder_parity[label]['finite'], encoder_parity
+                    return
+                accelerated = encoder.forward
+                records = []
+                encoder_parity[label] = records
+                def checked(*a, **kw):
+                    actual = accelerated(*a, **kw)
+                    # Three actual panoramic batches, inside the two warmup
+                    # updates, cover real scenes without altering RNG/queues.
+                    if len(records) < 3:
+                        with torch.no_grad():
+                            reference = eager(*a, **kw)
+                        if label == 'rgb':
+                            reference_value = reference.last_hidden_state[:,0]
+                            actual_value = actual.last_hidden_state[:,0]
+                        else:
+                            reference_value, actual_value = reference, actual
+                        reference_value, actual_value = reference_value.float(), actual_value.float()
+                        relative = ((reference_value-actual_value).norm()/reference_value.norm().clamp_min(1e-8)).item()
+                        record = dict(relative_l2=relative,
+                            min_cosine=torch.nn.functional.cosine_similarity(reference_value.flatten(1), actual_value.flatten(1), dim=1).min().item(),
+                            max_abs=(reference_value-actual_value).abs().max().item(),
+                            finite=torch.isfinite(actual_value).all().item(),
+                            batch_size=len(actual_value))
+                        records.append(record)
+                        print('ENCODER_PARITY '+json.dumps({label:record}), flush=True)
+                        assert relative < 0.002 and record['finite'], record
+                        if len(records) == 3:
+                            encoder.forward = accelerated
+                    return actual
+                encoder.forward = checked
+            monitor_encoder('rgb', net.rgb_encoder.backbone)
+            monitor_encoder('depth', net.depth_encoder.visual_encoder)
             frozen_before = digest((n,p) for n,p in self.policy.named_parameters() if not p.requires_grad)
             mapping_before = digest((n,p) for n,p in self.policy.named_parameters() if 'cls_residual_mlp' in n)
         torch.cuda.synchronize(rank)
