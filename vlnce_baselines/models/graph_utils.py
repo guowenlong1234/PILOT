@@ -31,7 +31,13 @@ def calculate_vp_rel_pos_fts(a, b, base_heading=0, base_elevation=0, to_clock=Fa
 
     # the simulator's api is weired (x-y axis is transposed)
     # heading = np.arcsin(dx/xy_dist) # [-pi/2, pi/2]
-    heading = np.arcsin(-dx / xz_dist)  # [-pi/2, pi/2]
+    # Floating-point sqrt/division can put an axis-aligned direction one
+    # ULP outside [-1, 1]. Bound only out-of-domain ratios: keep the existing
+    # arithmetic and dtype untouched for all previously finite directions.
+    heading_ratio = -dx / xz_dist
+    if heading_ratio > 1: heading_ratio = 1.0
+    elif heading_ratio < -1: heading_ratio = -1.0
+    heading = np.arcsin(heading_ratio)  # [-pi/2, pi/2]
     # if b[1] < a[1]:
     #     heading = np.pi - heading
     if b[2] > a[2]:
@@ -40,7 +46,10 @@ def calculate_vp_rel_pos_fts(a, b, base_heading=0, base_elevation=0, to_clock=Fa
     if to_clock:
         heading = 2 * np.pi - heading
 
-    elevation = np.arcsin(dz / xyz_dist)  # [-pi/2, pi/2]
+    elevation_ratio = dz / xyz_dist
+    if elevation_ratio > 1: elevation_ratio = 1.0
+    elif elevation_ratio < -1: elevation_ratio = -1.0
+    elevation = np.arcsin(elevation_ratio)  # [-pi/2, pi/2]
     elevation -= base_elevation
 
     return heading, elevation, xyz_dist
