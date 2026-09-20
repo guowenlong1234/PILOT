@@ -555,8 +555,8 @@ class ETP(Net):
                 gmap_masks, gmap_visited_masks, gmap_pair_dists, gmap_task_embeddings,
             )
             if (
-                self.training and torch.is_grad_enabled()
-                and getattr(self, 'checkpoint_navigation', False)
+                getattr(self, 'checkpoint_navigation', False)
+                and self.training and torch.is_grad_enabled()
             ):
                 from torch.utils.checkpoint import checkpoint
                 return checkpoint(
