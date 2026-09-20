@@ -24,8 +24,8 @@ def results(path):
 def trace(path):
     values={}
     for line in (path/'run.log').read_text().splitlines():
-        if line.startswith('STAGE2_BASE_TRACE '):
-            value=json.loads(line.split(' ',1)[1]); key=(value['episode'],value['step'])
+        if 'STAGE2_BASE_TRACE ' in line:
+            value=json.loads(line.split('STAGE2_BASE_TRACE ',1)[1]); key=(value['episode'],value['step'])
             if key in values: raise ValueError('duplicate trace decision')
             values[key]=value
     return values

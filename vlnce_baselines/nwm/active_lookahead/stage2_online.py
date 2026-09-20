@@ -59,6 +59,7 @@ class Stage2Online(Stage2Collector):
         self.modules['head']=self.head
         self.before=capture_base_tensor_manifest(self.modules)
         self.versions['head']=[(t,t._version) for t in list(self.head.parameters())+list(self.head.buffers())]
+        self.head_stream=torch.cuda.Stream(device=trainer.device)
         self.started=time.perf_counter(); self.online_seconds=0.
         Path(cfg.output).mkdir(parents=True,exist_ok=True)
         self.trace_file=(Path(cfg.output)/'decisions.jsonl').open('x') if cfg.trace else None
@@ -69,7 +70,20 @@ class Stage2Online(Stage2Collector):
         rows=self.predict_step(nav_inputs,nav_outs,text,text_mask,no_vp_left,step)
         for i,row in enumerate(rows):
             row['text_tokens']=text[i][text_mask[i].bool()].detach().cpu().half()
-        delta=score_rows(self.head,rows,self.trainer.device,float(self.cfg.gain))
+        cpu_rng=torch.get_rng_state(); cuda_rng=torch.cuda.get_rng_state(self.trainer.device)
+        backend=(torch.backends.cuda.matmul.allow_tf32,torch.backends.cudnn.allow_tf32,
+                 torch.is_autocast_enabled(),torch.get_autocast_gpu_dtype())
+        current=torch.cuda.current_stream(self.trainer.device)
+        self.head_stream.wait_stream(current)
+        with torch.cuda.stream(self.head_stream):
+            delta=score_rows(self.head,rows,self.trainer.device,float(self.cfg.gain))
+        current.wait_stream(self.head_stream)
+        delta.record_stream(current)
+        if not torch.equal(cpu_rng,torch.get_rng_state()) or not torch.equal(cuda_rng,torch.cuda.get_rng_state(self.trainer.device)):
+            raise RuntimeError('E24 head consumed global RNG')
+        if backend!=(torch.backends.cuda.matmul.allow_tf32,torch.backends.cudnn.allow_tf32,
+                    torch.is_autocast_enabled(),torch.get_autocast_gpu_dtype()):
+            raise RuntimeError('E24 head changed global precision state')
         dense=torch.zeros_like(nav_outs['global_logits'])
         for i,row in enumerate(rows):
             valid=row['future_valid_mask']; k=len(valid)
