@@ -27,6 +27,7 @@ def main():
     parser.add_argument('--sync-stages', action='store_true')
     parser.add_argument('--lean-dino', action='store_true')
     parser.add_argument('--audit', action='store_true')
+    parser.add_argument('--scene-stress', action='store_true')
     parser.add_argument('--compile-dino', action='store_true')
     parser.add_argument('--compile-depth', action='store_true')
     parser.add_argument('--async-finite', action='store_true')
@@ -38,6 +39,22 @@ def main():
     from habitat import VectorEnv
     import vlnce_baselines.ss_trainer_ETP_R1 as module
     from vlnce_baselines.models.R1Policy import ETP
+    seen_scenes = set()
+    if args.scene_stress:
+        original_set_config = module.RLTrainer._set_config
+        def set_config(self):
+            result = original_set_config(self)
+            self.config.defrost()
+            self.config.TASK_CONFIG.ENVIRONMENT.ITERATOR_OPTIONS.MAX_SCENE_REPEAT_EPISODES = 1
+            self.config.freeze()
+            return result
+        module.RLTrainer._set_config = set_config
+        original_reset = VectorEnv.reset
+        def reset(self):
+            result = original_reset(self)
+            seen_scenes.update(ep.scene_id for ep in self.current_episodes())
+            return result
+        VectorEnv.reset = reset
     if args.lean_dino or args.compile_dino or args.async_finite:
         from vlnce_baselines.models.encoders.rae_dinov2_encoder import RaeDinov2RgbEncoder
         original_init = RaeDinov2RgbEncoder.__init__
@@ -105,6 +122,7 @@ def main():
         torch.cuda.synchronize(rank)
         now = time.perf_counter()
         steps.append(dict(seconds=now-last[0], actions=actions[0], stages=dict(stats),
+                          finished_at=time.time(),
                           optimizer_stepped=bool(result)))
         actions[0] = 0
         stats.clear()
@@ -166,6 +184,7 @@ def main():
         measured = steps[args.warmup:]
         report = dict(rank=rank, world=world, settings=vars(args), steps=steps,
                       source_commit=subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip(),
+                      scenes_seen=sorted(seen_scenes),
                       seconds=sum(s['seconds'] for s in measured),
                       actions=sum(s['actions'] for s in measured),
                       mean_update_seconds=sum(s['seconds'] for s in measured)/len(measured),

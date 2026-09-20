@@ -27,7 +27,8 @@ def main():
              'env8lean':(8,1,True), 'env10lean':(10,1,True), 'env12lean':(12,1,True),
              'env11lean':(11,1,True), 'env11visual':(11,1,True),
              'env12visualasync':(12,1,True), 'env11visualasync':(11,1,True),
-             'env12native':(12,1,True), 'env11native':(11,1,True),
+             'env12native':(12,1,True), 'env11native':(11,1,True), 'env10native':(10,1,True),
+             'env12stress':(12,1,True), 'env11stress':(11,1,True), 'env10stress':(10,1,True),
              'env8compile':(8,1,True), 'env10compile':(10,1,True), 'env12compile':(12,1,True)}
     summary = []
     for name in args.cases.split(','):
@@ -49,7 +50,9 @@ def main():
             cmd.append('--async-finite')
         if name.endswith('visualasync'):
             cmd.extend(['--compile-dino','--compile-depth'])
-        if name.endswith('native'):
+        if name.endswith('stress'):
+            cmd.append('--scene-stress')
+        if name.endswith(('native','stress')):
             cmd.extend(['--config','run_rxr/iter_train_rae_dino_sft_fast.yaml'])
         if args.audit:
             cmd.append('--audit')
