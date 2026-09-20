@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collection/validation only. There is intentionally no train subcommand."""
+"""Frozen collection and explicitly versioned online navigation evaluation."""
 import argparse
 import gzip
 import json
@@ -13,6 +13,8 @@ from rgb_only_optimization import ROOT, common, resources, runtime, sha, save, V
 BASE_REL='data/logs/ghost_concat_persistent_compiled_10k_20260911/train/ghost_concat_v1_joint_persistent_train/checkpoints/ghost_concat_v1_joint_persistent_train/ckpt.iter6400.pth'
 BASE_SHA='4c729c84bf4338452da4d459fc82734dcbb5f72ac6a2b574ee8f20e1080bc2fe'
 
+BASE_SHAS={6400:BASE_SHA,9200:'87bf7ad691a93abfe2d5030c2c314ef4e630c41d3abbe61fea3b38872686055e'}
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('action',choices=['collect','validate','baseline','online'])
@@ -21,9 +23,11 @@ def main():
     p.add_argument('--split',choices=['train','val_unseen'],default='train')
     p.add_argument('--output',required=True);p.add_argument('--checkpoint',required=True)
     p.add_argument('--episodes',type=int,default=-1);p.add_argument('--part',type=int,default=0);p.add_argument('--parts',type=int,default=1)
+    p.add_argument('--base-step',type=int,choices=[6400,9200],default=6400)
     p.add_argument('--head',default='');p.add_argument('--gain',type=float,default=1.5)
     p.add_argument('--trace',action='store_true');p.add_argument('--no-compile',action='store_true')
     p.add_argument('--dry-run',action='store_true');a=p.parse_args()
+    if a.base_step!=6400 and a.action not in ('baseline','online'):p.error('9200 is evaluation-only; collection remains pinned to6400')
     if a.gpu not in ('0','1') or not 0<=a.part<a.parts or a.environments<1: p.error('invalid resources/partition')
     root=Path(a.output).resolve()
     if a.action in ('online','baseline') and root.exists() and any(root.iterdir()):
@@ -46,15 +50,18 @@ def main():
     if a.action=='validate':
         code='from vlnce_baselines.nwm.active_lookahead.stage2_data import validate_dataset; import json; m=validate_dataset('+repr(str(root/'episodes'))+','+repr(ids)+'); print(json.dumps({k:v for k,v in m.items() if k!="entries"}))'
         return subprocess.call(runtime(a.machine,['-c',code],a.gpu),cwd=ROOT)
-    if sha(a.checkpoint)!=BASE_SHA:raise ValueError('stage1 SHA mismatch')
+    base_sha=BASE_SHAS[a.base_step]
+    if sha(a.checkpoint)!=base_sha:raise ValueError('stage1 SHA mismatch')
     assets={}
     for rel in ('pretrained/raenwm_native_cls/checkpoint_step_75000.pth.tar','pretrained/raenwm_stage0/stat.pt','pretrained/active_lookahead/dino_cwp_best.pt'):
         assets[rel]=sha(ROOT/rel)
     commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
-    provenance=dict(format='stage2-panorama-predicted-v1',stage1_sha256=BASE_SHA,assets=assets,
+    provenance=dict(format='stage2-panorama-predicted-v1',stage1_sha256=base_sha,assets=assets,
         commit=commit,split=a.split,part=a.part,parts=a.parts,episode_ids=ids,seed=20260916,
         feature_space='raw_cls+normalized_patch_fp16',context_contract='stage2_panorama_q0_snapshot_v1',
         behavior='stage1_argmax',environments=a.environments,compile=not a.no_compile)
+    if a.base_step!=6400:
+        provenance.update(stage1_iteration=a.base_step,head_training_base_sha256=BASE_SHA,transfer_mode='6400_to_9200',head_retrained=False)
     if a.action=='online':
         provenance.update(behavior='stage2_argmax_stop_isolated',head_sha256=sha(a.head),gain=a.gain,residual_bound=1.)
     prov=root/'provenance.json'
@@ -95,6 +102,7 @@ def main():
     if a.action=='online':
         opts.update({'MODEL.STAGE2_ONLINE.enabled':True,'MODEL.STAGE2_ONLINE.output':str(root/'online'),
             'MODEL.STAGE2_ONLINE.head':str(Path(a.head).resolve()),'MODEL.STAGE2_ONLINE.head_sha256':provenance['head_sha256'],
+            'MODEL.STAGE2_ONLINE.transfer_mode':'6400_to_9200' if a.base_step==9200 else 'same',
             'MODEL.STAGE2_ONLINE.gain':a.gain,'MODEL.STAGE2_ONLINE.trace':a.trace})
     cmd=['run.py','--exp_name','stage2_collect','--run-type','eval','--exp-config','run_r2r/iter_train_rae_dino_ghost_concat_persistent.yaml']
     for key,value in opts.items():cmd.extend([key,str(value)])

@@ -10,7 +10,16 @@ from .residual_head import InterleavedCrossModalTopKFutureLogitResidualHead
 from .base_freeze import capture_base_tensor_manifest
 
 BASE_SHA = '4c729c84bf4338452da4d459fc82734dcbb5f72ac6a2b574ee8f20e1080bc2fe'
+TRANSFER_9200_SHA = '87bf7ad691a93abfe2d5030c2c314ef4e630c41d3abbe61fea3b38872686055e'
 BEST_SHA = '598986525cb3ac4696743b0480ac6733b918e3d4407d647c4cddb0a498ae286e'
+
+
+def validate_deployment_base(actual_sha,mode):
+    expected={'same':BASE_SHA,'6400_to_9200':TRANSFER_9200_SHA}
+    if mode not in expected or actual_sha!=expected[mode]:
+        raise ValueError('deployment base differs from explicit transfer contract')
+    return dict(head_training_base_sha256=BASE_SHA,deployment_base_sha256=actual_sha,
+                transfer_mode=mode,head_retrained=False)
 
 
 def score_rows(head, rows, device, gain):
@@ -40,8 +49,7 @@ class Stage2Online(Stage2Collector):
             raise ValueError('online future-noise seed differs from collection')
         if cfg.head_sha256 != BEST_SHA or sha256(cfg.head) != BEST_SHA:
             raise ValueError('selected 4750 head SHA differs')
-        if sha256(trainer.config.EVAL.CKPT_PATH_DIR) != BASE_SHA:
-            raise ValueError('online stage1 base differs from offline collection')
+        self.deployment=validate_deployment_base(sha256(trainer.config.EVAL.CKPT_PATH_DIR),cfg.transfer_mode)
         checkpoint=load(cfg.head)
         if checkpoint['model_config'] != MODEL_CONFIG or checkpoint['global_step'] != 4750:
             raise ValueError('unexpected selected head configuration')
@@ -128,4 +136,4 @@ class Stage2Online(Stage2Collector):
         if self.trace_file: self.trace_file.close()
         atomic_json(Path(self.cfg.output)/'online_summary.json',dict(counts=dict(self.counts),
             elapsed_seconds=time.perf_counter()-self.started,online_seconds=self.online_seconds,
-            head_sha256=BEST_SHA,gain=self.cfg.gain,residual_bound=1.,teacher_calls=0))
+            head_sha256=BEST_SHA,gain=self.cfg.gain,residual_bound=1.,teacher_calls=0,**self.deployment))

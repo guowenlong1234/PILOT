@@ -30,7 +30,12 @@ def main():
         runs[name]=rows;sources[name]=dict(path=str(f[0]),sha256=digest(f[0]),provenance=read(run/'provenance.json'))
     for key in ('stage1_sha256','assets','split','seed','environments','compile','episode_ids'):
         assert sources['full_base']['provenance'][key]==sources['full_best']['provenance'][key],key
+    base_step=sources['full_base']['provenance'].get('stage1_iteration',6400)
     online=read(root/'full_best/online/online_summary.json')
+    if base_step==9200:
+        assert online['transfer_mode']=='6400_to_9200' and not online['head_retrained']
+        assert online['deployment_base_sha256']==sources['full_base']['provenance']['stage1_sha256']
+        assert online['head_training_base_sha256']==sources['full_best']['provenance']['head_training_base_sha256']
     assert online['counts']['episodes']==1839 and online['teacher_calls']==0
     assert read(root/'full_best/online/freeze_report.json')['comparison']['exact_match']
     assert read(root/'full_best/online/world_freeze.json')['exact_match']
@@ -56,7 +61,7 @@ def main():
         limitation='One fixed model and seed on the development set; 11 scene clusters, intervals do not correct head selection.')
     out.mkdir(parents=True,exist_ok=True);(out/'summary.json').write_text(json.dumps(result,indent=2,ensure_ascii=False)+'\n')
     labels={'success':'路线成功率SR','spl':'路径效率SPL','ndtw':'nDTW','sdtw':'SDTW','distance_to_goal':'终点距离（米）','path_length':'路径长度（米）','steps_taken':'步数','collisions':'碰撞率'}
-    lines=['# E24 在线导航对照结果','', '两组均完整覆盖R2R val_unseen的1839条路线；同机、8环境、相同种子和6400步基座。E24使用4750步头×1.5，修正裁剪到±1。','',
+    lines=['# E24 在线导航对照结果','', f'两组均完整覆盖R2R val_unseen的1839条路线；同机、8环境、相同种子和{base_step}步基座。E24使用在6400基座数据上训练的4750步头×1.5，修正裁剪到±1；本次没有重训评分头。','',
            '|指标|一阶段|一阶段+E24|差值|按场景配对95%区间|','|---|---:|---:|---:|---|']
     for k in keys:
         m=comparison['metrics'][k];scale=100 if k in ('success','spl','ndtw','sdtw') else 1

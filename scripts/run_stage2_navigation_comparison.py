@@ -75,7 +75,7 @@ def validate_parity(base,zero,repeat=None):
 
 def main():
     global OWNER
-    p=argparse.ArgumentParser();p.add_argument('--output',required=True);p.add_argument('--replay-report',required=True);p.add_argument('--resume',action='store_true');p.add_argument('--baseline-repeat')
+    p=argparse.ArgumentParser();p.add_argument('--output',required=True);p.add_argument('--replay-report',required=True);p.add_argument('--resume',action='store_true');p.add_argument('--baseline-repeat');p.add_argument('--base-step',type=int,choices=[6400,9200],default=6400)
     a=p.parse_args();out=Path(a.output).resolve();out.mkdir(parents=True,exist_ok=True)
     if any(out.iterdir()) and not a.resume:raise FileExistsError('use a fresh comparison directory or explicit --resume')
     OWNER=True
@@ -83,13 +83,23 @@ def main():
         save(out/'attempts'/(now().replace(':','-')+'.json'),read(out/'pipeline.json'))
     if read(a.replay_report)['status']!='passed':raise ValueError('offline replay gate missing')
     if str(ROOT)!='/home/a6000/gwl/ETP-R1-stage2-e24':raise ValueError('run on the evaluation host worktree')
-    base='stage2_assets/ckpt.iter6400.pth'
+    base=f'stage2_assets/ckpt.iter{a.base_step}.pth'
+    contract=dict(base_step=a.base_step,checkpoint=base,gain=1.5,head_step=4750,head_training_base_step=6400)
+    if (out/'run_contract.json').exists() and read(out/'run_contract.json')!=contract:
+        raise ValueError('cannot resume a different base/head experiment')
+    if a.resume and not (out/'run_contract.json').exists() and a.base_step!=6400:
+        raise ValueError('missing transfer resume contract')
+    save(out/'run_contract.json',contract)
     head='data/logs/stage2_e24/training_20260917/formal_seed2/heads/head_step_004750.pt'
     stages=[('smoke_base','baseline',16,0),('smoke_zero','online',16,0),('smoke_best','online',16,1.5),
             ('full_base','baseline',-1,0),('full_best','online',-1,1.5)]
+    if a.base_step==9200:
+        stages.insert(1,('smoke_base_repeat','baseline',16,0))
+        if a.baseline_repeat:raise ValueError('9200 uses its own newly measured repeated baseline')
+        a.baseline_repeat=str(out/'smoke_base_repeat')
     for name,action,episodes,gain in stages:
         command=[sys.executable,'scripts/stage2_e24_job.py',action,'--machine','eval','--gpu','0',
-            '--environments','8','--split','val_unseen','--checkpoint',base,'--head',head,
+            '--base-step',str(a.base_step),'--environments','8','--split','val_unseen','--checkpoint',base,'--head',head,
             '--gain',str(gain),'--episodes',str(episodes),'--output',str(out/name)]
         if episodes>0:command+=['--trace']
         save(out/'pipeline.json',dict(status='running',stage=name,command=command,updated_at=now()))
@@ -118,7 +128,7 @@ def main():
                      harmed=sum(left[k]['success']==1 and right[k]['success']==0 for k in left))
     timing={name:read(next((out/name/'results').rglob('timing_*.json'))) for name in ('full_base','full_best')}
     save(out/'comparison.json',dict(status='completed',episodes=len(left),metrics=metrics,success_transitions=transitions,
-        timing=timing,limitation='R2R val_unseen development set; selected offline head, not independent test'))
+        timing=timing,experiment=contract,limitation='R2R val_unseen development set; selected offline head, not independent test'))
     save(out/'pipeline.json',dict(status='completed',exit_code=0,updated_at=now()))
 
 

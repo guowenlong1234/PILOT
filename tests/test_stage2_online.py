@@ -21,3 +21,15 @@ def test_prediction_only_path_has_no_teacher_or_writer_calls():
     attrs={node.attr for node in ast.walk(tree) if isinstance(node,ast.Attribute)}
     assert '_teacher_action_new' not in attrs
     assert 'writer' not in attrs
+
+
+def test_base_transfer_requires_explicit_mode_and_exact_weight():
+    import pytest
+    from vlnce_baselines.nwm.active_lookahead.stage2_online import BASE_SHA, TRANSFER_9200_SHA, validate_deployment_base
+    assert validate_deployment_base(BASE_SHA,'same')['head_retrained'] is False
+    with pytest.raises(ValueError):validate_deployment_base(TRANSFER_9200_SHA,'same')
+    with pytest.raises(ValueError):validate_deployment_base(BASE_SHA,'6400_to_9200')
+    with pytest.raises(ValueError):validate_deployment_base('other','6400_to_9200')
+    metadata=validate_deployment_base(TRANSFER_9200_SHA,'6400_to_9200')
+    assert metadata['head_training_base_sha256']==BASE_SHA
+    assert metadata['deployment_base_sha256']==TRANSFER_9200_SHA

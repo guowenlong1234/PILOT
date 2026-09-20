@@ -263,6 +263,7 @@ _C.MODEL.RAENWM.rgb_fusion_align_navigation_cls = False
 # Every switch is off by default so legacy R1 behavior is unchanged.
 _C.MODEL.STAGE2_ONLINE = CN()
 _C.MODEL.STAGE2_ONLINE.enabled = False
+_C.MODEL.STAGE2_ONLINE.transfer_mode = "same"
 _C.MODEL.STAGE2_ONLINE.output = ""
 _C.MODEL.STAGE2_ONLINE.head = ""
 _C.MODEL.STAGE2_ONLINE.head_sha256 = ""
