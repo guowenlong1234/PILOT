@@ -31,6 +31,8 @@ def main():
              'env12stress':(12,1,True), 'env11stress':(11,1,True), 'env10stress':(10,1,True),
              'env12late':(12,1,True), 'env11late':(11,1,True),
              'env12checkpoint':(12,1,True), 'env12checkpointlate':(12,1,True),
+             'env14checkpoint':(14,1,True), 'env16checkpoint':(16,1,True),
+             'env16checkpointlate':(16,1,True), 'env16checkpointstress':(16,1,True),
              'env8compile':(8,1,True), 'env10compile':(10,1,True), 'env12compile':(12,1,True)}
     summary = []
     for name in args.cases.split(','):
