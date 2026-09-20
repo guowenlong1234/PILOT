@@ -18,7 +18,9 @@ def main():
     root = Path(args.root)
     root.mkdir(parents=True, exist_ok=True)
     cases = {'baseline':(6,2,False), 'parallel':(6,2,True),
-             'env8':(8,1,True), 'env10':(10,1,True), 'env12':(12,1,True)}
+             'env8':(8,1,True), 'env10':(10,1,True), 'env12':(12,1,True),
+             'env8lean':(8,1,True), 'env10lean':(10,1,True), 'env12lean':(12,1,True),
+             'env8compile':(8,1,True), 'env10compile':(10,1,True), 'env12compile':(12,1,True)}
     summary = []
     for name in args.cases.split(','):
         envs, accumulation, parallel = cases[name]
@@ -29,6 +31,10 @@ def main():
                '--checkpoint',args.checkpoint,'--updates',str(args.updates),
                '--warmup','2','--environments',str(envs),'--accumulation',str(accumulation),
                'IL.parallel_rxr_teacher',str(parallel)]
+        if name.endswith('lean'):
+            cmd.append('--lean-dino')
+        if name.endswith('compile'):
+            cmd.append('--compile-dino')
         samples = []
         start = time.time()
         with (root/f'{name}.log').open('w') as log:
