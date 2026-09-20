@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real RxR updates, stage timing and action throughput; never saves checkpoints."""
 import argparse
+import hashlib
 from collections import defaultdict
 import json
 import os
@@ -23,6 +24,7 @@ def main():
     parser.add_argument('--checkpoint', required=True)
     parser.add_argument('--sync-stages', action='store_true')
     parser.add_argument('--lean-dino', action='store_true')
+    parser.add_argument('--audit', action='store_true')
     parser.add_argument('--compile-dino', action='store_true')
     args, overrides = parser.parse_known_args()
     rank = int(os.environ.get('LOCAL_RANK', 0))
@@ -83,9 +85,18 @@ def main():
         last[0] = now
         return result
     module.step_amp_optimizer = step
+    def digest(named):
+        result = hashlib.sha256()
+        for name, parameter in named:
+            result.update(name.encode())
+            result.update(parameter.detach().cpu().contiguous().numpy().tobytes())
+        return result.hexdigest()
     original_interval = module.RLTrainer._train_interval
     def interval(self, *a, **kw):
         trainer[0] = self
+        if args.audit:
+            frozen_before = digest((n,p) for n,p in self.policy.named_parameters() if not p.requires_grad)
+            mapping_before = digest((n,p) for n,p in self.policy.named_parameters() if 'cls_residual_mlp' in n)
         torch.cuda.synchronize(rank)
         last[0] = time.perf_counter()
         result = original_interval(self, *a, **kw)
@@ -101,6 +112,13 @@ def main():
                       versions=dict(python=platform.python_version(),torch=str(torch.__version__),
                                     cuda=torch.version.cuda,transformers=transformers.__version__,
                                     habitat=habitat.__version__,habitat_sim=habitat_sim.__version__))
+        if args.audit:
+            report['audit'] = dict(
+                frozen_unchanged=frozen_before == digest((n,p) for n,p in self.policy.named_parameters() if not p.requires_grad),
+                mapping_updated=mapping_before != digest((n,p) for n,p in self.policy.named_parameters() if 'cls_residual_mlp' in n),
+                finite_losses=all(torch.isfinite(torch.tensor(v)).all().item() for k,v in report['losses'].items()),
+            )
+            assert all(report['audit'].values()), report['audit']
         (root/f'rank{rank}.json').write_text(json.dumps(report, indent=2))
         print('RXR_BENCHMARK '+json.dumps(report), flush=True)
         return result
