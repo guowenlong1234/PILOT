@@ -6,6 +6,8 @@ ETP-R1 是一个 VLN-CE 项目：让智能体在连续三维环境里，根据�
 
 ## Quick Start And Environment
 
+2026-09-20，完成训练机RxR吞吐优化：原长训练已停止，2200步模型/恢复状态保留。最终每卡12环境×累积1次、总批量24，采用冻结视觉编译、并行教师查询、异步有限值检查及导航中间结果重算；教师动作采样概率和原衰减曲线不变。双卡50步同条件复测动作吞吐45.986→54.739/秒（+19.03%），更新时间6.832→5.813秒（-14.91%），峰值显存约25.8GiB；79项回归通过、2项跳过。代码已合入主工作区，入口 `scripts/manage_rae_rxr_sft_fast_server.sh`，完整证据及使用边界见 `docs/rxr-throughput-optimization-20260920.md`。没有自动恢复长训练。
+
 2026-09-11，持久候选状态已在训练机独立工作区通过真实单卡更新、双卡总批量8更新、第2步恢复至第4步、冻结权重审计及R2R四路线/RxR单路线验证。实际覆盖跨步无预测保留；展开配置核对，长训相对9月9日实验仅改变候选记忆模式，其他计算参数一致。详细证据见 `docs/persistent-ghost-gpu-validation-20260911.md`。下方9月10日GPU待验收记录是历史状态。
 
 2026-09-10，本独立工作区分支 `feature/persistent-ghost-state` 新增可选的融合节点状态持久化：`ghost_concat_memory_mode=persistent_node_state`，按真实观测次数递推合并旧融合状态与新观测，当前预测再融合写回；整段 rollout 保留跨步梯度。旧模式为缺省 `current_step_only`。训练机独立工作区 `/home/gwl/project/etpr1/ETP-R1-persistent-ghost`，使用 `etpnav_unified`，运行时独立复制。已完成训练机 119 项不同 CPU 测试（117 项回归＋2 项审计故障注入）；两张 GPU 正被既有训练占用，真实单卡/双卡/恢复/短评测仍待验收。入口、检查点契约、测试与产物位置见 `docs/persistent-ghost-state-implementation-20260910.md`。本分支不改论文、不启动长训练。
@@ -198,6 +200,8 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 - 测评机只有一张 RTX 3090 24GB。现有 ETPNav 任务占用 GPU 时，不得并行启动全量特征生成、预训练、SFT、GRPO 或完整评测，也不得擅自中断 ETPNav。
 
 ## Last Reviewed
+
+2026-09-20，为RxR吞吐优化复核训练机进程、原采样曲线、真实双卡性能及显存；主要检查 `ss_trainer_ETP_R1.py`、`R1Policy.py`、视觉编码器、快速配置及基准脚本。最终验证和所有候选结果见 `docs/rxr-throughput-optimization-20260920.md`。
 
 2026-09-09 晚间，重启 `ghost_concat_direct_compiled_10k_20260909`：14200 基座、双卡总批量8、10000步、每200步同步测评，直接渲染/FP16/64批次上限/Inductor；保留选定合并版本，未引入静态条件缓存或导航SDPA。测评机专用容器离线安装G++并修复编译缓存目录后，7项相关测试和8环境8路线预检通过。正式第200步模型及恢复状态已保存，双端SHA一致，测评机已开始1839路线评测，训练继续推进。见 `docs/ghost-concat-direct-compiled-10k-operations-20260909.md`。
 
