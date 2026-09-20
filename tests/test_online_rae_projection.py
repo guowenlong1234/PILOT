@@ -163,6 +163,9 @@ class _FakeRaeEncoder(torch.nn.Module):
         cls_residual_mlp_enabled,
         cls_residual_mlp_hidden_dim,
         cls_residual_mlp_zero_init,
+        compile_backbone=False,
+        async_finite_checks=False,
+        retain_intermediate_states=True,
     ):
         super().__init__()
         self.calls.append(
@@ -173,6 +176,9 @@ class _FakeRaeEncoder(torch.nn.Module):
                 cls_residual_mlp_enabled,
                 cls_residual_mlp_hidden_dim,
                 cls_residual_mlp_zero_init,
+                compile_backbone,
+                async_finite_checks,
+                retain_intermediate_states,
             )
         )
 
@@ -194,8 +200,10 @@ class _ConcreteETP(policy_module.ETP):
         ("rae_dinov2", _FakeRaeEncoder, 768),
     ),
 )
+@pytest.mark.parametrize("fast", [False, True])
 def test_etp_builds_configured_rgb_encoder(
     monkeypatch,
+    fast,
     encoder_type,
     expected_class,
     expected_size,
@@ -209,9 +217,13 @@ def test_etp_builds_configured_rgb_encoder(
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     _FakeRaeEncoder.calls.clear()
 
+    config = _model_config(encoder_type)
+    config.RGB_ENCODER.compile_backbone = fast
+    config.RGB_ENCODER.async_finite_checks = fast
+    config.RGB_ENCODER.retain_intermediate_states = not fast
     policy = _ConcreteETP(
         observation_space=None,
-        model_config=_model_config(encoder_type),
+        model_config=config,
         num_actions=1,
         dropout_rate=0.0,
     )
@@ -227,6 +239,9 @@ def test_etp_builds_configured_rgb_encoder(
                 True,
                 768,
                 True,
+                fast,
+                fast,
+                not fast,
             )
         ]
 
