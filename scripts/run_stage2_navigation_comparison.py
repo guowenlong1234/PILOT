@@ -6,13 +6,15 @@ import subprocess
 import sys
 from rgb_only_optimization import ROOT, save, now
 
+OWNER=False
+
 
 def read(path):
     return json.loads(Path(path).read_text())
 
 
 def results(path):
-    files=list((path/'results').glob('stats_ep_*.json'))
+    files=list((path/'results').rglob('stats_ep_*.json'))
     if len(files)!=1: raise ValueError('expected one complete per-episode result file')
     values=read(files[0]); expected=set(map(str,read(path/'provenance.json')['episode_ids']))
     if set(values)!=expected: raise ValueError('episode coverage differs')
@@ -30,9 +32,13 @@ def trace(path):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--output',required=True);p.add_argument('--replay-report',required=True)
+    global OWNER
+    p=argparse.ArgumentParser();p.add_argument('--output',required=True);p.add_argument('--replay-report',required=True);p.add_argument('--resume',action='store_true')
     a=p.parse_args();out=Path(a.output).resolve();out.mkdir(parents=True,exist_ok=True)
-    if any(out.iterdir()):raise FileExistsError('use a fresh comparison directory')
+    if any(out.iterdir()) and not a.resume:raise FileExistsError('use a fresh comparison directory or explicit --resume')
+    OWNER=True
+    if (out/'pipeline.json').exists():
+        save(out/'attempts'/(now().replace(':','-')+'.json'),read(out/'pipeline.json'))
     if read(a.replay_report)['status']!='passed':raise ValueError('offline replay gate missing')
     if str(ROOT)!='/home/a6000/gwl/ETP-R1-stage2-e24':raise ValueError('run on the evaluation host worktree')
     base='stage2_assets/ckpt.iter6400.pth'
@@ -45,7 +51,11 @@ def main():
             '--gain',str(gain),'--episodes',str(episodes),'--output',str(out/name)]
         if episodes>0:command+=['--trace']
         save(out/'pipeline.json',dict(status='running',stage=name,command=command,updated_at=now()))
-        code=subprocess.call(command,cwd=ROOT)
+        previous=out/name/'status.json'
+        if a.resume and previous.exists() and read(previous).get('status')=='completed' and read(previous).get('exit_code')==0:
+            code=0
+        else:
+            code=subprocess.call(command,cwd=ROOT)
         if code:raise RuntimeError(f'{name} failed with exit code {code}; inspect run.log before any retry')
         results(out/name)
         if action=='online':
@@ -66,7 +76,7 @@ def main():
     for item in metrics.values():item['difference']=item['e24']-item['base']
     transitions=dict(fixed=sum(left[k]['success']==0 and right[k]['success']==1 for k in left),
                      harmed=sum(left[k]['success']==1 and right[k]['success']==0 for k in left))
-    timing={name:read(next((out/name/'results').glob('timing_*.json'))) for name in ('full_base','full_best')}
+    timing={name:read(next((out/name/'results').rglob('timing_*.json'))) for name in ('full_base','full_best')}
     save(out/'comparison.json',dict(status='completed',episodes=len(left),metrics=metrics,success_transitions=transitions,
         timing=timing,limitation='R2R val_unseen development set; selected offline head, not independent test'))
     save(out/'pipeline.json',dict(status='completed',exit_code=0,updated_at=now()))
@@ -75,7 +85,7 @@ def main():
 if __name__=='__main__':
     try:main()
     except Exception as e:
-        if '--output' in sys.argv:
+        if OWNER and '--output' in sys.argv:
             out=Path(sys.argv[sys.argv.index('--output')+1]);out.mkdir(parents=True,exist_ok=True)
             prior=read(out/'pipeline.json') if (out/'pipeline.json').exists() else {}
             save(out/'pipeline.json',dict(prior,status='failed',error=repr(e),updated_at=now()))
