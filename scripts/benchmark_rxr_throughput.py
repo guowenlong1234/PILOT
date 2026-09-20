@@ -116,6 +116,7 @@ def main():
         'CHECKPOINT_FOLDER':str(root/'checkpoints')+'/',
         'TENSORBOARD_DIR':str(root/'tb')+'/', 'RESULTS_DIR':str(root/'results')+'/',
         'TASK_CONFIG.DATASET.ROLES':['guide'],
+        'TASK_CONFIG.DATASET.SUFFIX':'_90',
         'TASK_CONFIG.DATASET.LANGUAGES':['en-US','en-IN','hi-IN','te-IN'],
         'TASK_CONFIG.SIMULATOR.HABITAT_SIM_V0.ALLOW_SLIDING':True,
     }
