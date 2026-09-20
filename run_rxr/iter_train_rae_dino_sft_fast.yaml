@@ -71,6 +71,7 @@ IL:
   tryout: True
 
 MODEL:
+  checkpoint_navigation: True
   # DINO navigation baseline: no world model or second-stage reranking.
   RAENWM:
     enabled: False
