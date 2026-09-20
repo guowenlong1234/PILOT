@@ -34,6 +34,7 @@ EVAL:
   fast_eval: False
 
 IL:
+  freeze_navigation_backbone: False
   load_from_ckpt: False
   is_requeue: False
   ckpt_to_load: data/checkpoints/ckpt.0.pth
@@ -69,6 +70,12 @@ IL:
   tryout: True
 
 MODEL:
+  # DINO navigation baseline: no world model or second-stage reranking.
+  RAENWM:
+    enabled: False
+    rgb_fusion_enabled: False
+  ACTIVE_LOOKAHEAD:
+    enabled: False
   task_type: rxr
   policy_name: R1Policy
   NUM_ANGLES: 12

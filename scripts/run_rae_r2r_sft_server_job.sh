@@ -113,7 +113,7 @@ esac
     echo "checkpoint_sync_destination=$CHECKPOINT_SYNC_DESTINATION"
     echo "python=$PYTHON_BIN"
     "$PYTHON_BIN" -c \
-        'import sys, torch, transformers; print(f"versions=python:{sys.version.split()[0]} torch:{torch.__version__} cuda:{torch.version.cuda} transformers:{transformers.__version__}")'
+        'import sys, torch, transformers, habitat, habitat_sim; print(f"versions=python:{sys.version.split()[0]} torch:{torch.__version__} cuda:{torch.version.cuda} transformers:{transformers.__version__} habitat:{habitat.__version__} habitat_sim:{habitat_sim.__version__}")'
     nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu \
         --format=csv,noheader
 } >>"$LOG_FILE"
