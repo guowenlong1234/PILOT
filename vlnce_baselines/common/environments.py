@@ -903,6 +903,12 @@ class VLNCEDaggerEnv(habitat.RLEnv):
         # circle_dists = np.linalg.norm(np.array(path)-current_pos, axis=1).tolist()
         return circle_dists
 
+    def optional_ghost_dist_to_ref(self, ghost_vp_pos, ref_path):
+        """Allow a batched teacher request to skip stopped/exhausted episodes."""
+        if not ghost_vp_pos:
+            return None
+        return self.ghost_dist_to_ref(ghost_vp_pos, ref_path)
+
     def ghost_dist_to_ref(self, ghost_vp_pos, ref_path):
         episode_id = self._env.current_episode.episode_id
         if episode_id != self.prev_episode_id:

@@ -2305,6 +2305,40 @@ class RLTrainer(BaseVLNCETrainer):
             oracle_cand_idx = self.envs.call(["get_cand_idx"]*self.envs.num_envs, kargs)
             return oracle_cand_idx
 
+    def _parallel_rxr_teacher_action(
+        self, batch_gmap_vp_ids, batch_no_vp_left, is_train,
+        current_goal_distances,
+    ):
+        if current_goal_distances is None:
+            current_goal_distances = self.envs.call(
+                ["current_dist_to_goal"] * self.envs.num_envs,
+                [{"is_train": is_train}] * self.envs.num_envs,
+            )
+        episodes = self.envs.current_episodes()
+        actions, requests = [], []
+        for i, (gmap, no_vp_left, distance) in enumerate(zip(
+            self.gmaps, batch_no_vp_left, current_goal_distances,
+        )):
+            action = 0 if distance < 1.5 else (-100 if no_vp_left else None)
+            actions.append(action)
+            # Keep the serial implementation's random-choice order and skip
+            # the stateful teacher for STOP and exhausted maps.
+            positions = [] if action is not None else [
+                (vp, random.choice(pos)) for vp, pos in gmap.ghost_real_pos.items()
+            ]
+            requests.append({
+                "ghost_vp_pos": positions,
+                "ref_path": self.gt_data[str(episodes[i].episode_id)]["locations"]
+                if action is None else [],
+            })
+        targets = self.envs.call(
+            ["optional_ghost_dist_to_ref"] * self.envs.num_envs, requests,
+        )
+        for i, target in enumerate(targets):
+            if actions[i] is None:
+                actions[i] = batch_gmap_vp_ids[i].index(target)
+        return torch.tensor(actions, device=self.device, dtype=torch.long)
+
     def _teacher_action_new(
         self,
         batch_gmap_vp_ids,
@@ -2312,6 +2346,15 @@ class RLTrainer(BaseVLNCETrainer):
         is_train,
         current_goal_distances=None,
     ):
+        if (
+            self.config.MODEL.task_type == 'rxr'
+            and self.config.IL.expert_policy == 'ndtw'
+            and getattr(self.config.IL, 'parallel_rxr_teacher', False)
+        ):
+            return self._parallel_rxr_teacher_action(
+                batch_gmap_vp_ids, batch_no_vp_left, is_train,
+                current_goal_distances,
+            )
         teacher_actions = []
         cur_episodes = None
         if self.config.IL.expert_policy == 'ndtw':
