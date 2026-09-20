@@ -29,10 +29,9 @@ def main():
              'env12visualasync':(12,1,True), 'env11visualasync':(11,1,True),
              'env12native':(12,1,True), 'env11native':(11,1,True), 'env10native':(10,1,True),
              'env12stress':(12,1,True), 'env11stress':(11,1,True), 'env10stress':(10,1,True),
-             'env12late':(12,1,True), 'env11late':(11,1,True),
-             'env12checkpoint':(12,1,True), 'env12checkpointlate':(12,1,True),
+             'env12checkpoint':(12,1,True),
              'env14checkpoint':(14,1,True), 'env16checkpoint':(16,1,True),
-             'env16checkpointlate':(16,1,True), 'env16checkpointstress':(16,1,True),
+             'env16checkpointstress':(16,1,True), 'env14checkpointstress':(14,1,True),
              'env8compile':(8,1,True), 'env10compile':(10,1,True), 'env12compile':(12,1,True)}
     summary = []
     for name in args.cases.split(','):
@@ -58,9 +57,7 @@ def main():
             cmd.append('--scene-stress')
         if 'checkpoint' in name:
             cmd.extend(['MODEL.checkpoint_navigation','True'])
-        if name.endswith('late'):
-            cmd.extend(['IL.sample_ratio','0.178'])
-        if name.endswith(('native','stress','late','checkpoint')):
+        if name.endswith(('native','stress','checkpoint')):
             cmd.extend(['--config','run_rxr/iter_train_rae_dino_sft_fast.yaml'])
         if args.audit:
             cmd.append('--audit')

@@ -32,6 +32,12 @@ def main():
     parser.add_argument('--compile-depth', action='store_true')
     parser.add_argument('--async-finite', action='store_true')
     args, overrides = parser.parse_known_args()
+    protected_teacher_options = {
+        'IL.sample_ratio', 'IL.decay_interval',
+        'IL.sample_ratio_iteration_offset', 'IL.sample_ratio_zero_threshold',
+    }
+    if protected_teacher_options.intersection(overrides):
+        parser.error('Throughput experiments must preserve the original teacher sampling schedule')
     rank = int(os.environ.get('LOCAL_RANK', 0))
     world = int(os.environ.get('WORLD_SIZE', 1))
     torch.cuda.set_device(rank)
