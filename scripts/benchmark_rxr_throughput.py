@@ -22,6 +22,8 @@ def main():
     parser.add_argument('--warmup', type=int, default=2)
     parser.add_argument('--checkpoint', required=True)
     parser.add_argument('--sync-stages', action='store_true')
+    parser.add_argument('--lean-dino', action='store_true')
+    parser.add_argument('--compile-dino', action='store_true')
     args, overrides = parser.parse_known_args()
     rank = int(os.environ.get('LOCAL_RANK', 0))
     world = int(os.environ.get('WORLD_SIZE', 1))
@@ -30,6 +32,19 @@ def main():
     from habitat import VectorEnv
     import vlnce_baselines.ss_trainer_ETP_R1 as module
     from vlnce_baselines.models.R1Policy import ETP
+    if args.lean_dino or args.compile_dino:
+        from vlnce_baselines.models.encoders.rae_dinov2_encoder import RaeDinov2RgbEncoder
+        original_init = RaeDinov2RgbEncoder.__init__
+        def encoder_init(self, *a, **kw):
+            original_init(self, *a, **kw)
+            original_forward = self.backbone.forward
+            def forward(*a, **kw):
+                kw['output_hidden_states'] = False
+                return original_forward(*a, **kw)
+            self.backbone.forward = (
+                torch.compile(forward, dynamic=True) if args.compile_dino else forward
+            )
+        RaeDinov2RgbEncoder.__init__ = encoder_init
     root = Path(args.output).resolve()
     root.mkdir(parents=True, exist_ok=True)
     stats = defaultdict(float)
