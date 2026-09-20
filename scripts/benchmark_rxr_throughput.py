@@ -26,6 +26,7 @@ def main():
     parser.add_argument('--lean-dino', action='store_true')
     parser.add_argument('--audit', action='store_true')
     parser.add_argument('--compile-dino', action='store_true')
+    parser.add_argument('--compile-depth', action='store_true')
     args, overrides = parser.parse_known_args()
     rank = int(os.environ.get('LOCAL_RANK', 0))
     world = int(os.environ.get('WORLD_SIZE', 1))
@@ -47,6 +48,13 @@ def main():
                 torch.compile(forward, dynamic=True) if args.compile_dino else forward
             )
         RaeDinov2RgbEncoder.__init__ = encoder_init
+    if args.compile_depth:
+        from vlnce_baselines.models.encoders.resnet_encoders import VlnResnetDepthEncoder
+        original_depth_init = VlnResnetDepthEncoder.__init__
+        def depth_init(self, *a, **kw):
+            original_depth_init(self, *a, **kw)
+            self.visual_encoder.forward = torch.compile(self.visual_encoder.forward, dynamic=True)
+        VlnResnetDepthEncoder.__init__ = depth_init
     root = Path(args.output).resolve()
     root.mkdir(parents=True, exist_ok=True)
     stats = defaultdict(float)
