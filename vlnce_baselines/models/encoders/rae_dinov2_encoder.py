@@ -192,11 +192,16 @@ class RaeDinov2RgbEncoder(nn.Module):
         cls_residual_mlp_enabled: bool = False,
         cls_residual_mlp_hidden_dim: Optional[int] = None,
         cls_residual_mlp_zero_init: bool = True,
+        compile_backbone: bool = False,
+        async_finite_checks: bool = False,
+        retain_intermediate_states: bool = True,
     ):
         super().__init__()
         self.precision = str(precision).lower()
         self.compute_dtype = resolve_rae_compute_dtype(self.precision)
         self.encoder_input_size = 224
+        self.async_finite_checks = bool(async_finite_checks)
+        self.retain_intermediate_states = bool(retain_intermediate_states)
 
         self.backbone = Dinov2WithRegistersModel.from_pretrained(
             model_dir,
@@ -245,6 +250,9 @@ class RaeDinov2RgbEncoder(nn.Module):
         if self.compute_dtype is not None:
             self.backbone.to(dtype=self.compute_dtype)
         self.train(False)
+        if compile_backbone:
+            from .compiled_visual import compile_visual_backbone
+            compile_visual_backbone(self.backbone)
 
     @property
     def is_blind(self):
@@ -286,7 +294,7 @@ class RaeDinov2RgbEncoder(nn.Module):
         with torch.no_grad(), autocast_context:
             hidden_state = self.backbone(
                 backbone_pixels,
-                output_hidden_states=True,
+                output_hidden_states=self.retain_intermediate_states,
             ).last_hidden_state
         features = hidden_state[:, 0].float()
         if tuple(features.shape) != (pixels.shape[0], self.output_size):
@@ -325,7 +333,7 @@ class RaeDinov2RgbEncoder(nn.Module):
         with torch.no_grad(), autocast_context:
             hidden_state = self.backbone(
                 backbone_pixels,
-                output_hidden_states=True,
+                output_hidden_states=self.retain_intermediate_states,
             ).last_hidden_state
         expected_tokens = 1 + 4 + 16 * 16
         expected_shape = (pixels.shape[0], expected_tokens, self.output_size)

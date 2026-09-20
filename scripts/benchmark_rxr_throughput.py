@@ -18,6 +18,7 @@ import torch
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', required=True)
+    parser.add_argument('--config', default='run_rxr/iter_train_rae_dino_sft.yaml')
     parser.add_argument('--environments', type=int, default=6)
     parser.add_argument('--accumulation', type=int, default=2)
     parser.add_argument('--updates', type=int, default=18)
@@ -127,7 +128,7 @@ def main():
                 ('rgb', net.rgb_encoder.backbone, (12,3,224,224), None),
                 ('depth', net.depth_encoder.visual_encoder, (12,256,256,1), 'depth'),
             ]:
-                eager = getattr(encoder, '_benchmark_eager_forward', None)
+                eager = getattr(encoder, '_benchmark_eager_forward', getattr(encoder, '_visual_eager_forward', None))
                 if eager is None:
                     continue
                 encoder.eval()
@@ -191,7 +192,7 @@ def main():
         'TASK_CONFIG.SIMULATOR.HABITAT_SIM_V0.ALLOW_SLIDING':True,
     }
     sys.argv = ['run.py','--local_rank',str(rank),'--exp_name',root.name,
-                '--run-type','dagger','--exp-config','run_rxr/iter_train_rae_dino_sft.yaml']
+                '--run-type','dagger','--exp-config',args.config]
     for k,v in opts.items():
         sys.argv.extend([k,str(v)])
     sys.argv.extend(overrides)

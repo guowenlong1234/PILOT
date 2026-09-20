@@ -1,0 +1,120 @@
+BASE_TASK_CONFIG_PATH: run_rxr/rxr_vlnce.yaml
+SIMULATOR_GPU_IDS: [0, 1]
+TORCH_GPU_ID: 0
+TORCH_GPU_IDS: [0, 1]
+
+TRAINER_NAME: SS-ETP-R1
+ENV_NAME: R1Env
+
+GPU_NUMBERS: 2
+NUM_ENVIRONMENTS: 12
+TENSORBOARD_DIR: data/logs/rae_dinov2_etpnav_cls_768/rxr_sft_formal/tensorboard/
+CHECKPOINT_FOLDER: data/logs/rae_dinov2_etpnav_cls_768/rxr_sft_formal/checkpoints/
+RESULTS_DIR: data/logs/rae_dinov2_etpnav_cls_768/rxr_sft_formal/results/
+ONLY_LAST_SAVEALL: True
+
+INFERENCE:
+  SPLIT: test_challenge
+  LANGUAGES: [en-US, en-IN, hi-IN, te-IN]
+  USE_CKPT_CONFIG: False
+  SAMPLE: False
+  CKPT_PATH: ''
+  PREDICTIONS_FILE: ''
+  FORMAT: rxr
+  EPISODE_COUNT: -1
+
+EVAL:
+  checkpoint_order: ascending
+  USE_CKPT_CONFIG: False
+  SPLIT: val_unseen
+  LANGUAGES: [en-US, en-IN, hi-IN, te-IN]
+  EPISODE_COUNT: -1
+  EPISODE_ID: None
+  CKPT_PATH_DIR: ''
+  fast_eval: False
+
+IL:
+  freeze_navigation_backbone: False
+  load_from_ckpt: False
+  is_requeue: False
+  ckpt_to_load: data/checkpoints/ckpt.0.pth
+  checkpoint_sync_enabled: False
+  checkpoint_sync_destination: ''
+  amp_init_scale: 16384.0
+  resumable_checkpoints: True
+  strict_rng_resume: True
+  keep_last_train_states: 3
+  keep_train_state_every_n_iters: 5000
+  use_fused_adamw: True
+  cudnn_benchmark: True
+  log_cuda_memory: True
+  gradient_accumulation_steps: 1
+  iters: 30000
+  log_every: 200
+  lr: 1.5e-5
+  batch_size: 12
+  ml_weight: 1.0
+  expert_policy: ndtw
+  parallel_rxr_teacher: True
+  sample_ratio: 0.75
+  decay_interval: 5000
+  sample_ratio_iteration_offset: 0
+  sample_ratio_zero_threshold: 0.15
+  warmup_iters: 1000
+  min_lr_ratio: 0.6
+  max_traj_len: 25
+  max_text_len: 250
+  loc_noise: 0.5
+  waypoint_aug: True
+  ghost_aug: 0.0
+  back_algo: teleport
+  tryout: True
+
+MODEL:
+  # DINO navigation baseline: no world model or second-stage reranking.
+  RAENWM:
+    enabled: False
+    rgb_fusion_enabled: False
+  ACTIVE_LOOKAHEAD:
+    enabled: False
+  task_type: rxr
+  policy_name: R1Policy
+  NUM_ANGLES: 12
+  pretrained_path: pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768_eval_final_best/model_best_step_465000.pt
+  fix_lang_embedding: False
+  fix_pano_embedding: False
+  use_depth_embedding: True
+  use_sprels: True
+  merge_ghost: True
+  consume_ghost: True
+  spatial_output: False
+  RGB_ENCODER:
+    type: rae_dinov2
+    precision: ambient
+    compile_backbone: True
+    async_finite_checks: True
+    retain_intermediate_states: False
+    model_dir: pretrained/rae_dinov2_with_registers_base
+    output_size: 768
+    cls_residual_mlp_enabled: True
+    cls_residual_mlp_hidden_dim: 768
+    cls_residual_mlp_zero_init: True
+  DEPTH_ENCODER:
+    output_size: 256
+    compile_backbone: True
+  VISUAL_DIM:
+    vis_hidden: 768
+    directional: 128
+  INSTRUCTION_ENCODER:
+    bidirectional: True
+    sensor_uuid: rxr_instruction
+    embedding_size: 768
+
+TASK_CONFIG:
+  DATASET:
+    ROLES: [guide]
+    LANGUAGES: [en-US, en-IN, hi-IN, te-IN]
+    SUFFIX: _90
+  SIMULATOR:
+    HABITAT_SIM_V0:
+      ALLOW_SLIDING: True

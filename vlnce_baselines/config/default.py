@@ -202,6 +202,9 @@ _C.MODEL.RGB_ENCODER = CN()
 _C.MODEL.RGB_ENCODER.cnn_type = "TorchVisionResNet50"
 _C.MODEL.RGB_ENCODER.type = "clip"
 _C.MODEL.RGB_ENCODER.precision = "ambient"
+_C.MODEL.RGB_ENCODER.compile_backbone = False
+_C.MODEL.RGB_ENCODER.async_finite_checks = False
+_C.MODEL.RGB_ENCODER.retain_intermediate_states = True
 _C.MODEL.RGB_ENCODER.model_dir = ""
 _C.MODEL.RGB_ENCODER.output_size = 512
 _C.MODEL.RGB_ENCODER.cls_residual_mlp_enabled = False
@@ -304,6 +307,7 @@ _C.MODEL.ACTIVE_LOOKAHEAD.smoke_freeze_check = False
 _C.MODEL.ACTIVE_LOOKAHEAD.diagnostics_enabled = True
 
 _C.MODEL.DEPTH_ENCODER = CN()
+_C.MODEL.DEPTH_ENCODER.compile_backbone = False
 _C.MODEL.DEPTH_ENCODER.cnn_type = "VlnResnetDepthEncoder"
 _C.MODEL.DEPTH_ENCODER.output_size = 128
 # type of resnet to use

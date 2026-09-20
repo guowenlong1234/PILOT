@@ -21,6 +21,7 @@ class VlnResnetDepthEncoder(nn.Module):
         normalize_visual_inputs=False,
         trainable=False,
         spatial_output: bool = False,
+        compile_backbone: bool = False,
     ):
         super().__init__()
         self.visual_encoder = ResNetEncoder(
@@ -49,6 +50,9 @@ class VlnResnetDepthEncoder(nn.Module):
             del ddppo_weights
             self.visual_encoder.load_state_dict(weights_dict, strict=True)
 
+        if compile_backbone:
+            from .compiled_visual import compile_visual_backbone
+            compile_visual_backbone(self.visual_encoder, input_key="depth")
         self.spatial_output = spatial_output
 
         if not self.spatial_output:

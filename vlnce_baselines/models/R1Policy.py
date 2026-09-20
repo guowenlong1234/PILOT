@@ -178,6 +178,7 @@ class ETP(Net):
         ], "DEPTH_ENCODER.cnn_type must be VlnResnetDepthEncoder"
         self.depth_encoder = VlnResnetDepthEncoder(
             observation_space,
+            compile_backbone=bool(getattr(model_config.DEPTH_ENCODER, "compile_backbone", False)),
             output_size=model_config.DEPTH_ENCODER.output_size,
             checkpoint=model_config.DEPTH_ENCODER.ddppo_checkpoint,
             backbone=model_config.DEPTH_ENCODER.backbone,
@@ -204,6 +205,9 @@ class ETP(Net):
             self.rgb_encoder = RaeDinov2RgbEncoder(
                 model_config.RGB_ENCODER.model_dir,
                 self.device,
+                compile_backbone=bool(getattr(model_config.RGB_ENCODER, "compile_backbone", False)),
+                async_finite_checks=bool(getattr(model_config.RGB_ENCODER, "async_finite_checks", False)),
+                retain_intermediate_states=bool(getattr(model_config.RGB_ENCODER, "retain_intermediate_states", True)),
                 precision=getattr(
                     model_config.RGB_ENCODER,
                     "precision",

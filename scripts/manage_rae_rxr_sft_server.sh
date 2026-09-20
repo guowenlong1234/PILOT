@@ -5,7 +5,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ACTION=${1:-status}
 RUN_ID=${ETPR1_RXR_SFT_RUN_ID:-$(date +%Y%m%dT%H%M%S)}
 
-export ETPR1_R2R_SFT_CONFIG_FILE=run_rxr/iter_train_rae_dino_sft.yaml
+export ETPR1_R2R_SFT_CONFIG_FILE=${ETPR1_RXR_SFT_CONFIG_FILE:-run_rxr/iter_train_rae_dino_sft.yaml}
 export ETPR1_R2R_SFT_EXP_NAME=${ETPR1_RXR_SFT_EXP_NAME:-etpr1_rxr_rae_dino_sft}
 export ETPR1_R2R_SFT_OUTPUT_ROOT=${ETPR1_RXR_SFT_OUTPUT_ROOT:-data/logs/rae_dinov2_etpnav_cls_768/rxr_sft_formal}
 export ETPR1_R2R_SFT_ITERS=${ETPR1_RXR_SFT_ITERS:-30000}
