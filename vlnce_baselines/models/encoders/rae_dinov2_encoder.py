@@ -353,6 +353,15 @@ class RaeDinov2RgbEncoder(nn.Module):
             return features
         return features + self.cls_residual_mlp(features)
 
+    def _check_finite(self, value, message):
+        finite = torch.isfinite(value).all()
+        if value.is_cuda and getattr(self, "async_finite_checks", False):
+            # Detect bad values on the same CUDA stream without synchronizing
+            # the host after every frozen encoder / residual-MLP forward.
+            torch._assert_async(finite, message)
+        elif not finite:
+            raise FloatingPointError(message)
+
     def forward(self, observations: Mapping[str, torch.Tensor]):
         if not isinstance(observations, Mapping):
             raise TypeError("RAE/DINOv2 observations must be a mapping")
@@ -375,12 +384,10 @@ class RaeDinov2RgbEncoder(nn.Module):
                 "RAE/DINOv2 CLS last dimension must be "
                 f"{self.output_size}, got {features.shape[-1]}"
             )
-        if not torch.isfinite(features).all():
-            raise FloatingPointError("RAE/DINOv2 CLS contains NaN or infinity")
+        self._check_finite(features, "RAE/DINOv2 CLS contains NaN or infinity")
 
         output = self._apply_cls_residual_mlp(features)
-        if not torch.isfinite(output).all():
-            raise FloatingPointError("RAE/DINOv2 CLS contains NaN or infinity")
+        self._check_finite(output, "RAE/DINOv2 CLS contains NaN or infinity")
         return output
 
     def forward_with_patch_latents(

@@ -20,6 +20,7 @@ def main():
     cases = {'baseline':(6,2,False), 'parallel':(6,2,True),
              'baselinelean':(6,2,False), 'baselinecompile':(6,2,False),
              'baselinevisual':(6,2,False), 'env12visual':(12,1,True),
+             'baselineasync':(6,2,False), 'baselinevisualasync':(6,2,False),
              'env8serial':(8,1,False), 'env10serial':(10,1,False), 'env12serial':(12,1,False),
              'env8':(8,1,True), 'env10':(10,1,True), 'env12':(12,1,True),
              'env8lean':(8,1,True), 'env10lean':(10,1,True), 'env12lean':(12,1,True),
@@ -39,6 +40,10 @@ def main():
         if name.endswith('compile'):
             cmd.append('--compile-dino')
         if name.endswith('visual'):
+            cmd.extend(['--compile-dino','--compile-depth'])
+        if name.endswith('async'):
+            cmd.append('--async-finite')
+        if name == 'baselinevisualasync':
             cmd.extend(['--compile-dino','--compile-depth'])
         samples = []
         start = time.time()
