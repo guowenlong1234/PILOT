@@ -6,6 +6,8 @@ ETP-R1 是一个 VLN-CE 项目：让智能体在连续三维环境里，根据�
 
 ## Quick Start And Environment
 
+2026-09-20收尾：A/B/C已全部完成，B/C各6000步、24点完整开发集评价。最佳净改善原方案+24，A+27（4750×1.5），B+12（5000），C+19（5250）；暂无明确替换原方案的收益证据。恢复、采样顺序和最终权重/优化器审计通过。完整结论见 `docs/stage2-abc-comparison-20260917.md`，本地小型报告为 `data/logs/stage2_abc_report_20260917/`。
+
 2026-09-17下午：按用户要求执行A/B/C离线对照。`train_stage2_e24.py --variant B`只扩大完整候选决策监督；`--variant C`只让全部真实Top-5候选参与比较，future有效mask继续限制可修改动作。默认baseline不变；各实验的模型和损失配置均写入checkpoint/恢复合同。A采用既有4750/4000头的六档有界倍率；B/C各6000步，seed2，每250步评价，详见 `docs/stage2-abc-comparison-20260917.md`。
 
 2026-09-17：按用户新授权继续E24离线训练阶段，范围为正式训练入口、短训练/跨进程恢复验收、完整train训练及完整dev离线评价，暂不接回在线导航。继续使用本独立分支和双机自有环境，训练数据保持在训练机，开发数据保持在测评机。固定配置、验收和实际运行状态见 `docs/stage2-offline-training-operations-20260917.md`；下方“未启动训练”描述的是9月16日采集交付时的历史状态。
@@ -210,6 +212,8 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 - 测评机只有一张 RTX 3090 24GB。现有 ETPNav 任务占用 GPU 时，不得并行启动全量特征生成、预训练、SFT、GRPO 或完整评测，也不得擅自中断 ETPNav。
 
 ## Last Reviewed
+
+2026-09-20，完成A/B/C训练评价结果与`report_stage2_abc.py`审计，更新对比文档；训练计算仍是9月17日e90d700版本，没有追加训练或改变实验预算。
 
 2026-09-17，核查并实现 `stage2_training.py`、`stage2_evaluation.py` 和对应训练/恢复/评价/托管脚本，修复E24最终残差在混合精度下的索引写入类型。训练机39项、测评机30项相关检查通过；真实BF16连续20步与10+10步恢复逐位一致；完整dev零修正动作全部相同。正式离线训练与固定g=1开发评价的最终状态和证据见 `docs/stage2-offline-training-operations-20260917.md`。
 
