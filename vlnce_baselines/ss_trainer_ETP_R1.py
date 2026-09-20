@@ -2347,9 +2347,9 @@ class RLTrainer(BaseVLNCETrainer):
         current_goal_distances=None,
     ):
         if (
-            self.config.MODEL.task_type == 'rxr'
+            getattr(self.config.IL, 'parallel_rxr_teacher', False)
             and self.config.IL.expert_policy == 'ndtw'
-            and getattr(self.config.IL, 'parallel_rxr_teacher', False)
+            and self.config.MODEL.task_type == 'rxr'
         ):
             return self._parallel_rxr_teacher_action(
                 batch_gmap_vp_ids, batch_no_vp_left, is_train,
