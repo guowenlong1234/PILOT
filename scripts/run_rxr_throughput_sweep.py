@@ -13,6 +13,7 @@ def main():
     p.add_argument('--root', required=True)
     p.add_argument('--checkpoint', required=True)
     p.add_argument('--updates', type=int, default=18)
+    p.add_argument('--audit', action='store_true')
     p.add_argument('--cases', default='baseline,parallel,env8,env10,env12')
     args = p.parse_args()
     root = Path(args.root)
@@ -25,7 +26,7 @@ def main():
              'env8':(8,1,True), 'env10':(10,1,True), 'env12':(12,1,True),
              'env8lean':(8,1,True), 'env10lean':(10,1,True), 'env12lean':(12,1,True),
              'env11lean':(11,1,True), 'env11visual':(11,1,True),
-             'env12visualasync':(12,1,True),
+             'env12visualasync':(12,1,True), 'env11visualasync':(11,1,True),
              'env8compile':(8,1,True), 'env10compile':(10,1,True), 'env12compile':(12,1,True)}
     summary = []
     for name in args.cases.split(','):
@@ -47,6 +48,8 @@ def main():
             cmd.append('--async-finite')
         if name.endswith('visualasync'):
             cmd.extend(['--compile-dino','--compile-depth'])
+        if args.audit:
+            cmd.append('--audit')
         samples = []
         start = time.time()
         with (root/f'{name}.log').open('w') as log:

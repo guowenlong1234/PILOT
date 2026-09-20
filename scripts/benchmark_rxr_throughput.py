@@ -44,6 +44,7 @@ def main():
             original_init(self, *a, **kw)
             self.async_finite_checks = args.async_finite
             original_forward = self.backbone.forward
+            self.backbone._benchmark_eager_forward = original_forward
             def forward(*a, **kw):
                 if args.lean_dino or args.compile_dino:
                     kw['output_hidden_states'] = False
@@ -64,6 +65,7 @@ def main():
         original_depth_init = VlnResnetDepthEncoder.__init__
         def depth_init(self, *a, **kw):
             original_depth_init(self, *a, **kw)
+            self.visual_encoder._benchmark_eager_forward = self.visual_encoder.forward
             compiled = torch.compile(self.visual_encoder.forward, dynamic=True)
             def dispatch(observations):
                 torch._dynamo.mark_static(observations['depth'], [1, 2, 3])
@@ -117,7 +119,32 @@ def main():
     original_interval = module.RLTrainer._train_interval
     def interval(self, *a, **kw):
         trainer[0] = self
+        encoder_parity = {}
         if args.audit:
+            net = getattr(self.policy.net, 'module', self.policy.net)
+            generator = torch.Generator().manual_seed(20260920)
+            for label, encoder, shape, key in [
+                ('rgb', net.rgb_encoder.backbone, (12,3,224,224), None),
+                ('depth', net.depth_encoder.visual_encoder, (12,256,256,1), 'depth'),
+            ]:
+                eager = getattr(encoder, '_benchmark_eager_forward', None)
+                if eager is None:
+                    continue
+                encoder.eval()
+                value = torch.rand(shape, generator=generator).to(self.device)
+                value = {key:value} if key else value
+                with torch.no_grad(), torch.autocast('cuda'):
+                    if key:
+                        reference, actual = eager(value), encoder(value)
+                    else:
+                        reference = eager(value, output_hidden_states=False).last_hidden_state
+                        actual = encoder(value, output_hidden_states=True).last_hidden_state
+                reference, actual = reference.float(), actual.float()
+                relative = ((reference-actual).norm()/reference.norm().clamp_min(1e-8)).item()
+                encoder_parity[label] = dict(relative_l2=relative,
+                    max_abs=(reference-actual).abs().max().item(),
+                    finite=torch.isfinite(actual).all().item())
+                assert relative < 0.002 and encoder_parity[label]['finite'], encoder_parity
             frozen_before = digest((n,p) for n,p in self.policy.named_parameters() if not p.requires_grad)
             mapping_before = digest((n,p) for n,p in self.policy.named_parameters() if 'cls_residual_mlp' in n)
         torch.cuda.synchronize(rank)
@@ -137,6 +164,7 @@ def main():
                                     cuda=torch.version.cuda,transformers=transformers.__version__,
                                     habitat=habitat.__version__,habitat_sim=habitat_sim.__version__))
         if args.audit:
+            report['encoder_parity'] = encoder_parity
             report['audit'] = dict(
                 frozen_unchanged=frozen_before == digest((n,p) for n,p in self.policy.named_parameters() if not p.requires_grad),
                 mapping_updated=mapping_before != digest((n,p) for n,p in self.policy.named_parameters() if 'cls_residual_mlp' in n),
