@@ -59,23 +59,28 @@ def validate_parity(base,zero,repeat=None):
     left,right=trace(base),trace(zero)
     if not left:raise ValueError('empty baseline trace')
     tolerance=0.
-    if repeat is not None:
-        if computation_contract(base)!=computation_contract(repeat):raise ValueError('repeated baseline configuration differs')
-        if results(base)!=results(repeat):raise ValueError('repeated baseline navigation metrics differ')
-        tolerance=logit_error(left,trace(repeat))
+    repeats=[] if repeat is None else ([repeat] if isinstance(repeat,Path) else list(repeat))
+    baseline_traces=[left]
+    for reference in repeats:
+        if computation_contract(base)!=computation_contract(reference):raise ValueError('repeated baseline configuration differs')
+        if results(base)!=results(reference):raise ValueError('repeated baseline navigation metrics differ')
+        baseline_traces.append(trace(reference))
+    # Estimate the range from pure-baseline pairs only, never from E24 outputs.
+    for i,x in enumerate(baseline_traces):
+        for y in baseline_traces[:i]:tolerance=max(tolerance,logit_error(x,y))
     observed=logit_error(left,right)
     if observed>tolerance:raise ValueError(f'zero-gain logit difference {observed} exceeds baseline repeat {tolerance}')
     if results(base)!=results(zero):raise ValueError('zero-gain navigation metrics differ')
     return dict(status='passed',decisions=len(left),episodes=len(results(base)),
         exact_logits_actions_metrics=left==right,exact_actions_metrics=True,
         logits_max_abs_error=observed,logits_tolerance=tolerance,
-        baseline_repeat=str(repeat) if repeat is not None else None,
+        baseline_repeat=str(repeats[0]) if len(repeats)==1 else None,baseline_repeats=[str(r) for r in repeats],
         rule='float tolerance from same-source same-config baseline repeat; actions and metrics exact')
 
 
 def main():
     global OWNER
-    p=argparse.ArgumentParser();p.add_argument('--output',required=True);p.add_argument('--replay-report',required=True);p.add_argument('--resume',action='store_true');p.add_argument('--baseline-repeat');p.add_argument('--base-step',type=int,choices=[6400,9200],default=6400)
+    p=argparse.ArgumentParser();p.add_argument('--output',required=True);p.add_argument('--replay-report',required=True);p.add_argument('--resume',action='store_true');p.add_argument('--baseline-repeat');p.add_argument('--base-step',type=int,choices=[6400,9200],default=6400);p.add_argument('--extra-baseline-repeat',nargs='*',default=[])
     a=p.parse_args();out=Path(a.output).resolve();out.mkdir(parents=True,exist_ok=True)
     if any(out.iterdir()) and not a.resume:raise FileExistsError('use a fresh comparison directory or explicit --resume')
     OWNER=True
@@ -115,7 +120,8 @@ def main():
             if not frozen['comparison']['exact_match']:raise ValueError('model weights changed')
             if not read(out/name/'online/world_freeze.json')['exact_match']:raise ValueError('world weights changed')
         if name=='smoke_zero':
-            parity=validate_parity(out/'smoke_base',out/'smoke_zero',Path(a.baseline_repeat) if a.baseline_repeat else None)
+            references=([Path(a.baseline_repeat)] if a.baseline_repeat else [])+[Path(p) for p in a.extra_baseline_repeat]
+            parity=validate_parity(out/'smoke_base',out/'smoke_zero',references)
             decisions=[json.loads(s) for s in (out/name/'online/decisions.jsonl').read_text().splitlines()]
             if any(r['base_action']!=r['action'] or any(r['delta']) for r in decisions):raise ValueError('zero gain changed action')
             save(out/'parity.json',parity)

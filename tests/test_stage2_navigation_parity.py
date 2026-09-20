@@ -35,3 +35,13 @@ def test_repeated_baseline_must_match_configuration(tmp_path):
     p=json.loads((repeat/'provenance.json').read_text());p['seed']=9
     (repeat/'provenance.json').write_text(json.dumps(p))
     with pytest.raises(ValueError,match='configuration differs'):validate_parity(base,zero,repeat)
+
+
+def test_calibration_envelope_uses_only_baseline_pairs(tmp_path):
+    base=run(tmp_path/'base',[0.,1.]);low=run(tmp_path/'low',[0.,.9375]);high=run(tmp_path/'high',[0.,1.0625])
+    zero=run(tmp_path/'zero',[0.,1.125])
+    r=validate_parity(base,zero,[low,high])
+    assert r['logits_tolerance']==.125 and r['logits_max_abs_error']==.125
+    assert r['baseline_repeats']==[str(low),str(high)]
+    outlier=run(tmp_path/'outlier',[0.,1.25])
+    with pytest.raises(ValueError,match='exceeds'):validate_parity(base,outlier,[low,high])
