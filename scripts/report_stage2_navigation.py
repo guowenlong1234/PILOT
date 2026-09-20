@@ -15,7 +15,9 @@ def main():
     p=argparse.ArgumentParser();p.add_argument('root');p.add_argument('--output',required=True);a=p.parse_args()
     root=Path(a.root).resolve();out=Path(a.output).resolve()
     state=read(root/'pipeline.json');assert state['status']=='completed' and state['exit_code']==0
-    assert read(root/'parity.json')['exact_logits_actions_metrics']
+    parity=read(root/'parity.json')
+    assert parity['status']=='passed' and parity.get('exact_actions_metrics',parity['exact_logits_actions_metrics'])
+    assert parity.get('logits_max_abs_error',0)<=parity.get('logits_tolerance',0)
     with gzip.open('data/datasets/R2R_VLNCE_v1-3_preprocessed_xlmr/val_unseen/val_unseen.json.gz','rt') as f:
         scenes={str(ep['episode_id']):str(ep['scene_id']) for ep in json.load(f)['episodes']}
     runs={};sources={}

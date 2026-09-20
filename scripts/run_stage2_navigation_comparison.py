@@ -1,6 +1,7 @@
 """Finite baseline / zero-gain parity / selected-E24 navigation evaluation."""
 import argparse
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -31,9 +32,50 @@ def trace(path):
     return values
 
 
+def logit_error(left,right):
+    if left.keys()!=right.keys(): raise ValueError('trace coverage differs')
+    maximum=0.
+    for key,x in left.items():
+        y=right[key]
+        if x['action']!=y['action']: raise ValueError('navigation action changed')
+        if len(x['logits'])!=len(y['logits']): raise ValueError('candidate count differs')
+        for a,b in zip(x['logits'],y['logits']):
+            if math.isfinite(a) and math.isfinite(b): maximum=max(maximum,abs(a-b))
+            elif a!=b: raise ValueError('nonfinite logit mask differs')
+    return maximum
+
+
+def computation_contract(path):
+    p=read(path/'provenance.json')
+    fields=('stage1_sha256','assets','commit','split','seed','environments','compile','episode_ids')
+    c=read(path/'launch.json')['command'];c=c[c.index('run.py')+1:]
+    options=dict(zip(c[::2],c[1::2]))
+    for key in ('RESULTS_DIR','TENSORBOARD_DIR','CHECKPOINT_FOLDER','MODEL.STAGE2_COLLECT.output','MODEL.STAGE2_COLLECT.provenance'):
+        options.pop(key,None)
+    return dict(provenance={k:p[k] for k in fields},options=options)
+
+
+def validate_parity(base,zero,repeat=None):
+    left,right=trace(base),trace(zero)
+    if not left:raise ValueError('empty baseline trace')
+    tolerance=0.
+    if repeat is not None:
+        if computation_contract(base)!=computation_contract(repeat):raise ValueError('repeated baseline configuration differs')
+        if results(base)!=results(repeat):raise ValueError('repeated baseline navigation metrics differ')
+        tolerance=logit_error(left,trace(repeat))
+    observed=logit_error(left,right)
+    if observed>tolerance:raise ValueError(f'zero-gain logit difference {observed} exceeds baseline repeat {tolerance}')
+    if results(base)!=results(zero):raise ValueError('zero-gain navigation metrics differ')
+    return dict(status='passed',decisions=len(left),episodes=len(results(base)),
+        exact_logits_actions_metrics=left==right,exact_actions_metrics=True,
+        logits_max_abs_error=observed,logits_tolerance=tolerance,
+        baseline_repeat=str(repeat) if repeat is not None else None,
+        rule='float tolerance from same-source same-config baseline repeat; actions and metrics exact')
+
+
 def main():
     global OWNER
-    p=argparse.ArgumentParser();p.add_argument('--output',required=True);p.add_argument('--replay-report',required=True);p.add_argument('--resume',action='store_true')
+    p=argparse.ArgumentParser();p.add_argument('--output',required=True);p.add_argument('--replay-report',required=True);p.add_argument('--resume',action='store_true');p.add_argument('--baseline-repeat')
     a=p.parse_args();out=Path(a.output).resolve();out.mkdir(parents=True,exist_ok=True)
     if any(out.iterdir()) and not a.resume:raise FileExistsError('use a fresh comparison directory or explicit --resume')
     OWNER=True
@@ -63,12 +105,10 @@ def main():
             if not frozen['comparison']['exact_match']:raise ValueError('model weights changed')
             if not read(out/name/'online/world_freeze.json')['exact_match']:raise ValueError('world weights changed')
         if name=='smoke_zero':
-            left,right=trace(out/'smoke_base'),trace(out/'smoke_zero')
-            if not left or left!=right:raise ValueError('zero-gain base actions/logits differ')
-            if results(out/'smoke_base')!=results(out/'smoke_zero'):raise ValueError('zero-gain navigation metrics differ')
+            parity=validate_parity(out/'smoke_base',out/'smoke_zero',Path(a.baseline_repeat) if a.baseline_repeat else None)
             decisions=[json.loads(s) for s in (out/name/'online/decisions.jsonl').read_text().splitlines()]
             if any(r['base_action']!=r['action'] or any(r['delta']) for r in decisions):raise ValueError('zero gain changed action')
-            save(out/'parity.json',dict(status='passed',decisions=len(left),episodes=16,exact_logits_actions_metrics=True))
+            save(out/'parity.json',parity)
     left,right=results(out/'full_base'),results(out/'full_best')
     if set(left)!=set(right) or len(left)!=1839:raise ValueError('full comparison coverage differs')
     metrics={key:dict(base=sum(r[key] for r in left.values())/len(left),
