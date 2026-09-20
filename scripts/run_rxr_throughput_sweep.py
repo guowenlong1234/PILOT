@@ -24,6 +24,8 @@ def main():
              'env8serial':(8,1,False), 'env10serial':(10,1,False), 'env12serial':(12,1,False),
              'env8':(8,1,True), 'env10':(10,1,True), 'env12':(12,1,True),
              'env8lean':(8,1,True), 'env10lean':(10,1,True), 'env12lean':(12,1,True),
+             'env11lean':(11,1,True), 'env11visual':(11,1,True),
+             'env12visualasync':(12,1,True),
              'env8compile':(8,1,True), 'env10compile':(10,1,True), 'env12compile':(12,1,True)}
     summary = []
     for name in args.cases.split(','):
@@ -43,7 +45,7 @@ def main():
             cmd.extend(['--compile-dino','--compile-depth'])
         if name.endswith('async'):
             cmd.append('--async-finite')
-        if name == 'baselinevisualasync':
+        if name.endswith('visualasync'):
             cmd.extend(['--compile-dino','--compile-depth'])
         samples = []
         start = time.time()
