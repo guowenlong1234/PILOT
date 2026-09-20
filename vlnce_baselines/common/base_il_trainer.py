@@ -852,7 +852,7 @@ class BaseVLNCETrainer(BaseILTrainer):
         torch.cuda.set_device(self.device)
         if world_size > 1:
             distr.init_process_group(backend='nccl', init_method='env://')
-            self.device = self.config.TORCH_GPU_IDS[self.local_rank]
+            self.device = torch.device("cuda", int(self.config.TORCH_GPU_IDS[self.local_rank]))
             torch.cuda.set_device(self.device)
             self.config.defrost()
             self.config.TORCH_GPU_ID = self.config.TORCH_GPU_IDS[self.local_rank]
