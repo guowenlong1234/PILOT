@@ -51,7 +51,7 @@ def main():
     draws=np.random.default_rng(2).integers(len(names),size=(10000,len(names)))
     estimates=totals[draws].sum(1)/counts[draws].sum(1)[:,None]
     intervals={k:np.quantile(estimates[:,j],[.025,.975]).tolist() for j,k in enumerate(keys)}
-    result=dict(status='passed',comparison=comparison,source_files=sources,online=online,scenes=per_scene,
+    result=dict(status='passed',comparison=comparison,source_files=sources,online=online,scenes=per_scene,parity=parity,
         paired_scene_bootstrap=dict(scenes=len(names),samples=10000,seed=2,ci95=intervals),
         limitation='One fixed model and seed on the development set; 11 scene clusters, intervals do not correct head selection.')
     out.mkdir(parents=True,exist_ok=True);(out/'summary.json').write_text(json.dumps(result,indent=2,ensure_ascii=False)+'\n')
@@ -67,7 +67,8 @@ def main():
         '## 实际导航耗时','']
     for name,label in [('full_base','一阶段'),('full_best','一阶段+E24')]:
         t=comparison['timing'][name];lines.append(f"- {label}：{t['elapsed_seconds']/60:.2f}分钟，平均{t['seconds_per_episode']:.3f}秒/路线。")
-    lines+=['','耗时包含首次预测加载/编译和真实模拟器运行，不是纯评分头稳态延迟。','',
+    lines+=['',f"零倍率门控：动作与导航指标完全一致；最大分数差{parity.get('logits_max_abs_error',0):.8f}，独立重复基线容差{parity.get('logits_tolerance',0):.8f}。",'',
+        '耗时包含首次预测加载/编译和真实模拟器运行，不是纯评分头稳态延迟。','',
         '区间按11个场景成组配对重采样；场景数量有限，且开发集已参与离线选点，不能作为独立测试或多随机种子结论。', '',
         '每场景差值、逐路线接管/未来有效性诊断、运行配置与文件校验值保存在summary.json及远端原始产物中。']
     (out/'report.md').write_text('\n'.join(lines)+'\n');print(json.dumps(dict(status='passed',output=str(out))))

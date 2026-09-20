@@ -60,3 +60,16 @@ bash scripts/rgb_only_optimization_runtime.sh eval -m pytest -q \
   tests/test_ghost_concat_persistent.py tests/test_stage2_online.py \
   tests/test_ghost_concat_trainer.py
 ```
+
+### 按独立重复基线确定浮点容差
+
+进一步直接比较`geometry_baseline_check`与`navigation_v2_geometry/smoke_base`：二者均为c259182，资产、完整输入配置（剔除输出路径）、环境数、种子、16路线清单完全相同；113步动作和全部路线指标相同，但分数最大绝对差仍为0.003911018371582031。因此现有证据已表明：纯基线跨运行也有该量级浮点波动，不能把历史差异唯一归因于新增评分头。
+
+按原训练计划步骤4的规定，1c0fb20将浮点门控改为独立重复纯基线实测范围：先验证重复基线计算合同一致、动作和指标完全一致，再用其最大分数差作为上限。零倍率动作、候选数、非有限值掩码、导航指标仍须完全一致；所有实际修正还须严格为零，不接受用分数容差掩盖动作变化。
+
+V2零倍率实测最大分数差0.00103759765625，小于重复基线上限0.003911018371582031；113个动作与16条路线指标完全一致，门控通过。`parity.json`明确记录`exact_logits_actions_metrics=false`、`exact_actions_metrics=true`及测量值，不冒称逐位一致。新增门控测试验证越界、动作变化、导航指标变化、重复基线配置变化均被拒绝；与几何测试共9项退出0，日志`parity_gate_tests.log`。
+
+V2已通过显式`--resume --baseline-repeat data/logs/stage2_online_20260920/geometry_baseline_check`继续队列，复用V2已完成的两项短测，接着执行最佳倍率短测与两组完整评测。最新启动记录为`navigation_v2_geometry_resume1.json`；仍以V2的`pipeline.json`为准。正式运行版本为1c0fb20，几何计算修复为c259182，头权重与倍率未变。
+
+
+V2三项短程检查最终全部通过，最佳倍率短测退出0（进程耗时128.69秒）；队列已进入新的`full_base`。已核对进程存活、日志增长和GPU计算负载，随后自动运行同版本`full_best`。旧V1数值不进入本轮配对汇总。用户此前要求长测评期间先退出，因此本轮交付为修复、门控与后台重跑启动，完整导航效果结论仍待V2两组完成。
