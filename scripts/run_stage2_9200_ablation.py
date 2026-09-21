@@ -33,6 +33,24 @@ def required_capacity(estimates, pending):
     return sum(estimates[name] for name in pending)*1.25+40*GIB
 
 
+def publish_evaluation_index(index, report, checkpoint, step):
+    evaluation=read(report)
+    if evaluation.get('status')!='complete' or len(evaluation.get('results',[]))!=1:
+        raise ValueError(f'step {step}: incomplete evaluator report')
+    payload=dict(status='completed',exit_code=0,step=step,
+        report_file=Path(report).name,report_sha256=sha(report),head_sha256=sha(checkpoint))
+    save(Path(index),payload)
+    return payload
+
+
+def training_command(train, target, mode):
+    if mode not in ('full','none'):raise ValueError('invalid future mode')
+    return ['scripts/train_stage2_e24.py',str(train),'--output',str(target),
+        '--future-mode',mode,'--variant','baseline','--precision','bf16','--seed','2',
+        '--batch-size','32','--lr','2e-5','--max-steps','6000','--max-epochs','100',
+        '--save-every','250','--log-every','20']
+
+
 def record_pipeline_failure(argv, exc):
     try:
         index=argv.index('--output')
@@ -134,10 +152,7 @@ def main():
         target=out/mode/'train'
         if not (out/'stages'/('train_'+mode+'.json')).exists() and shutil.disk_usage(out).free<40*1024**3:
             raise OSError('need 40GiB free before paired training stage')
-        worker('train_'+mode,['scripts/train_stage2_e24.py',str(train),'--output',str(target),
-               '--future-mode',mode,'--variant','baseline','--precision','bf16','--seed','2',
-               '--batch-size','32','--lr','2e-5','--max-steps','6000','--max-epochs','100',
-               '--save-every','250','--log-every','20'],target/'status.json')
+        worker('train_'+mode,training_command(train,target,mode),target/'status.json')
         status=read(target/'status.json')
         if status['status']!='completed' or status['step']!=6000:raise ValueError('training budget incomplete')
         for step in range(250,6001,250):
@@ -146,8 +161,8 @@ def main():
                    '--checkpoints',str(target/f'head_step_{step:06d}.pt'),'--report',str(report),
                    '--gains','1','--amp','bf16','--num-workers','0','--batch-size','16',
                    *(['--verify-hashes'] if step==250 else [])],report)
-            save(out/mode/'eval'/f'step_{step:06d}.json',dict(status='completed',exit_code=0,step=step,
-                 report_file=report.name,report_sha256=sha(report),head_sha256=sha(target/f'head_step_{step:06d}.pt')))
+            publish_evaluation_index(out/mode/'eval'/f'step_{step:06d}.json',report,
+                                     target/f'head_step_{step:06d}.pt',step)
     worker('report',['scripts/report_stage2_future_ablation.py','--output',str(out)],out/'final_report/summary.json')
     save(out/'pipeline.json',dict(status='completed',stage='offline_comparison',exit_code=0,updated_at=now()))
 
