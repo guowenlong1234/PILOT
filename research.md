@@ -1,5 +1,17 @@
 # Project Research
 
+2026-09-21工作区整理完成：最终归档训练机ETPNav59历史验证目录，累计归档15个，三机现各保留主目录、stage2-e24、recursive-future-rollout，共9个。用户明确保留递归前瞻；后续明确被主线包含或明确不采用的历史工作区可核对依赖并保存内容后自主归档，采用意向不明且无法判断的才询问。最终清单、归档位置与恢复说明见`docs/git-workspace-inventory-20260921.md`顶部。RxR训练及stage2采集进程仍存活。
+
+2026-09-21第四批归档：经用户确认，笔记本`ETP-R1-world-model-migration`归档完成。原分支和准确提交保留；32项额外文件及未提交research.md全文/补丁均保存并验证。当前剩10个工作区（笔记本3、训练机4、测评机3），远端未做修改。恢复入口见`docs/git-workspace-inventory-20260921.md`顶部。
+
+2026-09-21第三批归档：经用户逐项确认，三机`ETP-R1-grpo-stop-fix`归档完成，各机准确提交、原分支、非Git文件及独立运行环境均保留并核验。当前剩11个工作区（笔记本4、训练机4、测评机3），RxR训练与stage2采集进程仍存活。详细清单及恢复入口见`docs/git-workspace-inventory-20260921.md`顶部。
+
+2026-09-21第二批归档：经用户逐项确认，笔记本和训练机`ETP-R1-perf`归档完成，原性能分支、7个主线未包含的提交及训练机独立运行环境均保留。累计归档10个工作区，当前剩14个（笔记本5、训练机5、测评机4）；详情与恢复入口见`docs/git-workspace-inventory-20260921.md`。
+
+2026-09-21，经用户授权归档已被主线完整包含的五类8个工作区，剩余笔记本6、训练机6、测评机4，共16个。原分支及精确提交归档引用保留；非Git文件与链接保存在各机器工程父目录的`ETP-R1-workspace-archives/20260921/`。归档清单、恢复方法和验证结果见`docs/git-workspace-inventory-20260921.md`顶部；其余历史线等待逐个讨论，未处理。
+
+2026-09-21 Git工作区盘点：三机共24个已注册工作区（笔记本9、训练机11、测评机4）。当前实际主线为`feature/e24-joint-sft`，二阶段独立开发线为`feature/stage2-e24-offline`；训练机主目录正在运行RxR，测评机stage2目录正在采集。已合入、历史独立分支、未提交内容与同步差异见`docs/git-workspace-inventory-20260921.md`。本次未删除或同步工作区，未改变任务进程。
+
 ## Project Goal
 
 ETP-R1 是一个 VLN-CE 项目：让智能体在连续三维环境里，根据自然语言指令导航到目标位置。代码包含预训练、在线 SFT、在线 RFT/GRPO、R2R-CE 和 RxR-CE 评测流程。
@@ -13,6 +25,24 @@ ETP-R1 是一个 VLN-CE 项目：让智能体在连续三维环境里，根据�
 2026-09-20晚，已在训练机双卡启动最新RxR基座2200步的完整val_unseen测评，11006条guide路线、四语言，两卡各5503条、每卡6环境。采用原RxR无滑动及control回退规则，模型贪心选动作；首次双卡设备类型错误已修复为torch.device。18:01监控累计完成293条，两卡正常、无新报错；初估19:20左右完成，预留至19:50。入口 `scripts/run_rxr_full_eval_server.sh`，日志与结果位置见 `docs/rxr-full-evaluation-20260920.md`；训练仍停止。
 
 2026-09-20，完成训练机RxR吞吐优化：原长训练已停止，2200步模型/恢复状态保留。最终每卡12环境×累积1次、总批量24，采用冻结视觉编译、并行教师查询、异步有限值检查及导航中间结果重算；教师动作采样概率和原衰减曲线不变。双卡50步同条件复测动作吞吐45.986→54.739/秒（+19.03%），更新时间6.832→5.813秒（-14.91%），峰值显存约25.8GiB；79项回归通过、2项跳过。代码已合入主工作区，入口 `scripts/manage_rae_rxr_sft_fast_server.sh`，完整证据及使用边界见 `docs/rxr-throughput-optimization-20260920.md`。没有自动恢复长训练。
+
+2026-09-20，按用户要求准备并启动训练机上的 RxR DINO 导航基座，不使用世界模型或二阶段。已有基座链路及465000步DINO预训练权重齐全；本次显式关闭RAENWM/ACTIVE_LOOKAHEAD并补齐版本日志。训练机126项测试、真实小规模HDF5、单环境训练及恢复、总批量24的双卡短训练、R2R/RxR单回合检查均通过。正式参数沿用原RxR脚本的30000步、1.5e-5学习率、1000步预热和每200步保存；4卡×6环境改为2卡×6环境×2次累积。10:28首份200步模型和恢复状态验收通过，损失2.362，优化器/调度器均200步、无AMP溢出；任务继续运行。命令、证据与验收见 `docs/rxr-dino-baseline-training-20260920.md`。同日训练机已重启，默认驱动恢复为一致的580.178.04，不再使用旧580.173.02隔离库；此前记录为历史状态。
+
+2026-09-17，完成E24后续优化分析：见 `docs/stage2-e24-optimization-analysis-20260917.md`。复核独立stage2工作区首轮结果与真实代码，最佳4750步教师future有效组净+79、缺失组净-55；发现当前主要排序监督依赖教师future有效，以及候选存在/future有效mask耦合。完整dev CPU诊断得到现有±1边界下1008个错误的标签知情乐观纠正上界。只读对照ETPNav历史提交a197196，建议依次做有限校准、future增量对照、缺失监督、mask解耦、小模型与定向重采。本次仅分析与文档，没有启动新训练；历史一阶段与旧实验记录保留。
+
+2026-09-16，按用户要求形成完整二阶段实施计划：`docs/plans/2026-09-16-stage2-e24-training-plan.md`。明确步骤0—11的代码职责、全景q0快照、q1独立随机流、完整stage1冻结、预测future离线数据、容量估算、训练/恢复、有限选点与同机完整导航验证。默认建议6400基座，新增命令均标为待实现；本次仅交付计划，未实现或启动训练。
+
+2026-09-16，核查已完成的持久候选一阶段如何接入 ETPNav E24 二阶段，分析见 `docs/stage2-e24-migration-analysis-20260916.md`。两机持久组测评总表均 completed，各25点；SR最佳9200，SPL及SR+SPL最佳6400。当前 ghost_concat、冻结导航及 world_exact_select 与旧E24存在显式互斥；全景查询也没有旧E24需要的源快照接口，不能只开配置。建议冻结完整stage1、用当前预测future重新采集、复用E24网络和移动候选离线损失单独训练；旧Oracle分片、固定avg3加载、含STOP的旧native联合CE及优化器恢复合同不能直接沿用。仅更新分析文档，未启动训练或修改运行代码。
+
+2026-09-16，按用户要求删除笔记本、训练机、测评机的 `ETP-R1-prediction-adapter` 独立工作区及三机本地/中央仓库的 `feature/prediction-cls-adapter` 分支，未合入主工作区。该实验测试和训练完成，但同机适配前后SR为64.0566%/63.8390%、SPL为54.3754%/54.2389%，未证实适配器收益。产物与报告保留：训练机 `/mnt/data2tb/ETP-R1_data/experiments/prediction_cls_adapter_20260916/`；测评机 `/home/a6000/gwl/ETP-R1/data/logs/prediction_cls_adapter_20260916/`（从已删除工作区迁入，模型在 `adapter_inputs/`）。两端的 `workspace_archive/report.md` 和 `results.json` 保存最终实验记录；历史命令中的工作区路径保持原样。源码历史提交为 `ed948f649042467f404ddd5b9708a139f74026ff`，对应分支已删除。
+
+2026-09-16 只读核查：持久状态组 `ghost_concat_persistent_compiled_10k_20260911` 双机全量测评已完成，训练机于9月15日10:18:48、测评机于10:50:40结束（北京时间）。两份总表均为 completed；合并覆盖200至10000步全部50点，逐点episode JSON均为1839条，manifest均为completed且退出码0。成功率最佳9200步：SR64.0566%、SPL54.3754%、nDTW66.7336%、距离目标4.0757m、路径12.2549m；SPL最佳6400步：SR63.6215%、SPL55.2559%；最后10000步：SR62.3709%、SPL53.5604%。50点平均SR62.8070%、SPL54.0251%；仅1点SR超过历史14200基线，所有点SPL均低于该基线，尚无稳定提升证据。两机均未发现本组运行进程，GPU空闲；训练机默认NVML仍版本不匹配，使用既有隔离580.173.02库只读查询成功。证据为两机实验根的eval_summary.json、50份episode结果及manifest、eval_supervisor.log；未修改远端任务或产物。下方9月14日记录为历史状态。
+
+2026-09-14，按用户要求启动持久状态组双机全量测评：训练机GPU0负责400、800……10000，测评机负责200、600……9800，各25点、每点1839条路线。两边已实际推进。训练机因系统驱动升级未重启导致EGL失败，最终用项目内解压的匹配580.173.02用户态库恢复，未修改系统；下次重启后须重新核对。精确命令、交付和状态路径见 `docs/persistent-parallel-evaluation-20260914.md`。下方“尚无全量结果”是启动前的核查结论。
+
+2026-09-14 只读核查：训练机 `ghost_concat_persistent_compiled_10k_20260911` 已于9月12日15:13左右完成10000步，50份模型齐全，但尚无全量测评结果。测评机最新完成的是 `ghost_concat_direct_compiled_10k_20260909`，9月11日20:25完成50点、每点1839条R2R val_unseen；成功率最佳4600步为63.9478%/SPL54.1082%，最后10000步为62.2621%/53.6175%。相对历史基线的成功率峰值仅净多4条且SPL下降，不能称为稳定提升。证据与基线比较见 `docs/latest-evaluation-status-20260914.md`。
+
+2026-09-11 14:31，真实GPU验证通过后，持久候选状态以 `1093ee8` 合入当前 `feature/e24-joint-sft` 并同步训练机主工作区，启动 `ghost_concat_persistent_compiled_10k_20260911`。从原始14200基座重新训练10000步，每200步保存，双卡总批量8；除持久状态模式和输出路径外，参数与9月9日实验一致。产物位于训练机数据盘；测评机继续旧实验队列。启动记录见 `docs/persistent-ghost-compiled-10k-operations-20260911.md`。
 
 2026-09-11，持久候选状态已在训练机独立工作区通过真实单卡更新、双卡总批量8更新、第2步恢复至第4步、冻结权重审计及R2R四路线/RxR单路线验证。实际覆盖跨步无预测保留；展开配置核对，长训相对9月9日实验仅改变候选记忆模式，其他计算参数一致。详细证据见 `docs/persistent-ghost-gpu-validation-20260911.md`。下方9月10日GPU待验收记录是历史状态。
 
@@ -58,7 +88,7 @@ README 原始说明要求创建 `etpr1` conda 环境，核心环境为 Python 3.
 - `pretrain_src/`: 预训练数据、模型和脚本。
 - `precompute_img_features/`: 图像/深度特征预计算脚本。
 - `paper/`: 论文专用工作区；`drafts/` 存放初稿，`figures/`、`tables/`、`references/` 和 `notes/` 分别存放图片、表格、引用材料与写作笔记。
-- `docs/paper-mainline.md`: 2026-08-31 确认的论文主线，说明双阶段候选前瞻、预测状态引导查询、受约束计算，以及已实现方法与计划机制的边界。当前指定写作稿为 `paper/drafts/TopoForesight_TASE_初稿骨架.before-related-work.md`；其标题、摘要和引言使用 PILOT，方法及后文仍使用 TopoForesight，名称与贡献组织尚待统一，不能仅凭文件名判断正文版本。
+- `docs/paper-mainline.md`: 2026-08-31 确认的论文主线，说明双阶段候选前瞻、预测状态引导查询、受约束计算，以及已实现方法与计划机制的边界。当前指定写作稿为 `paper/drafts/TopoForesight_TASE_初稿骨架.before-related-work.md`；标题、摘要和引言使用 PILOT；2026-09-14 已完成 III/IV 方法与训练初稿并采用 PILOT，实验及后文仍有 TopoForesight 旧名和占位。独立方法版本为 `paper/drafts/PILOT_方法初稿_v1_20260914.md`，不能仅凭原文件名判断正文版本。
 - `copy_extra_files.py`: 将额外数据、checkpoint 等资源复制到项目目录；内含可选的 Habitat 数据软链接逻辑。
 
 ## Core Scripts And Entry Points
@@ -81,6 +111,8 @@ README 原始说明要求创建 `etpr1` conda 环境，核心环境为 Python 3.
 
 ## Important Modules And Functions
 
+- 2026-09-11，持久候选状态已由 `1093ee8` 合入主工作区 `feature/e24-joint-sft`。`ghost_concat_fusion.py` 与 `GraphMap.write_ghost_concat_state` 支持把融合结果写回候选图状态：先按真实观测次数聚合旧融合状态与新观测，再加预测拼接残差，预测不增加观测次数；无预测时保留聚合状态，跨步保留梯度、每段 rollout 新建图。这不同于历史临时融合实验，也不同于第二阶段的原始 q0 预测记录。
+- 持久状态配置为 `run_r2r/iter_train_rae_dino_ghost_concat_persistent.yaml`，第二阶段关闭、GRPO 仍拒绝 ghost_concat。真实 GPU 更新、恢复和短导航验证记录见 `docs/persistent-ghost-gpu-validation-20260911.md`，启动记录见 `docs/persistent-ghost-compiled-10k-operations-20260911.md`。论文按完整双层结构组织，但不能以这一单阶段配置宣称完整组合已联合验证。
 - 当前原生 CLS 世界模型入口配置为 `configs/nwm/raenwm_mp3d_fresh_cls.yaml`：冻结 DINOv2 表征上的 `CDiT-B/2` 条件生成，联合预测 CLS+256 patch，采用线性路径速度场/流匹配和欧拉采样。`runtime.py` 禁用 RGB 解码，但不能因此将其归类为直接回归式 JEPA；技术定位与原始 RAE-NWM 论文差异见 `paper/notes/world-model-landscape-and-section-b-20260905.md`。
 - `vlnce_baselines/ss_trainer_ETP_R1.py`: SFT/监督训练相关 trainer。
 - `vlnce_baselines/GRPO_trainer_ETP_R1.py`: GRPO/RFT 相关 trainer。
@@ -91,6 +123,20 @@ README 原始说明要求创建 `etpr1` conda 环境，核心环境为 Python 3.
 - `habitat_extensions/habitat_simulator.py`: 对 Habitat-Sim simulator 的项目定制封装。
 
 ## Data, Configs, And Artifacts
+
+论文主图当前以 `paper/figures/pilot-main-v10-editable.drawio` 为唯一编辑主版本，包含用户手工修改；不可用旧 HTML/SVG 构建脚本覆盖。2026-09-14 已整理 Input 栏的输入、编码器和特征输出，直接用本机 draw.io 导出验证；版本变更记录见 `paper/notes/pilot-svg-redraw-v10-20260914.md`，备份在 `paper/figures/archive/`。
+
+2026-09-20，核对主工作区评分器及独立 `ETP-R1-stage2-e24` 工作区的预测、评分和部署代码，整理右侧第二阶段主图布局：上部画patch驱动的后继查询与共享世界模型，下部突出三轮“指令—未来融合／跨候选比较”，底部有界分数回加。详见 `paper/notes/pilot-stage2-main-figure-layout-20260920.md`；本轮仅分析，未修改draw.io。独立工作区新增的 `all_present` 候选上下文是可选消融，当前默认部署仍采用future有效掩码。
+
+同日后续按用户确认的简化方案，已将Stage 2核心直接加入上述draw.io主文件：三行候选内融合、共享语言输入、联合候选比较、整组反馈及×3 rounds，均为可编辑原生元素。当前仅画核心，未接入查询生成及最终分数支路。脚本 `paper/figures/add_stage2_core_native.py` 拒绝重复添加，备份位于archive；精修及验证见 `paper/notes/pilot-stage2-native-core-20260920.md`。
+
+同日17:25，按用户手工重画的最新版完成润色：当前Stage2采用紧凑三行特征包→融合→共用竖向Joint attention→三路输出及×N，无旧版反馈回路。统一字体、纯色填充和绑定端点的水平箭头，保留用户布局；具体备份及预览见上述原生核心记录。后续应以最新draw.io为准，不运行旧生成脚本重建。
+
+同日后续模块名称已改为Instruction–Future Fusion与Cross-Candidate Attention；17:45在重复框外接入Residual Scoring、有界δ、基础分数直通加号及最终s′=s+δ，保留用户的紧凑布局。最新细节见 `paper/notes/pilot-stage2-native-core-20260920.md`。
+
+2026-09-21，基于用户最新图稿（评分模块已手工改为Action Head），已原生补绘DINO-CWP、方向距离网格、q1查询和世界模型返回的未来特征分发支路；原717个元素未修改。备份、连接语义及导出验证见 `paper/notes/pilot-dino-cwp-native-20260921.md`。最新唯一编辑源仍为draw.io，不能用旧生成脚本覆盖。
+
+同日按用户要求表现递归前瞻深度，基于最新手绘连线增加D-step轨迹、预测patches到CWP的回路、终端z_{d*}标记；下方融合层数改标L。只读核对独立recursive-future-rollout工作区确认终端/最深有效层聚合，但其本地深度检查仅允许1/2/3，图以D表示而未写1–5已验证。详见 `paper/notes/pilot-lookahead-depth-20260921.md`。
 
 README 要求准备 Matterport3D 数据，目标结构是 `data/scene_datasets/mp3d/{scene}/{scene}.glb`。当前项目内 `data/scene_datasets/mp3d` 是软链接，指向本机已有数据 `/home/gwl/project/dataset/mp3d_unzipped/mp3d`，跟随软链接可看到 90 个 `.glb` 场景。
 
@@ -208,6 +254,22 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 ## Last Reviewed
 
 2026-09-20，为RxR吞吐优化复核训练机进程、原采样曲线、真实双卡性能及显存；主要检查 `ss_trainer_ETP_R1.py`、`R1Policy.py`、视觉编码器、快速配置及基准脚本。最终验证和所有候选结果见 `docs/rxr-throughput-optimization-20260920.md`。
+
+2026-09-15，为用户提供的主图补绘淡紫色 Stage 1，直接核对 `vlnce_baselines/nwm/ghost_concat_fusion.py` 和 `vlnce_baselines/nwm/active_lookahead/candidate_q0.py`：查询来自更新后的 ghost 位置，原节点特征与预测 raw CLS 拼接，经 MLP 形成残差后回填图节点输入；patch 不进入该融合模块。以 `paper/figures/pilot-stage1-inplace-v2.reference.png` 为底图使用 ImageGen，提示词为同名前缀 `.prompt.txt`。仅制作论文视觉稿，不涉及远端实验。
+
+2026-09-14，依据用户提供的网页版 GPT 参考图重绘可编辑论文主图：`paper/figures/pilot-main-v10-editable.html` 内嵌 SVG，提供原图对照、缩放、文字编辑与导出；独立源图为同名 `.svg`，构建脚本为 `paper/figures/pilot-main-v10-build.py`，参考图保存在 `paper/figures/pilot-main-v10.reference.png`。保留参考图的共享顶部和左右双色分区，按方法初稿校正共享冻结 W、q0/z0 与 q1/z1 接口、CLS 融合、patches 复用、Top-K 和有界评分残差。除观测缩略图外均为矢量元素；图示完整方法，不表示完整双层已联合验证。本轮仅在笔记本验证图稿页面，不涉及训练或远端资源。
+
+2026-09-14，按用户要求完成指定论文草稿 III 方法与 IV 训练方法的 v1 正文，原稿存入 `paper/drafts/archive/`，独立版本为 `paper/drafts/PILOT_方法初稿_v1_20260914.md`。核对持久融合、共享世界模型、q0/q1接口、交错候选比较、原生CLS调整监督、STOP隔离及冻结GRPO。写作边界和逐项检查见 `paper/notes/pilot-method-v1-writing-review-20260914.md`。额外发现在线评分头和native重算的基础分数归一化分别使用ghost集合与完整动作集合，记录为待核对项，未改算法。其他论文章节未改，未生成图片或运行实验。
+
+2026-09-11，用户认可 v4 网络图视觉风格，要求暂停生成，按双层全启用的完整形态梳理模块。核对当前主工作区 `21d8feb` 的感知/记忆、持久融合、共享世界模型、基础策略、旧第二阶段查询与评分、原生CLS适配和动作接口，形成 `paper/notes/pilot-module-boundaries-and-dataflow-20260911.md`。统一七个一级功能模块，细分第二层三个子模块，区分图状态、真实历史和q0预测记录；当前开关与上下文兼容差异仅放附录。未生成图片或运行实验。
+
+2026-09-10，为重新设计可解释的论文主图，逐段核对主工作区 `e4aa771` 的完整 rollout、建图、语言条件图评分、到达查询、拼接融合、后继查询与多轮候选比较，并只读核对持久状态分支 `ef7e046`。详细因果链与图示边界见 `paper/notes/pilot-architecture-reading-for-main-figure-20260910.md`。补充两点：第一层当前只为本步关联的有效 ghost 去重预测，不是每步重算整个图；当前 E24 实际动作路径通过 `stop_isolated_e24_actions` 保留基础 STOP，移动时在全部修正后 ghost 中选择。论文图应区分当前位置、ghost 到达 q0 与仅供评估的 q1，突出表示增强和指令条件候选比较。未运行实验或修改算法。
+
+2026-09-10，为论文双层主图核对指定草稿、`docs/paper-mainline.md`、ghost 拼接融合和第二阶段查询/评分入口，整理绘图目标至 `paper/notes/pilot-two-level-main-figure-brief-20260910.md`。图以“评分前改善候选表示、评分后选择性深入比较”为主线；按用户最新要求先由 ImageGen 生成样式图，认可后再制作可编辑源图。未修改论文正文、训练代码或远端任务。
+
+2026-09-10，补充按用户指定的 `feature/persistent-ghost-state` 核对最新实现：读取独立分支的融合模块、配置、第二阶段和GRPO入口及持久状态验证记录，使用 `git ls-remote` 确认中央分支与本地同为 `ef7e046`。旧记录中的“仅临时增强、不写回图”只适用于旧模式和此前2000步实验；最新可选模式写回融合状态。论文正文未改，未启动训练或测试；GPU验收状态取自仓库记录，未查询远端运行现场。
+
+2026-09-10，任务上下文：为继续论文写作熟悉本地工程。通读指定 Markdown 草稿、`docs/paper-mainline.md`、论文目录说明与学术写作要求，并核对 `ghost_concat_fusion.py`、独立配置及9月8—9日融合实现、结果和新长训练记录。相关工作 A/B/C 已有正文和32条参考文献；方法、训练、实验仍含待办与占位，PILOT/TopoForesight 名称尚未统一。后续写作须区分主线的双阶段方法与最新 ghost_concat 单阶段实验：后者仅临时增强导航图输入，不将预测写入原始图历史，独立配置关闭第二阶段，新结构尚未接入 GRPO，不能直接继承旧融合路径的缓存或训练描述。已完成2000步实验尚未支持稳定导航提升；9月9日晚直接渲染/编译版10000步任务仅有启动验收记录，本轮未连接远端确认后续进度。未修改论文正文或运行实验。
 
 2026-09-09 晚间，重启 `ghost_concat_direct_compiled_10k_20260909`：14200 基座、双卡总批量8、10000步、每200步同步测评，直接渲染/FP16/64批次上限/Inductor；保留选定合并版本，未引入静态条件缓存或导航SDPA。测评机专用容器离线安装G++并修复编译缓存目录后，7项相关测试和8环境8路线预检通过。正式第200步模型及恢复状态已保存，双端SHA一致，测评机已开始1839路线评测，训练继续推进。见 `docs/ghost-concat-direct-compiled-10k-operations-20260909.md`。
 

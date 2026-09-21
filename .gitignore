@@ -31,3 +31,16 @@ __pycache__/
 /paper_rewriting_output/**/*.docx
 /paper_rewriting_output/**/*.bak_fonts
 /paper_rewriting_output/final_paper/figures/*.png
+
+# Local diagnostic results and images.
+/docs/diagnostics/**/*.json
+/docs/diagnostics/**/*.png
+/docs/diagnostics/**/*.jpg
+/docs/diagnostics/**/*.html
+
+# Local paper writing and drawing assets (keep files, exclude from Git).
+/paper/
+/paper_rewriting_output/
+/docs/TopoForesight_*
+/docs/paper-mainline.md
+/pelican-bicycle.html
