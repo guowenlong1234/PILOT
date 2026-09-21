@@ -25,14 +25,16 @@ def main():
     p.add_argument('--episodes',type=int,default=-1);p.add_argument('--part',type=int,default=0);p.add_argument('--parts',type=int,default=1)
     p.add_argument('--base-step',type=int,choices=[6400,9200],default=6400)
     p.add_argument('--head',default='');p.add_argument('--gain',type=float,default=1.5)
+    p.add_argument('--compact-storage',action='store_true')
+    p.add_argument('--deployment-mode',choices=['legacy','native_9200'],default='legacy')
     p.add_argument('--trace',action='store_true');p.add_argument('--no-compile',action='store_true')
     p.add_argument('--dry-run',action='store_true');a=p.parse_args()
-    if a.base_step!=6400 and a.action not in ('baseline','online'):p.error('9200 is evaluation-only; collection remains pinned to6400')
+    if a.deployment_mode=='native_9200' and a.base_step!=9200:p.error('native_9200 requires base-step9200')
     if a.gpu not in ('0','1') or not 0<=a.part<a.parts or a.environments<1: p.error('invalid resources/partition')
     root=Path(a.output).resolve()
     if a.action in ('online','baseline') and root.exists() and any(root.iterdir()):
         raise FileExistsError('navigation comparison requires a new empty output directory')
-    if a.action=='online' and (a.split!='val_unseen' or a.gain not in (0.,1.5)):
+    if a.action=='online' and (a.split!='val_unseen' or a.gain not in ((0.,1.) if a.deployment_mode=='native_9200' else (0.,1.5))):
         raise ValueError('online experiment is fixed to val_unseen and gain0/1.5')
     root.mkdir(parents=True,exist_ok=True)
     with gzip.open(ROOT/f'data/datasets/R2R_VLNCE_v1-3_preprocessed_xlmr/{a.split}/{a.split}.json.gz','rt') as f: data=json.load(f)
@@ -60,8 +62,14 @@ def main():
         commit=commit,split=a.split,part=a.part,parts=a.parts,episode_ids=ids,seed=20260916,
         feature_space='raw_cls+normalized_patch_fp16',context_contract='stage2_panorama_q0_snapshot_v1',
         behavior='stage1_argmax',environments=a.environments,compile=not a.no_compile)
+    if a.compact_storage:
+        provenance['storage_format']='valid_future_only_v1'
     if a.base_step!=6400:
+        provenance['stage1_iteration']=a.base_step
+    if a.base_step!=6400 and a.action=='online' and a.deployment_mode=='legacy':
         provenance.update(stage1_iteration=a.base_step,head_training_base_sha256=BASE_SHA,transfer_mode='6400_to_9200',head_retrained=False)
+    if a.action=='online' and a.deployment_mode=='native_9200':
+        provenance.update(head_training_base_sha256=base_sha,transfer_mode='native_9200',head_retrained=True)
     if a.action=='online':
         provenance.update(behavior='stage2_argmax_stop_isolated',head_sha256=sha(a.head),gain=a.gain,residual_bound=1.)
     prov=root/'provenance.json'
@@ -102,7 +110,7 @@ def main():
     if a.action=='online':
         opts.update({'MODEL.STAGE2_ONLINE.enabled':True,'MODEL.STAGE2_ONLINE.output':str(root/'online'),
             'MODEL.STAGE2_ONLINE.head':str(Path(a.head).resolve()),'MODEL.STAGE2_ONLINE.head_sha256':provenance['head_sha256'],
-            'MODEL.STAGE2_ONLINE.transfer_mode':'6400_to_9200' if a.base_step==9200 else 'same',
+            'MODEL.STAGE2_ONLINE.transfer_mode':'native_9200' if a.deployment_mode=='native_9200' else ('6400_to_9200' if a.base_step==9200 else 'same'),
             'MODEL.STAGE2_ONLINE.gain':a.gain,'MODEL.STAGE2_ONLINE.trace':a.trace})
     cmd=['run.py','--exp_name','stage2_collect','--run-type','eval','--exp-config','run_r2r/iter_train_rae_dino_ghost_concat_persistent.yaml']
     for key,value in opts.items():cmd.extend([key,str(value)])

@@ -1,7 +1,9 @@
 import json
 import pytest
 import torch
-from vlnce_baselines.nwm.active_lookahead.stage2_data import EpisodeWriter, validate_dataset, Stage2Dataset, collate_stage2
+from vlnce_baselines.nwm.active_lookahead.stage2_data import (COMPACT_STORAGE,
+    STORAGE_PROVENANCE_KEY, EpisodeWriter, validate_dataset, Stage2Dataset,
+    collate_stage2, load)
 from vlnce_baselines.nwm.active_lookahead.offline_objective import offline_decision_aware_loss, OfflineDecisionLossConfig
 
 
@@ -65,3 +67,42 @@ def test_coverage_metadata_is_verified_from_tensors(tmp_path):
     w=EpisodeWriter(tmp_path,{});w.append('a','s',torch.ones(4,768),row());r=w.complete('a',{})
     meta=(tmp_path/r['file']).with_suffix('.json');r['future_valid']=100;meta.write_text(json.dumps(r))
     with pytest.raises(ValueError,match='coverage metadata'):validate_dataset(tmp_path,['a'])
+
+
+def test_compact_storage_restores_exact_full_future_tensor(tmp_path):
+    original = row()
+    original['future_tokens'][0].copy_(
+        torch.arange(257 * 768).reshape(257, 768).remainder(997).half())
+    original['future_tokens'][1].zero_()
+    provenance = {'split':'train', STORAGE_PROVENANCE_KEY:COMPACT_STORAGE}
+    writer = EpisodeWriter(tmp_path, provenance)
+    writer.append('a', 'scene', torch.ones(4,768), original)
+    record = writer.complete('a', {})
+
+    raw = torch.load(tmp_path/record['file'], map_location='cpu', weights_only=False)
+    assert raw['storage_schema'] == COMPACT_STORAGE
+    assert 'future_tokens' not in raw['rows'][0]
+    assert raw['rows'][0]['valid_future_tokens'].shape == (1,257,768)
+    restored = load(tmp_path/record['file'])
+    assert torch.equal(restored['rows'][0]['future_tokens'], original['future_tokens'])
+    assert validate_dataset(tmp_path, ['a'])['storage_schema'] == COMPACT_STORAGE
+    assert torch.equal(Stage2Dataset(tmp_path)[0]['future_tokens'], original['future_tokens'])
+
+
+def test_compact_storage_refuses_nonzero_invalid_future(tmp_path):
+    bad = row()
+    bad['future_tokens'][1, 0, 0] = 1
+    writer = EpisodeWriter(tmp_path, {STORAGE_PROVENANCE_KEY:COMPACT_STORAGE})
+    with pytest.raises(ValueError, match='exactly zero'):
+        writer.append('a', 'scene', torch.ones(4,768), bad)
+    assert not list(tmp_path.glob('*.pt'))
+
+
+def test_load_rejects_malformed_compact_payload(tmp_path):
+    payload = dict(format='etpr1-stage2-predicted-episode-v1',
+        storage_schema=COMPACT_STORAGE, rows=[dict(
+            future_valid_mask=torch.tensor([True, False]),
+            valid_future_tokens=torch.zeros(2,257,768,dtype=torch.float16))])
+    path = tmp_path/'bad.pt'; torch.save(payload, path)
+    with pytest.raises(ValueError, match='compact future tokens'):
+        load(path)

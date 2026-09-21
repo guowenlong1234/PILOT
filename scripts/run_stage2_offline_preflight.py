@@ -14,6 +14,8 @@ def main():
     parser.add_argument('--output', required=True)
     parser.add_argument('--precision', choices=['fp32', 'bf16', 'fp16'], default='bf16')
     parser.add_argument('--gpu', default='0')
+    parser.add_argument('--machine', choices=['server','eval'], default='server')
+    parser.add_argument('--future-mode', choices=['full','none'], default='full')
     parser.add_argument('--variant', choices=['baseline', 'B', 'C'], default='baseline')
     args = parser.parse_args()
     out = Path(args.output).resolve()
@@ -22,7 +24,7 @@ def main():
         raise FileExistsError('preflight requires an empty directory')
     base = ['scripts/train_stage2_e24.py', *args.roots, '--batch-size', '32',
             '--max-steps', '20', '--save-every', '10', '--log-every', '1',
-            '--precision', args.precision, '--variant', args.variant]
+            '--precision', args.precision, '--variant', args.variant, '--future-mode', args.future_mode]
     jobs = [
         ('continuous', base + ['--output', str(out/'continuous')]),
         ('interrupted', base + ['--output', str(out/'resumed'), '--stop-after-steps', '10']),
@@ -31,7 +33,7 @@ def main():
                         str(out/'resumed/state_step_000020.pt'), '--output', str(out/'resume_comparison.json')]),
     ]
     for name, command in jobs:
-        full = [sys.executable, 'scripts/stage2_offline_worker.py', '--machine', 'server',
+        full = [sys.executable, 'scripts/stage2_offline_worker.py', '--machine', args.machine,
                 '--gpu', args.gpu, '--job-dir', str(out/'jobs'/name), '--', *command]
         save(out/'pipeline.json', dict(status='running', stage=name, command=full))
         result = subprocess.run(full, cwd=ROOT)

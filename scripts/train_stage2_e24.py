@@ -43,6 +43,8 @@ def main():
     parser.add_argument('--output', required=True)
     parser.add_argument('--resume')
     parser.add_argument('--variant', choices=['baseline', 'B', 'C'], default='baseline')
+    parser.add_argument('--future-mode', choices=['full', 'none'], default='full',
+                        help='use cached future content or replace it with fixed zeros')
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--lr', type=float, default=2e-5)
@@ -79,7 +81,7 @@ def main():
     contract = dict(dataset=sampler.provenance, train_config=config, git_commit=git_commit,
         experiment=str(output), optimizer=dict(name='AdamW', lr=args.lr, betas=[.9,.999], eps=1e-8, weight_decay=.01),
         gradient_clip=10., scheduler=None, versions=versions(), trainable_module='E24_only', initialization='fresh_seeded')
-    model_config, loss_config = experiment_configs(args.variant)
+    model_config, loss_config = experiment_configs(args.variant, future_mode=args.future_mode)
     contract.update(model_config=model_config, loss_config=loss_config.to_dict())
     head = InterleavedCrossModalTopKFutureLogitResidualHead(**model_config).to(args.device)
     optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, betas=(.9,.999), eps=1e-8, weight_decay=.01)

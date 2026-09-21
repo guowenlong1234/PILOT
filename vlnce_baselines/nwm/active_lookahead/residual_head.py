@@ -126,6 +126,7 @@ class InterleavedCrossModalTopKFutureLogitResidualHead(nn.Module):
         round_weight_sharing: str = "independent",
         residual_confidence_gate: str = "none",
         candidate_context_mode: str = "future_valid",
+        future_mode: str = "full",
     ) -> None:
         super().__init__()
         if num_layers != 1:
@@ -138,7 +139,10 @@ class InterleavedCrossModalTopKFutureLogitResidualHead(nn.Module):
             raise ValueError("delta_max must be positive")
         if candidate_context_mode not in ("future_valid", "all_present"):
             raise ValueError("candidate_context_mode must be 'future_valid' or 'all_present'")
+        if future_mode not in ("full", "none"):
+            raise ValueError("future_mode must be 'full' or 'none'")
         self.candidate_context_mode = candidate_context_mode
+        self.future_mode = future_mode
         retained = {
             "delta_centering": (delta_centering, "none"),
             "score_context": (
@@ -297,6 +301,12 @@ class InterleavedCrossModalTopKFutureLogitResidualHead(nn.Module):
         future_input = (
             future_tokens.detach() if detach_future_tokens else future_tokens
         )
+        # Content-only ablation: retain the real future-valid mask (and thus
+        # identical candidate membership, supervision and residual support),
+        # while preventing any cached/predicted future value from entering the
+        # scorer.  zeros_like also makes arbitrary NaN placeholders harmless.
+        if self.future_mode == "none":
+            future_input = torch.zeros_like(future_input)
         selected_future_valid = None
         if self.candidate_context_mode == "all_present":
             selected_future_valid = valid[rows, slots]

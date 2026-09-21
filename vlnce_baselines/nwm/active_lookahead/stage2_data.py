@@ -13,6 +13,9 @@ from torch.utils.data import Dataset
 
 FORMAT = 'etpr1-stage2-predicted-episode-v1'
 SPACE = 'raw_cls+normalized_patch_fp16'
+FULL_STORAGE = 'full-future-slots-v1'
+COMPACT_STORAGE = 'valid_future_only_v1'
+STORAGE_PROVENANCE_KEY = 'storage_format'
 
 
 def sha256(path):
@@ -30,7 +33,47 @@ def atomic_json(path, payload):
 
 
 def load(path):
-    return torch.load(path, map_location='cpu', weights_only=False)
+    obj = torch.load(path, map_location='cpu', weights_only=False)
+    if not isinstance(obj, dict) or obj.get('storage_schema') != COMPACT_STORAGE:
+        return obj
+    if obj.get('format') != FORMAT or not isinstance(obj.get('rows'), list):
+        raise ValueError('invalid compact episode schema')
+    for row in obj['rows']:
+        if 'future_tokens' in row or 'valid_future_tokens' not in row:
+            raise ValueError('invalid compact future payload')
+        mask = row.get('future_valid_mask')
+        packed = row['valid_future_tokens']
+        if not torch.is_tensor(mask) or mask.dtype != torch.bool or mask.ndim != 1:
+            raise ValueError('invalid compact future mask')
+        expected = (int(mask.sum()), 257, 768)
+        if (not torch.is_tensor(packed) or tuple(packed.shape) != expected or
+                packed.dtype != torch.float16 or not torch.isfinite(packed).all()):
+            raise ValueError('invalid compact future tokens')
+        future = torch.zeros((len(mask), 257, 768), dtype=torch.float16)
+        future[mask] = packed
+        del row['valid_future_tokens']
+        row['future_tokens'] = future
+    return obj
+
+
+def _compact_episode(item):
+    compact = dict(item, storage_schema=COMPACT_STORAGE, rows=[])
+    for source in item['rows']:
+        row = dict(source)
+        future = row.pop('future_tokens')
+        mask = row['future_valid_mask']
+        invalid = future[~mask]
+        if invalid.numel() and torch.count_nonzero(invalid).item():
+            raise ValueError('invalid future slots must be exactly zero for compact storage')
+        row['valid_future_tokens'] = future[mask].detach().cpu().contiguous()
+        compact['rows'].append(row)
+    return compact
+
+
+def _validate_compactable_row(row):
+    invalid = row['future_tokens'][~row['future_valid_mask']]
+    if invalid.numel() and torch.count_nonzero(invalid).item():
+        raise ValueError('invalid future slots must be exactly zero for compact storage')
 
 
 def validate_row(row, text):
@@ -63,6 +106,9 @@ class EpisodeWriter:
     def __init__(self, root, provenance):
         self.root = Path(root); self.root.mkdir(parents=True, exist_ok=True)
         self.provenance = provenance
+        self.storage_schema = provenance.get(STORAGE_PROVENANCE_KEY, FULL_STORAGE)
+        if self.storage_schema not in (FULL_STORAGE, COMPACT_STORAGE):
+            raise ValueError('unsupported episode storage schema')
         identity = self.root / 'provenance.json'
         if identity.exists() and json.loads(identity.read_text()) != provenance:
             raise ValueError('existing dataset provenance differs')
@@ -72,6 +118,8 @@ class EpisodeWriter:
     def append(self, episode, scene, text, row):
         text = text.detach().cpu().half().contiguous()
         validate_row(row, text)
+        if self.storage_schema == COMPACT_STORAGE:
+            _validate_compactable_row(row)
         item = self.pending.setdefault(episode, dict(format=FORMAT, feature_space=SPACE,
             episode_id=episode, scene_id=scene, text_tokens=text, rows=[]))
         if row['step'] != len(item['rows']): raise ValueError('non-sequential decision step')
@@ -84,7 +132,8 @@ class EpisodeWriter:
         if path.exists(): raise FileExistsError(f'duplicate episode {episode}')
         if shutil.disk_usage(self.root).free < 20*1024**3:
             raise OSError('less than 20 GiB remains; refusing another shard')
-        tmp = path.with_suffix('.pt.tmp'); torch.save(item, tmp); tmp.replace(path)
+        saved_item = _compact_episode(item) if self.storage_schema == COMPACT_STORAGE else item
+        tmp = path.with_suffix('.pt.tmp'); torch.save(saved_item, tmp); tmp.replace(path)
         record = dict(episode_id=episode, scene_id=item['scene_id'], file=name,
             rows=len(item['rows']), bytes=path.stat().st_size, sha256=sha256(path),
             future_slots=sum(len(r['future_valid_mask']) for r in item['rows']),
@@ -98,6 +147,10 @@ class EpisodeWriter:
 
 def validate_dataset(root, expected_ids=None):
     root = Path(root); entries = []; ids = set(); failures = []
+    provenance = json.loads((root/'provenance.json').read_text())
+    expected_storage = provenance.get(STORAGE_PROVENANCE_KEY, FULL_STORAGE)
+    if expected_storage not in (FULL_STORAGE, COMPACT_STORAGE):
+        raise ValueError('unsupported episode storage schema')
     for meta in sorted(root.glob('*.json')):
         if meta.name in ('provenance.json','dataset_manifest.json','freeze_report.json'): continue
         r = json.loads(meta.read_text())
@@ -106,6 +159,8 @@ def validate_dataset(root, expected_ids=None):
         if sha256(path) != r['sha256']: raise ValueError(f'SHA mismatch: {path}')
         obj = load(path)
         if obj['format'] != FORMAT or obj['feature_space'] != SPACE: raise ValueError('schema/space mismatch')
+        storage_schema = obj.get('storage_schema', FULL_STORAGE)
+        if storage_schema != expected_storage: raise ValueError('storage schema/provenance mismatch')
         if obj['episode_id'] != r['episode_id'] or r['episode_id'] in ids: raise ValueError('episode mismatch/duplicate')
         if len(obj['rows']) != r['rows']: raise ValueError('row count mismatch')
         for step, row in enumerate(obj['rows']):
@@ -120,7 +175,8 @@ def validate_dataset(root, expected_ids=None):
     if expected_ids is not None and ids != set(map(str, expected_ids)):
         raise ValueError(f'episode coverage mismatch: missing={len(set(map(str,expected_ids))-ids)}, extra={len(ids-set(map(str,expected_ids)))}')
     if not entries: raise ValueError('empty dataset')
-    manifest = dict(format=FORMAT, feature_space=SPACE, status='validated', episodes=len(ids),
+    manifest = dict(format=FORMAT, feature_space=SPACE, storage_schema=expected_storage,
+                    status='validated', episodes=len(ids),
                     rows=sum(r['rows'] for r in entries), trainable_rows=sum(r['trainable_rows'] for r in entries),
                     future_slots=sum(r['future_slots'] for r in entries), future_valid=sum(r['future_valid'] for r in entries),
                     bytes=sum(r['bytes'] for r in entries), provenance_sha256=sha256(root/'provenance.json'), entries=entries)

@@ -15,11 +15,71 @@ BEST_SHA = '598986525cb3ac4696743b0480ac6733b918e3d4407d647c4cddb0a498ae286e'
 
 
 def validate_deployment_base(actual_sha,mode):
-    expected={'same':BASE_SHA,'6400_to_9200':TRANSFER_9200_SHA}
+    expected={'same':BASE_SHA,'6400_to_9200':TRANSFER_9200_SHA,'native_9200':TRANSFER_9200_SHA}
     if mode not in expected or actual_sha!=expected[mode]:
         raise ValueError('deployment base differs from explicit transfer contract')
+    if mode == 'native_9200':
+        return dict(head_training_base_sha256=TRANSFER_9200_SHA,
+                    deployment_base_sha256=actual_sha,transfer_mode=mode,
+                    head_retrained=True)
     return dict(head_training_base_sha256=BASE_SHA,deployment_base_sha256=actual_sha,
                 transfer_mode=mode,head_retrained=False)
+
+
+def validate_head_checkpoint(checkpoint, cfg, deployment):
+    """Validate either the frozen legacy head or a native 9200 ablation head."""
+    actual_head_sha = sha256(cfg.head)
+    if cfg.head_sha256 != actual_head_sha:
+        raise ValueError('configured head SHA differs from checkpoint')
+    mode = deployment['transfer_mode']
+    if mode != 'native_9200':
+        if actual_head_sha != BEST_SHA:
+            raise ValueError('selected 4750 head SHA differs')
+        model_config = dict(checkpoint['model_config'])
+        model_config.setdefault('future_mode', 'full')
+        if model_config != MODEL_CONFIG or checkpoint['global_step'] != 4750:
+            raise ValueError('unexpected selected head configuration')
+        expected_base = BASE_SHA
+        future_mode = 'full'
+    else:
+        model_config = checkpoint.get('model_config')
+        if not isinstance(model_config, dict) or 'future_mode' not in model_config:
+            raise ValueError('native 9200 head requires explicit future_mode')
+        future_mode = model_config['future_mode']
+        if future_mode not in ('full', 'none'):
+            raise ValueError('native 9200 head future_mode must be full or none')
+        if model_config != dict(MODEL_CONFIG, future_mode=future_mode):
+            raise ValueError('native 9200 head must use the baseline model structure')
+        contract = checkpoint.get('contract', {})
+        if contract.get('model_config') != model_config:
+            raise ValueError('native 9200 checkpoint model contract differs')
+        if contract.get('train_config', {}).get('future_mode') != future_mode:
+            raise ValueError('native 9200 training ablation contract differs')
+        expected_base = TRANSFER_9200_SHA
+    dataset = checkpoint.get('contract', {}).get('dataset')
+    if not isinstance(dataset, list) or not dataset:
+        raise ValueError('offline head dataset contract is missing')
+    for part in dataset:
+        p = part.get('provenance', {})
+        if (p.get('stage1_sha256') != expected_base or
+                p.get('feature_space') != 'raw_cls+normalized_patch_fp16' or
+                p.get('context_contract') != 'stage2_panorama_q0_snapshot_v1'):
+            raise ValueError('offline head feature/base contract differs')
+        if mode == 'native_9200' and p.get('split') != 'train':
+            raise ValueError('native 9200 head must be trained from the train split')
+        assets = p.get('assets')
+        if not isinstance(assets, dict) or (mode == 'native_9200' and not assets):
+            raise ValueError('offline head prediction assets are missing')
+        for path,digest in assets.items():
+            if sha256(path)!=digest:
+                raise ValueError('online prediction asset differs: '+path)
+    return dict(head_sha256=actual_head_sha,future_mode=future_mode)
+
+
+def validate_online_gain(gain, transfer_mode):
+    allowed = (0.,1.) if transfer_mode == 'native_9200' else (0.,1.5)
+    if gain not in allowed:
+        raise ValueError('online comparison gain differs from the deployment contract')
 
 
 def score_rows(head, rows, device, gain):
@@ -43,22 +103,12 @@ def score_rows(head, rows, device, gain):
 class Stage2Online(Stage2Collector):
     def __init__(self, trainer):
         cfg=trainer.config.MODEL.STAGE2_ONLINE
-        if cfg.gain not in (0.,1.5):
-            raise ValueError('online comparison is locked to zero or selected gain1.5')
+        validate_online_gain(cfg.gain,cfg.transfer_mode)
         if cfg.seed != 20260916:
             raise ValueError('online future-noise seed differs from collection')
-        if cfg.head_sha256 != BEST_SHA or sha256(cfg.head) != BEST_SHA:
-            raise ValueError('selected 4750 head SHA differs')
         self.deployment=validate_deployment_base(sha256(trainer.config.EVAL.CKPT_PATH_DIR),cfg.transfer_mode)
         checkpoint=load(cfg.head)
-        if checkpoint['model_config'] != MODEL_CONFIG or checkpoint['global_step'] != 4750:
-            raise ValueError('unexpected selected head configuration')
-        for part in checkpoint['contract']['dataset']:
-            p=part['provenance']
-            if p['stage1_sha256']!=BASE_SHA or p['feature_space']!='raw_cls+normalized_patch_fp16' or p['context_contract']!='stage2_panorama_q0_snapshot_v1':
-                raise ValueError('offline head feature/base contract differs')
-            for path,digest in p['assets'].items():
-                if sha256(path)!=digest: raise ValueError('online prediction asset differs: '+path)
+        self.head_contract=validate_head_checkpoint(checkpoint,cfg,self.deployment)
         super().__init__(trainer,prediction_only=True)
         with torch.random.fork_rng():
             self.head=InterleavedCrossModalTopKFutureLogitResidualHead(**checkpoint['model_config']).to(trainer.device).eval()
@@ -136,4 +186,5 @@ class Stage2Online(Stage2Collector):
         if self.trace_file: self.trace_file.close()
         atomic_json(Path(self.cfg.output)/'online_summary.json',dict(counts=dict(self.counts),
             elapsed_seconds=time.perf_counter()-self.started,online_seconds=self.online_seconds,
-            head_sha256=BEST_SHA,gain=self.cfg.gain,residual_bound=1.,teacher_calls=0,**self.deployment))
+            gain=self.cfg.gain,residual_bound=1.,teacher_calls=0,**self.deployment,
+            **self.head_contract))

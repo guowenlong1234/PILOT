@@ -16,7 +16,7 @@ MODEL_CONFIG = dict(input_dim=768, hidden_dim=768, num_queries=8,
     num_attention_heads=12, num_layers=1, ffn_dim=3072, dropout=0.1,
     delta_max=1.0, fusion_layers=3, delta_centering='none',
     score_context='base_bounded_margin_relative', round_weight_sharing='independent',
-    residual_confidence_gate='none')
+    residual_confidence_gate='none', future_mode='full')
 LOSS_CONFIG = OfflineDecisionLossConfig(training_stage='offline', objective='decision_aware_v1',
     margin=.25, temperature=.25, eta_absent=.5, positive_group_weight=.5,
     negative_group_weight=.5, signed_weight=.25, present_signed_weight=1.,
@@ -25,10 +25,13 @@ LOSS_CONFIG = OfflineDecisionLossConfig(training_stage='offline', objective='dec
     correct_row_weight=2., wrong_row_weight=1., decision_row_policy='all_teacher_topk', residual_bound=1.)
 
 
-def experiment_configs(variant='baseline'):
+def experiment_configs(variant='baseline', *, future_mode='full'):
     if variant not in ('baseline', 'B', 'C'):
         raise ValueError('unknown offline comparison variant')
+    if future_mode not in ('full', 'none'):
+        raise ValueError('future_mode must be full or none')
     model = dict(MODEL_CONFIG)
+    model['future_mode'] = future_mode
     loss = LOSS_CONFIG
     if variant == 'B':
         loss = replace(loss, decision_row_policy='all_move_with_future')

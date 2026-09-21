@@ -85,6 +85,8 @@ def main():
     p.add_argument('--data-roots', nargs='+', required=True)
     p.add_argument('--checkpoints', nargs='+', default=[])
     p.add_argument('--zero-init', action='store_true')
+    p.add_argument('--zero-init-future-mode', choices=['full', 'none'], default='full',
+                   help='future-content contract for the optional zero-init control')
     p.add_argument('--gains', nargs='+', type=float, default=[1.], choices=CALIBRATION_GAINS)
     p.add_argument('--device', default='cuda')
     p.add_argument('--batch-size', type=int, default=16)
@@ -103,7 +105,8 @@ def main():
     for path in args.checkpoints + (['zero-init'] if args.zero_init else []):
         if path == 'zero-init':
             from vlnce_baselines.nwm.active_lookahead.stage2_training import MODEL_CONFIG
-            config, step, state = MODEL_CONFIG, 0, None
+            config = dict(MODEL_CONFIG, future_mode=args.zero_init_future_mode)
+            step, state = 0, None
         else:
             checkpoint = load(path)
             validate_checkpoint(checkpoint, dataset.provenance)
@@ -111,14 +114,14 @@ def main():
             state = checkpoint['future_head_state_dict']
         head = InterleavedCrossModalTopKFutureLogitResidualHead(**config).to(args.device).eval()
         if state is not None: head.load_state_dict(state, strict=True)
-        models.append((path, step, head))
-    records = {(path,gain): [] for path,_,_ in models for gain in args.gains}
+        models.append((path, step, head, config.get('future_mode', 'full')))
+    records = {(path,gain): [] for path,_,_,_ in models for gain in args.gains}
     started = time.monotonic()
     rows = 0
     with torch.inference_mode():
         for batch in loader:
             device_batch = {k:v.to(args.device) if torch.is_tensor(v) else v for k,v in batch.items()}
-            for path,step,head in models:
+            for path,step,head,_future_mode in models:
                 with torch.autocast(device_type=torch.device(args.device).type,
                     dtype=torch.float16 if args.amp == 'fp16' else torch.bfloat16, enabled=args.amp != 'none'):
                     delta = predict(head, device_batch)
@@ -129,11 +132,11 @@ def main():
                 print(json.dumps(dict(rows=rows,total=dataset.rows,elapsed_seconds=time.monotonic()-started)), flush=True)
     if rows != dataset.rows: raise RuntimeError('incomplete dev evaluation')
     results = []
-    for path,step,_ in models:
+    for path,step,_head,future_mode in models:
         for gain in args.gains:
             report = build_report(records[path,gain], args.bootstrap_samples)
             report.update(checkpoint=path, checkpoint_sha256=sha256(path) if path != 'zero-init' else None,
-                          global_step=step, gain=gain)
+                          global_step=step, gain=gain, future_mode=future_mode)
             if report['stop_consistent_rows'] != rows: raise RuntimeError('STOP changed')
             if (path == 'zero-init' or gain == 0) and report['all_action_changes']:
                 raise RuntimeError('zero residual changed action')
