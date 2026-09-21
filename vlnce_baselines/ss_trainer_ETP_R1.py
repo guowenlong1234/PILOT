@@ -1747,6 +1747,23 @@ class RLTrainer(BaseVLNCETrainer):
         saved_num_envs = local_state.get("num_envs")
         if (
             saved_num_envs != self.envs.num_envs
+            and bool(getattr(self.config.IL, "allow_env_count_change_on_resume", False))
+        ):
+            if (
+                not isinstance(saved_num_envs, int) or saved_num_envs <= 0
+                or not isinstance(environment_states, list)
+                or len(environment_states) != saved_num_envs
+            ):
+                raise ValueError("Malformed saved environment state during resize resume")
+            logger.warning(
+                "Explicit environment-count migration on rank %d: %d -> %d. "
+                "Model, optimizer, scheduler, scaler, iteration and rank RNG "
+                "are restored; environment episode queues start afresh.",
+                self.local_rank, saved_num_envs, self.envs.num_envs,
+            )
+            return
+        if (
+            saved_num_envs != self.envs.num_envs
             or not isinstance(environment_states, list)
             or len(environment_states) != self.envs.num_envs
         ):

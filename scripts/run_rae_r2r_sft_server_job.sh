@@ -146,6 +146,7 @@ set +e
     IL.cudnn_benchmark True \
     IL.log_cuda_memory True \
     IL.resumable_checkpoints True \
+    IL.allow_env_count_change_on_resume "${ETPR1_R2R_SFT_ALLOW_ENV_COUNT_CHANGE_ON_RESUME:-False}" \
     IL.keep_last_train_states 3 \
     IL.keep_train_state_every_n_iters 5000 \
     IL.checkpoint_sync_enabled "$CHECKPOINT_SYNC_ENABLED" \
