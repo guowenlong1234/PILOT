@@ -8,7 +8,7 @@ from vlnce_baselines.nwm.active_lookahead.stage2_online import score_rows
 from vlnce_baselines.nwm.active_lookahead.stage2_data import load, atomic_json
 from vlnce_baselines.nwm.active_lookahead.residual_head import InterleavedCrossModalTopKFutureLogitResidualHead as Head
 
-p=argparse.ArgumentParser();p.add_argument('--data',required=True);p.add_argument('--head',required=True);p.add_argument('--report',required=True);a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--data',required=True);p.add_argument('--head',required=True);p.add_argument('--report',required=True);p.add_argument('--gain',type=float,choices=[1.,1.5],default=1.5);a=p.parse_args()
 root=Path(a.data);m=json.loads((root/'dataset_manifest.json').read_text());rows=[]
 for entry in m['entries'][:4]:
  ep=load(root/entry['file'])
@@ -18,11 +18,11 @@ with torch.inference_mode():
  for start in range(0,len(rows),16):
   part=rows[start:start+16];b=collate(part);b={k:v.cuda() if torch.is_tensor(v) else v for k,v in b.items()}
   with torch.autocast('cuda',dtype=torch.bfloat16): expected=predict(head,b)
-  expected=(1.5*expected.float()).clamp(-1,1).masked_fill(~b['topk_valid_mask'],0)
+  expected=(a.gain*expected.float()).clamp(-1,1).masked_fill(~b['topk_valid_mask'],0)
   # Remove targets entirely: inference cannot depend on teacher labels.
   no_labels=[{k:v for k,v in r.items() if not k.startswith('teacher_')} for r in part]
   stream=torch.cuda.Stream(); current=torch.cuda.current_stream(); stream.wait_stream(current)
-  with torch.cuda.stream(stream): actual=score_rows(head,no_labels,'cuda',1.5)
+  with torch.cuda.stream(stream): actual=score_rows(head,no_labels,'cuda',a.gain)
   current.wait_stream(stream); actual.record_stream(current)
   assert torch.equal(actual,expected),float((actual-expected).abs().max())
   assert torch.count_nonzero(score_rows(head,no_labels,'cuda',0))==0

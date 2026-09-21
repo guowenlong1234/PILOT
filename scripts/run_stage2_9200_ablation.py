@@ -164,7 +164,9 @@ def main():
             publish_evaluation_index(out/mode/'eval'/f'step_{step:06d}.json',report,
                                      target/f'head_step_{step:06d}.pt',step)
     worker('report',['scripts/report_stage2_future_ablation.py','--output',str(out)],out/'final_report/summary.json')
-    save(out/'pipeline.json',dict(status='completed',stage='offline_comparison',exit_code=0,updated_at=now()))
+    stage('navigation',[sys.executable,'scripts/run_stage2_9200_navigation.py','--experiment',str(out)],
+          out/'navigation/final_report/summary.json')
+    save(out/'pipeline.json',dict(status='completed',stage='offline_and_navigation_comparison',exit_code=0,updated_at=now()))
 
 if __name__=='__main__':
     try:main()
