@@ -45,6 +45,7 @@ class _InterleavedCrossModalBlock(nn.Module):
         *,
         text_padding_mask: Optional[torch.Tensor],
         patch_padding_mask: Optional[torch.Tensor],
+        future_valid_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         text_update, _ = self.text_attention(
             queries,
@@ -54,6 +55,28 @@ class _InterleavedCrossModalBlock(nn.Module):
             need_weights=False,
         )
         queries = self.text_norm(queries + text_update)
+        # A real candidate without a generated future still reads the text.
+        # Skip its entire future branch (including normalization and biases),
+        # rather than treating zero-filled tokens as an observed future.
+        if future_valid_mask is not None:
+            future_queries = queries[future_valid_mask]
+            if future_queries.shape[0]:
+                future_patches = patch_h[future_valid_mask]
+                patch_update, _ = self.patch_attention(
+                    future_queries, future_patches, future_patches,
+                    key_padding_mask=(None if patch_padding_mask is None
+                                      else patch_padding_mask[future_valid_mask]),
+                    need_weights=False,
+                )
+                future_queries = self.patch_norm(future_queries + patch_update)
+                cls_expanded = cls_h[future_valid_mask, None, :].expand_as(future_queries)
+                cls_gate = torch.sigmoid(self.cls_gate(torch.cat(
+                    (future_queries, cls_expanded, future_queries * cls_expanded), dim=-1
+                )))
+                future_queries = self.cls_norm(future_queries + cls_gate * cls_expanded)
+                queries = queries.clone()
+                queries[future_valid_mask] = future_queries
+            return self.ffn_norm(queries + self.ffn(queries))
         patch_update, _ = self.patch_attention(
             queries,
             patch_h,
@@ -102,6 +125,8 @@ class InterleavedCrossModalTopKFutureLogitResidualHead(nn.Module):
         score_context: str = "base_bounded_margin_relative",
         round_weight_sharing: str = "independent",
         residual_confidence_gate: str = "none",
+        candidate_context_mode: str = "future_valid",
+        future_mode: str = "full",
     ) -> None:
         super().__init__()
         if num_layers != 1:
@@ -112,6 +137,12 @@ class InterleavedCrossModalTopKFutureLogitResidualHead(nn.Module):
             raise ValueError("hidden_dim must be divisible by num_attention_heads")
         if delta_max <= 0:
             raise ValueError("delta_max must be positive")
+        if candidate_context_mode not in ("future_valid", "all_present"):
+            raise ValueError("candidate_context_mode must be 'future_valid' or 'all_present'")
+        if future_mode not in ("full", "none"):
+            raise ValueError("future_mode must be 'full' or 'none'")
+        self.candidate_context_mode = candidate_context_mode
+        self.future_mode = future_mode
         retained = {
             "delta_centering": (delta_centering, "none"),
             "score_context": (
@@ -195,6 +226,7 @@ class InterleavedCrossModalTopKFutureLogitResidualHead(nn.Module):
         future_token_mask: Optional[torch.Tensor] = None,
         candidate_geometry: Optional[torch.Tensor] = None,
         detach_future_tokens: bool = True,
+        candidate_present_mask: Optional[torch.Tensor] = None,
     ) -> FutureHeadOutput:
         if owner_embeddings.ndim != 3 or future_tokens.ndim != 4:
             raise ValueError("E17 owner/future inputs must have shape [B,K,D]/[B,K,T,D]")
@@ -215,18 +247,29 @@ class InterleavedCrossModalTopKFutureLogitResidualHead(nn.Module):
         valid = candidate_valid_mask.detach().to(
             device=owner_embeddings.device, dtype=torch.bool
         )
+        # Preserve the original E24 path unless the comparison ablation is
+        # explicitly enabled. This option adds no checkpoint parameters.
+        context_valid = valid
+        if self.candidate_context_mode == "all_present":
+            if candidate_present_mask is None or candidate_present_mask.shape != (batch, topk):
+                raise ValueError("all_present requires candidate_present_mask with shape [B,K]")
+            context_valid = candidate_present_mask.detach().to(
+                device=owner_embeddings.device, dtype=torch.bool
+            )
+            if bool((valid & ~context_valid).any()):
+                raise ValueError("future-valid candidates must be present")
         base_lp = base_ghost_log_probs.detach().to(
             device=owner_embeddings.device, dtype=owner_embeddings.dtype
         )
         geometry = candidate_geometry.detach().to(
             device=owner_embeddings.device, dtype=owner_embeddings.dtype
         )
-        if not bool(torch.isfinite(base_lp[valid]).all()):
+        if not bool(torch.isfinite(base_lp[context_valid]).all()):
             raise ValueError("valid E17 base log probabilities must be finite")
-        if not bool(torch.isfinite(geometry[valid]).all()):
+        if not bool(torch.isfinite(geometry[context_valid]).all()):
             raise ValueError("valid E17 candidate geometry must be finite")
 
-        rows, slots = valid.nonzero(as_tuple=True)
+        rows, slots = context_valid.nonzero(as_tuple=True)
         zero = next(self.parameters()).reshape(-1)[0] * 0.0
         raw_dense = owner_embeddings.new_zeros(batch, topk) + zero
         hidden_dim = self.owner_proj.out_features
@@ -258,8 +301,27 @@ class InterleavedCrossModalTopKFutureLogitResidualHead(nn.Module):
         future_input = (
             future_tokens.detach() if detach_future_tokens else future_tokens
         )
-        future_h = self.future_proj(future_input)
-        selected_future = future_h[rows, slots]
+        # Content-only ablation: retain the real future-valid mask (and thus
+        # identical candidate membership, supervision and residual support),
+        # while preventing any cached/predicted future value from entering the
+        # scorer.  zeros_like also makes arbitrary NaN placeholders harmless.
+        if self.future_mode == "none":
+            future_input = torch.zeros_like(future_input)
+        selected_future_valid = None
+        if self.candidate_context_mode == "all_present":
+            selected_future_valid = valid[rows, slots]
+            # Never project absent/invalid future placeholders: they may be
+            # arbitrary, and cannot contribute values or gradients to C.
+            projected_future = self.future_proj(
+                future_input[rows[selected_future_valid], slots[selected_future_valid]]
+            )
+            selected_future = projected_future.new_zeros(
+                len(rows), future_tokens.shape[2], hidden_dim
+            )
+            selected_future[selected_future_valid] = projected_future
+        else:
+            future_h = self.future_proj(future_input)
+            selected_future = future_h[rows, slots]
         selected_cls = selected_future[:, 0]
         selected_patches = selected_future[:, 1:]
         selected_patch_mask = None
@@ -270,7 +332,15 @@ class InterleavedCrossModalTopKFutureLogitResidualHead(nn.Module):
             )
             selected_patch_mask = selected_future_mask[:, 1:]
 
-        active_rows = valid.any(dim=1).nonzero(as_tuple=False).flatten()
+        if selected_future_valid is not None and selected_patch_mask is not None:
+            # _padding_mask rejects empty attention rows. Invalid futures
+            # never enter attention, so validate only rows that actually do.
+            _padding_mask(selected_patch_mask[selected_future_valid],
+                          selected_patches[selected_future_valid])
+            selected_patch_mask = selected_patch_mask.clone()
+            selected_patch_mask[~selected_future_valid] = True
+
+        active_rows = context_valid.any(dim=1).nonzero(as_tuple=False).flatten()
         for layer_index in range(self.fusion_layers):
             fusion = self.fusion_blocks[layer_index]
             candidate_layer = self.candidate_layers[layer_index]
@@ -283,12 +353,13 @@ class InterleavedCrossModalTopKFutureLogitResidualHead(nn.Module):
                 patch_padding_mask=_padding_mask(
                     selected_patch_mask, selected_patches
                 ),
+                future_valid_mask=selected_future_valid,
             )
             local_summary = selected_queries.mean(dim=1)
             round_dense = owner_embeddings.new_zeros(batch, topk, hidden_dim) + zero
             round_dense[rows, slots] = local_summary
             interacted = candidate_layer(
-                round_dense[active_rows], src_key_padding_mask=~valid[active_rows]
+                round_dense[active_rows], src_key_padding_mask=~context_valid[active_rows]
             )
             summary_dense = owner_embeddings.new_zeros(batch, topk, hidden_dim) + zero
             summary_dense[active_rows] = interacted
@@ -305,7 +376,7 @@ class InterleavedCrossModalTopKFutureLogitResidualHead(nn.Module):
             final_summary * selected_owner,
             base_lp[rows, slots, None],
         ]
-        valid_base_lp = base_lp.masked_fill(~valid, -torch.inf)
+        valid_base_lp = base_lp.masked_fill(~context_valid, -torch.inf)
         base_slots = valid_base_lp.argmax(dim=1)
         base_summary_by_row = summary_dense[
             torch.arange(batch, device=summary_dense.device), base_slots
@@ -321,7 +392,7 @@ class InterleavedCrossModalTopKFutureLogitResidualHead(nn.Module):
         runner_up_lp = base_competitors.max(dim=1).values
         winner_margin = selected_base_lp - runner_up_lp[rows]
         winner_margin = torch.where(
-            valid.sum(dim=1)[rows] > 1,
+            context_valid.sum(dim=1)[rows] > 1,
             winner_margin,
             torch.zeros_like(winner_margin),
         )
@@ -339,7 +410,9 @@ class InterleavedCrossModalTopKFutureLogitResidualHead(nn.Module):
         score_input = torch.cat(score_parts, dim=-1)
         selected_raw = self.score_mlp(score_input).squeeze(-1)
         raw_dense = owner_embeddings.new_zeros(batch, topk) + zero
-        raw_dense[rows, slots] = selected_raw
+        raw_dense[rows, slots] = selected_raw.to(dtype=raw_dense.dtype)
+        if self.candidate_context_mode == "all_present":
+            raw_dense = raw_dense.masked_fill(~valid, 0.0)
         delta = self.delta_max * torch.tanh(raw_dense)
         return FutureHeadOutput(
             raw_dense,

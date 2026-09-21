@@ -17,6 +17,7 @@ from .direct_loss import (
 DECISION_OBJECTIVE = "decision_aware_v1"
 CHAMPION_ANCHORED_SCALAR_OBJECTIVE = "champion_anchored_scalar_v1"
 ALL_DECISION_ROWS = "all_teacher_topk"
+ALL_MOVE_WITH_FUTURE_ROWS = "all_move_with_future"
 
 CHAMPION_FIX = 0
 CHAMPION_HARM = 1
@@ -65,10 +66,12 @@ class OfflineDecisionLossConfig:
             raise ValueError("decision-aware temperatures must be positive")
         if self.residual_bound <= 0:
             raise ValueError("decision-aware residual_bound must be positive")
-        if self.decision_row_policy != ALL_DECISION_ROWS:
+        if self.decision_row_policy not in {
+            ALL_DECISION_ROWS, ALL_MOVE_WITH_FUTURE_ROWS
+        }:
             raise ValueError(
-                "retained E24 loss requires "
-                f"decision_row_policy={ALL_DECISION_ROWS!r}"
+                "decision_row_policy must be "
+                f"{ALL_DECISION_ROWS!r} or {ALL_MOVE_WITH_FUTURE_ROWS!r}"
             )
         weights = (
             self.signed_weight,
@@ -522,7 +525,12 @@ def offline_decision_aware_loss(
         & valid.any(dim=1)
         & (teachers >= 0)
     )
-    decision_eligible = decision_candidate_eligible & positive_valid
+    teacher_future_eligible = decision_candidate_eligible & positive_valid
+    decision_eligible = (
+        decision_candidate_eligible
+        if config.decision_row_policy == ALL_MOVE_WITH_FUTURE_ROWS
+        else teacher_future_eligible
+    )
     absent_noop_rows = decision_candidate_eligible & ~positive_valid
     if bool((decision_eligible & (teachers >= base_logits.shape[1])).any()):
         raise ValueError("teacher_base_index is outside base logits")
@@ -534,7 +542,7 @@ def offline_decision_aware_loss(
         raise ValueError("valid topK index selects a padded ghost")
     if deltas.shape[1]:
         teacher_topk_indices = topk_indices.gather(1, safe_ranks[:, None]).squeeze(1)
-        inconsistent = decision_eligible & (teacher_topk_indices != teachers)
+        inconsistent = teacher_future_eligible & (teacher_topk_indices != teachers)
         if bool(inconsistent.any()):
             raise ValueError(
                 "teacher rank/topK base index differs from teacher_base_index"
@@ -543,6 +551,10 @@ def offline_decision_aware_loss(
     masked_base = base_logits.detach().masked_fill(~ghost_valid, -torch.inf)
     base_actions_all = masked_base.argmax(dim=1)
     safe_teachers = teachers.clamp(min=0, max=base_logits.shape[1] - 1)
+    if config.decision_row_policy == ALL_MOVE_WITH_FUTURE_ROWS:
+        teacher_ghost_valid = ghost_valid.gather(1, safe_teachers[:, None]).squeeze(1)
+        if bool((decision_eligible & ~teacher_ghost_valid).any()):
+            raise ValueError("decision teacher selects a padded ghost")
     teacher_base_scores = masked_base.gather(
         1, safe_teachers[:, None]
     ).squeeze(1)
@@ -596,8 +608,13 @@ def offline_decision_aware_loss(
             / config.pair_temperature
         )
         pair_loss = (pair_rows * row_weights).sum() / weight_sum
-        active_candidates = valid & active[:, None]
-        regularization_loss = deltas[active_candidates].square().mean()
+        # This ablation changes CE/pair coverage only. Preserve the original
+        # teacher-with-future regularization population and denominator.
+        active_candidates = valid & teacher_future_eligible[:, None]
+        regularization_loss = (
+            deltas[active_candidates].square().mean()
+            if bool(active_candidates.any()) else zero
+        )
         decision_base_correct_count = int(
             (base_actions == active_teachers).sum().detach().cpu()
         )

@@ -44,3 +44,6 @@ __pycache__/
 /docs/TopoForesight_*
 /docs/paper-mainline.md
 /pelican-bicycle.html
+
+# Isolated stage2 input models remain local.
+/stage2_assets/
