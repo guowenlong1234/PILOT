@@ -66,6 +66,7 @@ def main():
         provenance['storage_format']='valid_future_only_v1'
     if a.base_step!=6400:
         provenance['stage1_iteration']=a.base_step
+        provenance['compile_threads']=1
     if a.base_step!=6400 and a.action=='online' and a.deployment_mode=='legacy':
         provenance.update(stage1_iteration=a.base_step,head_training_base_sha256=BASE_SHA,transfer_mode='6400_to_9200',head_retrained=False)
     if a.action=='online' and a.deployment_mode=='native_9200':
@@ -115,6 +116,9 @@ def main():
     cmd=['run.py','--exp_name','stage2_collect','--run-type','eval','--exp-config','run_r2r/iter_train_rae_dino_ghost_concat_persistent.yaml']
     for key,value in opts.items():cmd.extend([key,str(value)])
     command=runtime(a.machine,cmd,a.gpu)
+    if a.base_step==9200:
+        if a.machine=='eval':command[2:2]=['-e','TORCHINDUCTOR_COMPILE_THREADS=1']
+        else:command=['env','TORCHINDUCTOR_COMPILE_THREADS=1',*command]
     launch=dict(command=command,provenance=provenance,pending_episodes=todo,
                 resume_policy='complete_episode_only; stage1 RNG restarts for remaining episodes')
     save(root/'launch.json',launch)

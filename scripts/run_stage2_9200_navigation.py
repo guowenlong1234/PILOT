@@ -38,7 +38,7 @@ def main():
             if read(report)['status']!='passed':raise ValueError('online replay failed')
         def nav(name,action,mode='full',episodes=16,gain=0):
             cmd=[sys.executable,'scripts/stage2_e24_job.py',action,'--machine','eval','--gpu','0',
-                 '--environments','8','--split','val_unseen','--base-step','9200','--deployment-mode','native_9200',
+                 '--environments','4','--split','val_unseen','--base-step','9200','--deployment-mode','native_9200',
                  '--checkpoint','stage2_assets/ckpt.iter9200.pth','--head',heads[mode],'--gain',str(gain),
                  '--episodes',str(episodes),'--output',str(out/name)]
             if episodes>0:cmd+=['--trace']

@@ -135,7 +135,7 @@ def main():
             if free<projected:
                 raise OSError('insufficient capacity under measured 25% margin + 40GiB reserve')
         stage('collect_'+name,[sys.executable,'scripts/run_stage2_collection.py','collect','--machine','eval',
-              '--gpu','0','--environments','8','--base-step','9200','--checkpoint','stage2_assets/ckpt.iter9200.pth',
+              '--gpu','0','--environments','4','--base-step','9200','--checkpoint','stage2_assets/ckpt.iter9200.pth',
               '--compact-storage','--split',split,'--output',str(destination)],destination/'train_ready.json')
         if read(destination/'pipeline.json')['status']!='ready':raise ValueError('collection gate failed')
     train=out/'data/train/episodes';dev=out/'data/dev/episodes'

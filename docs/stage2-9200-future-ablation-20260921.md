@@ -8,7 +8,7 @@
 
 ## 预先固定的对照
 
-- 完整重新采集train 10819路线与val_unseen 1839路线，冻结9200一阶段及所有预测资产。沿用采集8环境、相同随机协议和独立q1随机流；不复用6400缓存。
+- 完整重新采集train 10819路线与val_unseen 1839路线，冻结9200一阶段及所有预测资产。采集4环境、相同随机协议和独立q1随机流；不复用6400缓存。
 - full：评分头读取真实预测未来token；none：进入未来投影层前用固定零替换全部未来token。两组同架构、相同初始权重、相同真实future有效mask、相同监督/候选范围与优化器。none仍保留一阶段已融合的信息及未来可用性标记，因此此实验估计的是额外未来特征**内容**的价值，不代表完全移除世界模型。
 - 两组seed2、batch32、AdamW lr2e-5、weight decay0.01、梯度裁剪10、固定学习率、BF16、6000更新，每250步保存与完整dev评估。max_epochs100仅防止提前耗尽，实际终止预算严格6000。两组依次占用同一GPU，不并发。
 - 两组独立完成20步连续与10+10跨进程恢复验收。相同数据/顺序/初始化证据在最终报告核验。
@@ -21,7 +21,7 @@
 
 正式采集前短采train/dev各64路线，并按场景轮流选样；以实测平均大小估算全量，额外留25%数据余量及40GiB模型/磁盘余量。若不足则停止，不删除旧产物。单episode写入仍保留20GiB硬下限。
 
-新实验根：`data/logs/stage2_9200_future_ablation_20260921/`。短测在 `preflight_train64`、`preflight_dev64`；正式流水线在 `formal_v1`，数据在 `formal_v1/data/{train,dev}/episodes`，训练在 `formal_v1/{full,none}/train`，逐点评估在 `{full,none}/eval`。
+新实验根：`data/logs/stage2_9200_future_ablation_20260921/`。短测在 `preflight_train64_env4`、`preflight_dev64_env4`；正式流水线在 `formal_v1`，数据在 `formal_v1/data/{train,dev}/episodes`，训练在 `formal_v1/{full,none}/train`，逐点评估在 `{full,none}/eval`。
 
 入口 `scripts/run_stage2_9200_ablation.py` 仅允许测评机工作区，以现有GPU资源锁、版本日志和专用容器串行运行，无任何SSH、训练机计算或数据搬运。每步保存精确命令、父子PID、退出码；失败即停，不自动重复不明确的GPU任务。明确resume只能跳过已成功且产物仍在的阶段。
 
@@ -34,3 +34,7 @@
 两组在线仍计算相同q1以保留相同候选有效性标记；none只不读取未来特征内容。导航报告明确此处耗时不是移除未来生成后的速度对照。三组独立目录及汇总位于 `formal_v1/navigation/`，`report_stage2_9200_navigation.py` 核验1839条完整覆盖、来源SHA、同源配置、冻结和按11场景的配对区间。
 
 目标环境55项数据/模型/监督/在线合同回归通过，另5项宿主编排回归通过，均退出0。日志分别为实验根 `tests.log`、`runner_tests.log`；首轮模型计算源码d1d0ee8，编排审查b20f492。短采集正在执行，正式结果尚未产生。
+
+### 内存预检修正
+
+首轮8环境train64在56/64路线因宿主全局OOM停止；内核2026-09-21 10:44:43记录杀死模拟环境PID2807033（匿名常驻约4.65GB）。当时还有24个编译辅助进程。失败数据和日志保留在preflight_train64，不进入正式数据。调整新轮统一4环境，9200采集/导航显式限制TORCHINDUCTOR_COMPILE_THREADS=1，并写入provenance/launch。该调整只控制执行资源，两组使用同一设置；重新从头短采train/dev各64路线验收。
