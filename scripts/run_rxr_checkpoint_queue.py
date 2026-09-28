@@ -20,6 +20,7 @@ import shlex
 import shutil
 import subprocess
 import threading
+import time
 
 REPO = Path('/home/gwl/project/etpr1/ETP-R1')
 REMOTE_REPO = Path('/home/a6000/gwl/ETP-R1')
@@ -89,7 +90,7 @@ def run_queue(args):
     root.mkdir(parents=True, exist_ok=True)
     lock = open(root / 'queue.lock', 'w')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    if (root / 'queue.json').exists():
+    if (root / 'queue.json').exists() and not args.resume:
         raise ValueError('Existing queue: use a new directory; no implicit restart')
     sources = {}
     for directory in args.checkpoints:
@@ -105,6 +106,25 @@ def run_queue(args):
     state = dict(started_at=now(), pid=os.getpid(), status='running',
                  source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
                  skipped=sorted(skipped), pending=pending, jobs={}, lanes={})
+    adopted = {}
+    if args.resume:
+        current_commit = state['source_commit']
+        state = json.loads((root / 'queue.json').read_text())
+        if state['skipped'] != sorted(skipped):
+            raise ValueError('Resume must preserve skipped checkpoints')
+        pending = state['pending']
+        for key, job in list(state['jobs'].items()):
+            if job['status'] == 'running':
+                if job['lane'] == 'eval':
+                    raise ValueError('Audit remote running job before resuming; automatic remote adoption is forbidden')
+                adopted[job['lane']] = job
+            elif job['status'] == 'failed':
+                state.setdefault('failed_attempts', []).append(job)
+                pending.append(job['iteration'])
+                del state['jobs'][key]
+        pending.sort(reverse=True)
+        state.setdefault('resumes', []).append(dict(at=now(), prior_pid=state['pid'], source_commit=current_commit))
+        state.update(pid=os.getpid(), status='running')
     mutex = threading.Lock()
     remote_root = Path(args.remote_output)
 
@@ -122,6 +142,34 @@ def run_queue(args):
 
     def worker(lane, gpu, envs):
         with open(root / (lane + '.log'), 'a', buffering=1) as log:
+            if lane in adopted:
+                job = adopted[lane]
+                output = Path(job['output'])
+                try:
+                    pid = int((output / 'supervisor.pid').read_text())
+                    print(now(), 'Adopting existing local evaluation', pid, output, file=log, flush=True)
+                    while not (output / 'exit_code').exists():
+                        command_line = Path(f'/proc/{pid}/cmdline').read_bytes()
+                        if str(output).encode() not in command_line or b'run_rxr_checkpoint_eval.sh' not in command_line:
+                            raise ValueError('Adopted process identity does not match its output')
+                        time.sleep(10)
+                    code = int((output / 'exit_code').read_text())
+                    if code != 0:
+                        raise subprocess.CalledProcessError(code, ['adopt', str(output)])
+                    validation = json.loads((output / 'validation.json').read_text())
+                    if not validation['full'] or validation['episodes'] != 11006:
+                        raise ValueError('Adopted result is not a validated full evaluation')
+                    with mutex:
+                        job.update(status='completed', exit_code=0, finished_at=now(), validation=validation)
+                        save()
+                except Exception as error:
+                    with mutex:
+                        job.update(status='failed', finished_at=now(), error=str(error),
+                                   exit_code=getattr(error, 'returncode', 1))
+                        state['lanes'][lane] = 'failed'
+                        save()
+                    print(now(), repr(error), file=log, flush=True)
+                    return
             while True:
                 with mutex:
                     if not pending:
@@ -140,7 +188,8 @@ def run_queue(args):
                     with mutex:
                         job['sha256'] = digest
                         save()
-                    name = f'{lane}_iter{iteration}'
+                    retries = sum(j['iteration'] == iteration for j in state.get('failed_attempts', []))
+                    name = f'{lane}_iter{iteration}' + (f'_retry{retries}' if retries else '')
                     if lane == 'eval':
                         output = remote_root / name
                         staging = remote_root / 'staging'
@@ -220,6 +269,7 @@ def main():
     queue.add_argument('--skip', type=int, nargs='*', default=[])
     queue.add_argument('--server-envs', type=int, default=8)
     queue.add_argument('--eval-envs', type=int, default=4)
+    queue.add_argument('--resume', action='store_true', help='Adopt live local jobs and retry audited failed jobs')
     args = parser.parse_args()
     if args.action == 'validate':
         validate(args.output, args.episodes)

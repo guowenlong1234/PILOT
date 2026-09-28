@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 from vlnce_baselines.models.graph_utils import calculate_vp_rel_pos_fts
+from vlnce_baselines.common.environments import calculate_vp_rel_pos
 
 
 @pytest.mark.parametrize('b', [(2.,0.,0.),(-2.,0.,0.),(0.,0.,2.),(0.,0.,-2.)])
@@ -24,3 +25,23 @@ def test_nonboundary_geometry_keeps_original_values(dtype):
 
 def test_coincident_positions_are_finite():
     assert np.array_equal(calculate_vp_rel_pos_fts((0.,0.,0.),(0.,0.,0.)),(0.,0.,1e-8))
+
+
+@pytest.mark.parametrize('b', [(2.,0.,0.),(-2.,0.,0.),(0.,0.,2.),(0.,0.,-2.)])
+def test_control_heading_axis_roundoff_is_finite(monkeypatch, b):
+    original = np.sqrt
+    monkeypatch.setattr(np, 'sqrt', lambda x: np.nextafter(original(x), 0.))
+    with np.errstate(invalid='raise'):
+        heading, distance = calculate_vp_rel_pos((0.,0.,0.), b)
+    assert np.isfinite([heading, distance]).all()
+    assert 0 <= heading < 2 * np.pi
+
+
+@pytest.mark.parametrize('dtype', [np.float32, np.float64])
+def test_control_heading_nonboundary_is_unchanged(dtype):
+    a = np.array([1.,2.,3.], dtype=dtype)
+    b = np.array([4.,0.,1.], dtype=dtype)
+    dx, _, dz = b - a
+    distance = max(np.sqrt(dx**2 + dz**2), 1e-8)
+    expected = np.arcsin(-dx / distance) % (2 * np.pi)
+    assert calculate_vp_rel_pos(a, b) == (expected, distance)

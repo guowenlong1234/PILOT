@@ -396,7 +396,9 @@ def calculate_vp_rel_pos(p1, p2, base_heading=0, base_elevation=0):
     xz_dist = max(np.sqrt(dx**2 + dz**2), 1e-8)
     # xyz_dist = max(np.sqrt(dx**2 + dy**2 + dz**2), 1e-8)
 
-    heading = np.arcsin(-dx / xz_dist)  # (-pi/2, pi/2)
+    # Roundoff at axis-aligned displacements can put the ratio one ULP
+    # outside [-1, 1], which would feed a NaN rotation to the simulator.
+    heading = np.arcsin(np.clip(-dx / xz_dist, -1.0, 1.0))  # (-pi/2, pi/2)
     if p2[2] > p1[2]:
         heading = np.pi - heading
     heading -= base_heading
