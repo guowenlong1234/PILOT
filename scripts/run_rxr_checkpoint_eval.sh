@@ -47,7 +47,7 @@ EXP_NAME="rxr_queue_$(basename "$OUTPUT")"
 {
     date -Is
     hostname
-    whoami
+    id
     echo "pid=$$ checkpoint=$CHECKPOINT gpu=$GPU environments=$ENVS episodes=$EPISODES"
     git rev-parse HEAD
     "${RUN[@]}" -c 'import sys,torch,transformers,habitat,habitat_sim; print(dict(python=sys.version,torch=torch.__version__,cuda=torch.version.cuda,transformers=transformers.__version__,habitat=habitat.__version__,habitat_sim=habitat_sim.__version__))'
