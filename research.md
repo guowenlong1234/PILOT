@@ -1,12 +1,20 @@
 # Project Research
 
+2026-10-08 11:23最新现场：RxR相机全量4220轨迹427685帧重建与CLS/patch特征预计算完成，两项验收退出0；自动接力已进入正式双A6000从头训练，FRESH_START明确未加载旧世界模型。epoch0、每轮1510更新、50轮；核查时两卡100%负载，尚未到首个100步日志/1000步检查点。见`docs/rxr-world-model-fresh-training-20261008.md`。
+
 2026-10-08用户授权RxR世界模型从头训练，使用双A6000；新检查点全部保留，旧导航实验按指标清理。独立RAE-NWM工作区`/home/gwl/project/RAE-NWM/raenwm-rxr-fresh`，原4220轨迹按0.88m/63°/224²重生成；双卡有效batch96、50轮、seed42。短测和结构检查通过，自动接力在等待正确JPEG数据完成与校验。旧三个导航实验删除234中间模型、保留各5最佳及2200对照和恢复状态，释放约335GiB；原权重/日志未覆盖。位置与清单见`docs/rxr-world-model-fresh-training-20261008.md`，实时阶段以远端pipeline.json为准。
+
+2026-10-08查找旧低机位权重：训练机RAE-NWM的`raenwm_mp3d_96_20260416_172946`仍保留65k/70k/75k，70k已CPU只读加载确认patch-only（无CLS、256图块）。历史记录为0.88m、640×480旧预处理；旧采集代码默认90°，实际63°覆盖未找到，不可称已匹配RxR。详见`docs/legacy-low-camera-world-model-20261008.md`。未启动新实验。
 
 2026-10-08扩大RxR相机诊断完成：10场景160轨迹640查询（新增592），四相机×3噪声共7680输出，三分片退出0。场景等权CLS0.8347→0.7696、patch0.7291→0.6453，10场景均退化；预测输入CWP提议可达率91.51%→80.77%（−10.74个百分点），下降幅度小于前轮估计但区间不跨0。仅视场变化影响较大；新增样本单独检查方向一致。见`docs/rxr-camera-quality-expanded-20261008.md`。仅评估，未训练。
 
 2026-10-08双机RxR相机诊断完成：6场景12轨迹48查询、四相机条件、3噪声，三个分片退出0。现75k世界模型从90°/1.25m切至63°/0.88m后CLS余弦0.8405→0.7794、patch0.7324→0.6582，六场景均下降；预测图像输入的后继提议可达率93.85%→72.32%。仅改视场影响较大。建议适配微调世界模型及后继预测器，本轮未训练；这是匹配轨迹预测/几何诊断，不是导航SR。见`docs/rxr-camera-quality-experiment-20261008.md`。
 
+2026-10-08 RxR世界模型适配核查：当前RxR为224²/63°/0.88m，现用75k世界模型及二阶段DINO-CWP源于90°/1.25m数据。direct渲染继承RxR传感器，cube投影仍硬编码90°，迁移前需修正；建议先质量对照再从现权重适配微调，不能把已有无世界模型150点测评当作增强方案验证。原采集含多个RxR划分，正式泛化结果前还需审计模型训练列表。详见`docs/rxr-world-model-adaptation-analysis-20261008.md`。本次仅分析，未训练。
+
 2026-10-08称呼统一：当前测评机为 RTX 3090 24GB，笔记本与训练机均使用 `ssh eval-3090`（简写 `ssh 3090`）；笔记本自动经server跳板、训练机直连专线。项目约定、运行文档及宿主机硬件检查同步更新；历史旧平台性能记录和原始日志路径保留其历史含义。
+
+2026-10-08最新只读核查：RxR双机全检查点队列已于10月3日16:46（北京时间）completed，149个新测点全部退出0、各11006路线，加复用2200步覆盖全部150点；训练机完成91点、测评机58点。SR最佳29600步60.2217%（SPL49.1180%），SPL最佳21600步49.7131%（SR59.6402%）；最后30000步60.1127%/47.7640%。两机GPU空闲、当天刚重启，测评机项目容器当前停止；这发生在测评完成之后。测评机实际报告RTX3090 24GB。此前9200未来内容对照已完成但无收益。工程已完成基座与R2R二阶段闭环，仍需证明增强收益及完整方案在RxR上的效果。证据、核查范围和运行现场见`docs/recent-machine-task-audit-20261008.md`；下方9月28日“后台运行”为历史状态。
 
 2026-09-28 10:04，按用户要求启动RxR全检查点双机共享测评队列。200—30000步共150点，复核保留已完成的2200步，剩149点按降序由训练机两张A6000（每卡8环境）与测评机单卡（4环境）动态领取。初始源码ed4ab13；两机真实16路线短测和各12项检查通过。测评机首轮29600步在111路线因control方向角arcsin越界后EOF退出，以0ba60b5裁剪数学边界，两机各18项检查通过并重跑；训练机两路保留运行，由新监督PID261302接管。完整11006路线、无滑动/control回退；每份结束审计ID与指标。测评机经专线逐份SHA核验传入，成功后只清理本轮临时副本，原件与结果保留。训练机实验根`eval_parallel_20260928/queue.json`为统一状态；测评机`data/logs/rxr_eval_parallel_20260928/`保留当地结果。操作、路径和失败处理见`docs/rxr-parallel-checkpoint-evaluation-20260928.md`。下方“两机空闲”为本次启动前的核查。
 
@@ -157,6 +165,12 @@ README 原始说明要求创建 `etpr1` conda 环境，核心环境为 Python 3.
 
 ## Important Modules And Functions
 
+- 2026-09-29 执行控制链核查：trainer将选中ghost及front位置交给环境；`environments.py:1164` 的single_step_control先按相对角度转向，再执行MOVE_FORWARD，左右动作为原地旋转，无独立后退/侧移动作。control回溯逐节点执行，teleport配置则传送至front；STOP由上层单独处理。论文可用Low-Level Controller概括已有执行逻辑，不能称为新增学习式控制器。
+
+- 2026-09-29 评分器输出边界复核：`residual_head.py:347–416` 的L轮仅包含融合、跨候选比较与反馈；score_mlp及tanh有界残差在循环外执行。主图已补独立Residual Scoring Head，×L不再覆盖最终打分。
+
+- 2026-09-29 主图拓扑策略核查：`R1Policy.py` navigation → `ETP_R1_vilmodel_cmt.py:789` forward_navigation；节点视觉/位置/步数/任务编码经图语言跨模态Transformer，再以节点查询语言并拼接，经NextActionPrediction输出基础logits，屏蔽已访问/无效节点。独立绘图第七版以“Topological Policy：Graph–text Transformer + Action head”概括该步骤，见本地 `paper/notes/pilot-panel4-redesign-20260929.md`。
+
 - 2026-09-11，持久候选状态已由 `1093ee8` 合入主工作区 `feature/e24-joint-sft`。`ghost_concat_fusion.py` 与 `GraphMap.write_ghost_concat_state` 支持把融合结果写回候选图状态：先按真实观测次数聚合旧融合状态与新观测，再加预测拼接残差，预测不增加观测次数；无预测时保留聚合状态，跨步保留梯度、每段 rollout 新建图。这不同于历史临时融合实验，也不同于第二阶段的原始 q0 预测记录。
 - 持久状态配置为 `run_r2r/iter_train_rae_dino_ghost_concat_persistent.yaml`，第二阶段关闭、GRPO 仍拒绝 ghost_concat。真实 GPU 更新、恢复和短导航验证记录见 `docs/persistent-ghost-gpu-validation-20260911.md`，启动记录见 `docs/persistent-ghost-compiled-10k-operations-20260911.md`。论文按完整双层结构组织，但不能以这一单阶段配置宣称完整组合已联合验证。
 - 当前原生 CLS 世界模型入口配置为 `configs/nwm/raenwm_mp3d_fresh_cls.yaml`：冻结 DINOv2 表征上的 `CDiT-B/2` 条件生成，联合预测 CLS+256 patch，采用线性路径速度场/流匹配和欧拉采样。`runtime.py` 禁用 RGB 解码，但不能因此将其归类为直接回归式 JEPA；技术定位与原始 RAE-NWM 论文差异见 `paper/notes/world-model-landscape-and-section-b-20260905.md`。
@@ -169,6 +183,18 @@ README 原始说明要求创建 `etpr1` conda 环境，核心环境为 Python 3.
 - `habitat_extensions/habitat_simulator.py`: 对 Habitat-Sim simulator 的项目定制封装。
 
 ## Data, Configs, And Artifacts
+
+2026-09-29，用户确认高层改图方向后，首页第四部分已重画为“增强拓扑＋候选未来证据→单一Lookahead-Guided Refinement模块→高亮候选A的拓扑”。只保留一个主要计算模块及残差公式；第三页详细版备份保持不变。预览 `paper/figures/pilot-homepage-high-level-panel4-20260929.png`，说明见本地 `paper/notes/pilot-panel4-abstraction-redesign-20260929.md`。
+
+
+2026-09-29，按用户要求在正式主图新增第三页“第四部分－详细版备份 2026-09-29”，保存181个原生可编辑对象；原有两页不变，第三页已实际导出检查。后续拟提高第四部分抽象层级，按“候选拓扑＋未来证据→单一前瞻细化模块→选择结果”讨论，尚未替换首页。分析见本地 `paper/notes/pilot-panel4-abstraction-redesign-20260929.md`。
+
+
+2026-09-29，经用户确认，第四部分在现有组合输出上方原生加入Low-Level Controller及左转/前进/右转图标，Next Move竖直上接执行器。最新主图仍是 `paper/figures/pilot-main-v10-editable.drawio` 首页图；预览 `paper/figures/pilot-homepage-low-level-controller-20260929.png`，细节见本地 `paper/notes/pilot-panel4-redesign-20260929.md`。
+
+
+2026-09-29，用户审阅的第四部分第八版已原生合入 `paper/figures/pilot-main-v10-editable.drawio` 的“首页图”。169个新可编辑对象替换旧第四部分，其他395个对象及另一页核验不变；1.5倍draw.io整图导出检查通过。预览 `paper/figures/pilot-homepage-panel4-v8-20260929.png`；备份与审计见本地 `paper/notes/pilot-panel4-redesign-20260929.md`。后续继续编辑正式主文件，勿重运行生成脚本覆盖用户调整。
+
 
 论文主图当前以 `paper/figures/pilot-main-v10-editable.drawio` 为唯一编辑主版本，包含用户手工修改；不可用旧 HTML/SVG 构建脚本覆盖。2026-09-14 已整理 Input 栏的输入、编码器和特征输出，直接用本机 draw.io 导出验证；版本变更记录见 `paper/notes/pilot-svg-redraw-v10-20260914.md`，备份在 `paper/figures/archive/`。
 
@@ -298,6 +324,9 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 - 测评机只有一张 RTX 3090 24GB。现有 ETPNav 任务占用 GPU 时，不得并行启动全量特征生成、预训练、SFT、GRPO 或完整评测，也不得擅自中断 ETPNav。
 
 ## Last Reviewed
+
+2026-09-29，论文主图第四部分设计核查：直接阅读当前 `residual_head.py`、`stage2_training.py`、`stage2_online.py` 与 `stage2_collect.py`，确认默认三轮候选内融合/候选间比较、有界残差及保留基座STOP；当前部署一次q1预测不能直接支撑主图的任意深度×K循环。布局说明见本地 `paper/notes/pilot-panel4-redesign-20260929.md`，独立SVG/PNG位于 `paper/figures/review-20260929/`，原主图未修改。
+
 
 2026-09-20，为RxR吞吐优化复核训练机进程、原采样曲线、真实双卡性能及显存；主要检查 `ss_trainer_ETP_R1.py`、`R1Policy.py`、视觉编码器、快速配置及基准脚本。最终验证和所有候选结果见 `docs/rxr-throughput-optimization-20260920.md`。
 
