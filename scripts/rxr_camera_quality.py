@@ -17,9 +17,10 @@ def prepare(a):
         r=json.loads(line)
         if r['source_split']=='val_unseen' and r['filtered_len']>=45:groups[r['scene_id']].append(r)
     rng=random.Random(20261008);scenes=sorted(groups);rng.shuffle(scenes);jobs=[]
-    for scene in scenes[:6]:
+    selected_scenes=scenes if a.scenes == 0 else scenes[:a.scenes]
+    for scene in selected_scenes:
         rows=sorted(groups[scene],key=lambda r:r['traj_name']);rng.shuffle(rows)
-        for r in rows[:2]:
+        for r in rows[:a.trajectories]:
             with (root/'data/mp3d'/r['traj_name']/'traj_data.pkl').open('rb') as f:d=pickle.load(f)
             pos=np.asarray(d['position']); yaw=np.asarray(d['yaw'])-math.pi
             # Raw collection yaw is Habitat yaw + pi. Use true low-level positions.
@@ -29,9 +30,9 @@ def prepare(a):
                     jobs.append(dict(id=f"{r['traj_name']}_{t}_{h}",scene=scene,trajectory=r['traj_name'],
                         positions=pos[ids].tolist(),yaws=yaw[ids].tolist(),target=pos[target].tolist(),
                         target_yaw=float(yaw[target]),horizon_frames=h))
-    assert len(jobs)==48
+    assert jobs and len({j["id"] for j in jobs})==len(jobs)
     out=Path(a.output);assert not out.exists()
-    dump(out,dict(seed=20261008,scenes=scenes[:6],jobs=jobs,cameras=CAMERAS,seeds=[11,29,47],
+    dump(out,dict(seed=20261008,scenes=selected_scenes,jobs=jobs,trajectories_per_scene=a.trajectories,cameras=CAMERAS,seeds=[11,29,47],
          severe_flags=dict(cls_cosine_drop=.05,patch_cosine_drop=.05,cls_rmse_increase_fraction=.2,cwp_clear_drop=.10),
          scope='Matched recorded RxR paths; direct rendering; no scene-generalization claim; geometric CWP checks are not teacher accuracy.'))
     print('prepared',len(jobs),'queries',flush=True)
@@ -140,6 +141,7 @@ def run(a):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('action',choices=['prepare','run']);p.add_argument('--output',required=True)
+    p.add_argument('--scenes',type=int,default=6);p.add_argument('--trajectories',type=int,default=2)
     p.add_argument('--source',default='/home/gwl/project/RAE-NWM/tools/data/mp3d_full_h125_224_merged');p.add_argument('--manifest')
     p.add_argument('--shard',type=int,default=0);p.add_argument('--shards',type=int,default=3);p.add_argument('--limit',type=int,default=0)
     a=p.parse_args();prepare(a) if a.action=='prepare' else run(a)
