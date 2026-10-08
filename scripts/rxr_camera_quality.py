@@ -43,7 +43,7 @@ class Renderer:
         sensors=[]
         for name,(fov,height) in CAMERAS.items():
             s=hs.CameraSensorSpec();s.uuid=name;s.sensor_type=hs.SensorType.COLOR;s.sensor_subtype=hs.SensorSubType.PINHOLE
-            s.resolution=[224,224];s.hfov=fov;s.position=[0,height,0];sensors.append(s)
+            s.resolution=[224,224];s.hfov=fov;s.position=[0.0,float(height),0.0];sensors.append(s)
         ac=hs.agent.AgentConfiguration();ac.sensor_specifications=sensors;ac.height=.88;ac.radius=.18
         self.sim=hs.Simulator(hs.Configuration(cfg,[ac]));assert self.sim.pathfinder.is_loaded
     def render(self,pos,yaw):
