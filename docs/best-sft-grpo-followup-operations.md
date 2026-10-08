@@ -7,7 +7,7 @@
 2. 校验结果 JSON 和对应的非空 SFT checkpoint。
 3. 在两轮合计 150 个候选中，按 `success + spl` 选择唯一的全局最佳模型。
 4. 用该模型在训练机的两张 A6000 上只启动一次 DINO-GRPO。
-5. 将 GRPO 模型 checkpoint 原子同步到测评机，并由 4090 串行完整评测。
+5. 将 GRPO 模型 checkpoint 原子同步到测评机，并由 3090 串行完整评测。
 6. 等 GRPO 正常完成、100 个 checkpoint 全部同步且产生有效结果后结束。
 
 `success` 就是 SR（成功率）。并列时依次比较 SPL、SR、iteration 和轮次名，

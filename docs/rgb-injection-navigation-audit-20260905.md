@@ -29,7 +29,7 @@
 | 任务 | 修复后低级 RGB-only SFT | 同轮 checkpoint 升序完整评测 |
 | 进度 | 已保存、成功同步 `iter5000`，约在 5,056/10,000 | 已完成 `iter200`–`iter3800` 共 19 点，正在评 `iter4000` |
 
-测评机仍沿用“4090/测评机”的机器称呼，但本次 `nvidia-smi` 确认为 RTX 3090。仅 `gwl-etpr1-rae` 容器运行；受保护的 `gwl-etpnav` 未运行。
+本次 `nvidia-smi` 确认测评机为 RTX 3090，现统一称为“3090 测评机”。仅 `gwl-etpr1-rae` 容器运行；受保护的 `gwl-etpnav` 未运行。
 
 训练父进程 `torchrun` PID 42237，两个 rank 为 42270/42271，处于 supervisor 42131 下。训练日志持续增长，checkpoint 同步日志已确认发布 `iter5000`；搜索未出现 Traceback、anchor-only、CUDA out of memory 或 RuntimeError。
 

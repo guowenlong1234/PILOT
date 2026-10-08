@@ -8,7 +8,7 @@
 
 ## 当前正式配置
 
-- 测评机：单张 RTX 4090 24GB。
+- 测评机：单张 RTX 3090 24GB。
 - 单次小 batch：16。
 - 梯度累积：8 次。
 - 有效 batch：128，与原四卡 `4 x 32` 一致。
@@ -53,36 +53,36 @@ pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768/best/
 
 ## 长任务命令
 
-以下命令都从本机执行。宿主机入口会先确认 `eno1=10.10.10.2`，并检查 ETPNav 进程和 GPU；发现已有任务时会拒绝启动，不会停止别的任务。
+以下命令都从本机执行。宿主机入口会先确认 `enp6s0=10.10.10.2`，并检查 ETPNav 进程和 GPU；发现已有任务时会拒绝启动，不会停止别的任务。
 
 首次启动：
 
 ```bash
-ssh 4090 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_pretrain_host.sh start'
+ssh eval-3090 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_pretrain_host.sh start'
 ```
 
 查看状态：
 
 ```bash
-ssh 4090 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_pretrain_host.sh status'
+ssh eval-3090 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_pretrain_host.sh status'
 ```
 
 持续查看日志：
 
 ```bash
-ssh 4090 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_pretrain_host.sh tail'
+ssh eval-3090 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_pretrain_host.sh tail'
 ```
 
 电脑或容器异常退出后，从最新完整检查点恢复：
 
 ```bash
-ssh 4090 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_pretrain_host.sh resume'
+ssh eval-3090 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_pretrain_host.sh resume'
 ```
 
 正常请求停止：
 
 ```bash
-ssh 4090 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_pretrain_host.sh stop'
+ssh eval-3090 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_pretrain_host.sh stop'
 ```
 
 托管会话名默认为 `etpr1-rae-pretrain`，日志位于：

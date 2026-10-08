@@ -6,7 +6,7 @@
 
 ## 正式配置
 
-- 测评机：单张 RTX 4090 24GB。
+- 测评机：单张 RTX 3090 24GB。
 - 并行环境：8，与原工程每张 GPU 的设置相同。
 - 梯度累积：4 次。
 - 有效 batch：`8 x 4 = 32`，与原工程 `4 GPU x 8` 一致。
@@ -68,37 +68,37 @@ data/logs/rae_dinov2_etpnav_cls_768/r2r_sft_formal/
 首次启动：
 
 ```bash
-ssh eval 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_r2r_sft_host.sh start'
+ssh eval-3090 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_r2r_sft_host.sh start'
 ```
 
 状态：
 
 ```bash
-ssh eval 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_r2r_sft_host.sh status'
+ssh eval-3090 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_r2r_sft_host.sh status'
 ```
 
 日志：
 
 ```bash
-ssh eval 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_r2r_sft_host.sh logs'
+ssh eval-3090 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_r2r_sft_host.sh logs'
 ```
 
 持续查看：
 
 ```bash
-ssh eval 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_r2r_sft_host.sh tail'
+ssh eval-3090 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_r2r_sft_host.sh tail'
 ```
 
 从最新完整 checkpoint 恢复：
 
 ```bash
-ssh eval 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_r2r_sft_host.sh resume'
+ssh eval-3090 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_r2r_sft_host.sh resume'
 ```
 
 请求正常停止：
 
 ```bash
-ssh eval 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_r2r_sft_host.sh stop'
+ssh eval-3090 'cd /home/a6000/gwl/ETP-R1 && scripts/manage_rae_r2r_sft_host.sh stop'
 ```
 
 宿主机入口会检查 ETPNav 任务和 GPU 使用情况，发现冲突时拒绝启动。

@@ -1,5 +1,7 @@
 # Project Research
 
+2026-10-08称呼统一：当前测评机为 RTX 3090 24GB，笔记本与训练机均使用 `ssh eval-3090`（简写 `ssh 3090`）；笔记本自动经server跳板、训练机直连专线。项目约定、运行文档及宿主机硬件检查同步更新；历史旧平台性能记录和原始日志路径保留其历史含义。
+
 2026-09-28 10:04，按用户要求启动RxR全检查点双机共享测评队列。200—30000步共150点，复核保留已完成的2200步，剩149点按降序由训练机两张A6000（每卡8环境）与测评机单卡（4环境）动态领取。初始源码ed4ab13；两机真实16路线短测和各12项检查通过。测评机首轮29600步在111路线因control方向角arcsin越界后EOF退出，以0ba60b5裁剪数学边界，两机各18项检查通过并重跑；训练机两路保留运行，由新监督PID261302接管。完整11006路线、无滑动/control回退；每份结束审计ID与指标。测评机经专线逐份SHA核验传入，成功后只清理本轮临时副本，原件与结果保留。训练机实验根`eval_parallel_20260928/queue.json`为统一状态；测评机`data/logs/rxr_eval_parallel_20260928/`保留当地结果。操作、路径和失败处理见`docs/rxr-parallel-checkpoint-evaluation-20260928.md`。下方“两机空闲”为本次启动前的核查。
 
 2026-09-28两机只读核查：训练机RxR快速续训已于9月23日12:55跑满30000步、退出0，2200—30000步共140份模型无缺号，最终训练状态存在；正式续训日志未发现致命异常。测评机9200未来内容full/none两组各6000步完成，最终三组导航各1839路线、退出0，9月22日15:13结束；旧流水线仍留failed，但`navigation_latest.json`指向已完成的新导航目录。新验收使用动作/指标/零残差一致性，不再强制旧浮点分数差值门槛。SR基线/full/none为64.1653/63.5128/63.7847%，无收益。两机GPU当前空闲；训练机根盘余33G、数据盘余322G，测评机余67G。详情及历史报错见`docs/recent-machine-task-audit-20260928.md`；下方运行中记录为历史状态。
@@ -138,7 +140,7 @@ README 原始说明要求创建 `etpr1` conda 环境，核心环境为 Python 3.
 - `CUDA_VISIBLE_DEVICES=0,1,2,3 bash run_rxr/main_server.bash dagger 2333`: RxR 在线 SFT。
 - `CUDA_VISIBLE_DEVICES=0,1,2,3 bash run_rxr/main_server.bash grpo 2333`: RxR 在线 RFT/GRPO。
 - `CUDA_VISIBLE_DEVICES=0,1,2,3 bash run_rxr/main_server.bash eval 2333`: RxR 评测。
-- `scripts/manage_rae_pretrain_host.sh start|resume|status|tail|stop`：在 4090 宿主机检查 ETPNav/GPU 后，通过专用容器内的 tmux 托管 RAE/DINOv2 完整联合预训练。完整命令见 `docs/rae-dinov2-pretrain-operations.md`。
+- `scripts/manage_rae_pretrain_host.sh start|resume|status|tail|stop`：在 3090 测评机宿主机检查 ETPNav/GPU 后，通过专用容器内的 tmux 托管 RAE/DINOv2 完整联合预训练。完整命令见 `docs/rae-dinov2-pretrain-operations.md`。
 - `scripts/stress_pretrain_dataloader.py`：不构造模型，直接使用正式 MLM/SAP 数据集和整理 batch 的代码，对 `n_workers`、`pin_memory`、`fork/spawn/forkserver`、CUDA 初始化顺序和 CUDA 搬运做分组压力测试；正式长训练运行时不得并行执行其大规模或 CUDA 模式。
 - `scripts/manage_r2r_sft_checkpoint_sync_server.sh start|status|tail|stop`：训练机持续扫描完整的 R2R SFT 模型/训练状态对，经 2.5 GbE 直连把模型 checkpoint 原子同步到测评机。
 - `scripts/manage_rae_r2r_eval_watch_host.sh start|status|tail|stop`：测评机宿主机持续监控同步完成的 checkpoint，在确认 ETPNav 未占用 GPU 后，通过 `gwl-etpr1-rae` 和 `etpr1_rae` 串行完成 R2R `val_unseen` 全量评测。
@@ -226,7 +228,7 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 
 2026-07-15 已完成正式验收：完整测试为 `269 passed, 3 warnings`；RAE encoder-only 对照结果为 `max_abs=0`、`cosine=0.9999999404`；全量 HDF5 含 10,567 个 `[36,768] float32` 视点且完整性错误为 0；RAE 正式 smoke 的 15 个阶段全部通过。原 CLIP 的 `ckpt.iter25000.pth` 也在现代运行时完成一个 R2R `val_unseen` episode，权重无未处理 missing/extra layer。详细命令、性能和远端日志见 `docs/rae-dinov2-eval-host-validation.md`。
 
-2026-07-15 又在完整 3,210,737 条真实联合预训练数据上完成单卡 RTX 4090 的 batch 实测。float32 下，`batch_size=32` 虽能完成 20 次更新，但峰值显存达到 23,684 MiB，距离整卡上限只剩约 880 MiB，不适合作为长训练配置；`batch_size=16` 的峰值为 17,692 MiB；`batch_size=16 + gradient_accumulation_steps=8` 能完成真实累积更新，峰值为 17,842 MiB，对应有效 batch 128。正式配置现已使用后者。持久化日志位于测评机 `data/logs/rae_dino_batch_test/`。
+2026-07-15 又在完整 3,210,737 条真实联合预训练数据上完成旧测评平台单卡 的 batch 实测。float32 下，`batch_size=32` 虽能完成 20 次更新，但峰值显存达到 23,684 MiB，距离整卡上限只剩约 880 MiB，不适合作为长训练配置；`batch_size=16` 的峰值为 17,692 MiB；`batch_size=16 + gradient_accumulation_steps=8` 能完成真实累积更新，峰值为 17,842 MiB，对应有效 batch 128。正式配置现已使用后者。持久化日志位于测评机 `data/logs/rae_dino_batch_test/`。
 
 2026-07-15 已补齐联合预训练断点续训和 tmux 长任务托管：每个可恢复点同时原子写入模型与包含优化器、混合精度缩放器、全局步数、数据混合步数和随机状态的 `train_state`；恢复时会拒绝 batch、梯度累积、GPU 数或模型配置不一致的状态。默认保留最近 3 对完整状态，并每 25,000 步保留一个模型里程碑。真实模型已完成“第 1 步保存、由新进程恢复并完成第 2 步”，状态含 484 组优化器参数；全量测试为 `276 passed, 3 warnings`。操作手册见 `docs/rae-dinov2-pretrain-operations.md`。
 
@@ -266,13 +268,13 @@ RAE/DINOv2 分支的所有验证必须在测评机 `gwl-etpr1-rae` 容器和 `et
 - 2026-08-15 当前训练机 R2R SFT 正式入口为 `scripts/run_rae_r2r_sft_server_job.sh`，使用双卡 DDP、每卡 8 个 Habitat 环境、每卡 batch 8、梯度累积 1，即每次优化器更新全局约 16 条轨迹。学习率 `1e-5`，预热 500 次；`min_lr_ratio=1.0` 使预热后实际保持恒定学习率。DAgger 教师采样初始比例 `0.75`，每 3,000 次按幂衰减；最长轨迹 15，最长文本 150，waypoint augmentation 开启。DINO 主干、深度编码器和路点预测器冻结，零初始化的 CLS residual MLP 与导航策略其余部分参与训练。上一次 `r2r_sft_formal` 实际使用 15,000 次；当前脚本默认已改为 2,000 次的 `panorama_order` 检查实验，且默认预训练路径仍是 raw-CLS 实验的 `model_best_step_220000.pt`，启动新正式 SFT 前必须明确覆盖为本轮选定的预训练 checkpoint 和所需总迭代数。上一次 50 万步 `rae_dinov2_cls_mlp/model_best_step_452500.pt` 属于已退役的旧视觉接口：其经预训练的 CLS MLP 是 `768→768→768→512`，后接 `img_linear 512→768`。当前 SFT 接口则是 raw CLS 上的残差 MLP `768→768→768→768`，再接 `img_linear 768→768`；当前代码会直接拒绝加载旧 checkpoint。若使用旧的 nonvisual-transfer 转换，旧 `rgb_projection` 和形状不匹配的 `img_linear` 都被丢弃；新 residual MLP 与 `img_linear 768→768` 均未经联合预训练，视觉桥接层需从 SFT 开始学习。
 - 原版 ETP-R1 的 R2R SFT 发布入口 `run_r2r/main_server.bash` 使用 4 卡、每卡 8 个 Habitat 环境、无梯度累积和 30,000 次优化器更新，因此每次更新的全局有效 batch 是 32 条轨迹；发布的下游 checkpoint 是从该预算内选择的 `ckpt.iter25000.pth`。原始训练循环每个 iteration 只执行一次 `optimizer.step()`，`IL.batch_size: 1` 并不代表全局 batch 为 1。当前双卡、每卡 8 环境、15,000 次配置的有效 batch 为 16、总轨迹预算约为原版的四分之一。RxR 原版则是 4 卡、每卡 6 环境、30,000 次，有效 batch 24。
 - 2026-08-15 18:12（Asia/Shanghai），已在训练机从上述旧最佳的转换产物 `rae_dinov2_etpnav_cls_768_legacy_base_transfer/model_step_452500_nonvisual_transfer.pt` 启动新的双卡 R2R SFT。实验名为 `rae_dinov2_etpnav_cls_768_legacy452500_nonvisual_r2r_sft`，输出目录为 `data/logs/rae_dinov2_etpnav_cls_768/r2r_sft_legacy452500_nonvisual_20260815`，总迭代数 15,000；checkpoint 同步目标也已隔离到测评机对应的新目录。启动提交为训练机分支 `feature/world-model-migration` 的 `97d397f`。两个 rank 均成功加载转换 checkpoint，连续运行到第 200 次更新后已成对写出约 1.53 GB 的 `ckpt.iter200.pth` 和约 3.00 GB 的 `train_state.iter200.pth`，随后继续进入下一轮更新；模型 checkpoint 也已通过直连同步到测评机的新目录。保存后两张 A6000 显存约 21.7/20.1 GiB、利用率约 62%/61%，未见缺失键、形状冲突、异常退出或显存溢出。启动日志为 `supervisor_server/start_20260815T181211.log`。
-- 2026-08-15 18:33（Asia/Shanghai），测评机已启动本次 SFT 的专用评测 watcher，日志为 `data/logs/rae_dinov2_etpnav_cls_768/r2r_sft_legacy452500_nonvisual_20260815/eval_watch_val_unseen/watch.log`。启动时已收到 2 个 SFT checkpoint、结果数为 0；日志明确以 `reason=blocking_project_task` 等待仍在运行的预训练，没有创建评测 `run.py` 进程。18:44 收紧进程匹配条件以排除长期 TensorBoard 后重启，当前 PID 为 `1489031`；预训练退出后还会检查 4090 显存不超过 1 GiB，才按迭代正序逐个进行完整 R2R `val_unseen` 评测。
+- 2026-08-15 18:33（Asia/Shanghai），测评机已启动本次 SFT 的专用评测 watcher，日志为 `data/logs/rae_dinov2_etpnav_cls_768/r2r_sft_legacy452500_nonvisual_20260815/eval_watch_val_unseen/watch.log`。启动时已收到 2 个 SFT checkpoint、结果数为 0；日志明确以 `reason=blocking_project_task` 等待仍在运行的预训练，没有创建评测 `run.py` 进程。18:44 收紧进程匹配条件以排除长期 TensorBoard 后重启，当前 PID 为 `1489031`；预训练退出后还会检查 旧测评GPU 显存不超过 1 GiB，才按迭代正序逐个进行完整 R2R `val_unseen` 评测。
 - 2026-08-15 18:45（Asia/Shanghai），训练机已启动“当前 SFT 完成后使用测评机最终预训练最佳模型再训一次”的接力 watcher，PID 为 `983219`，日志为 `data/logs/rae_dinov2_etpnav_cls_768/eval_best_sft_followup_monitor/watch.log`。部署时当前 SFT 仍正常运行，watcher 状态为 `reason=current_sft_running`。测评机预训练当时的临时最佳为第 465,000 步、联合分数 `1.6718887749`，但 watcher 不提前固定该点；它只会在测评机第 500,000 步模型和训练状态存在且 supervisor 为 `exit_code=0` 后读取最终最佳。预训练进程判定同时匹配 `train_r2r.py` 与输出根目录，不会把长期 TensorBoard 误认为训练进程。下一轮固定沿用双卡、每卡 8 环境、每卡 batch 8、梯度累积 1、15,000 次及当前全部 SFT 调度参数，并使用新的实验与同步目录。
 - 2026-08-16 10:21（Asia/Shanghai），两个自动接力均已生效。测评机预训练于 01:11 正常完成第 500,000 步，最终最佳仍为第 465,000 步、联合分数 `1.6718887749`。第一轮 legacy452500 SFT 于 10:09 正常完成 15,000 次并以 `exit_code=0` 退出；训练机接力 watcher 随后复制并校验最终最佳模型，于 10:10 启动同参数第二轮 `rae_dinov2_etpnav_cls_768_eval_best465000_r2r_sft`，核验时约到第 227 次且第 200 次 checkpoint 已同步测评机。测评机 watcher 已完成第一轮 SFT 的 60/75 个完整 R2R `val_unseen` 评测，正在评估第 61 个 `ckpt.iter12200.pth`；两台机器均无运行时错误。
 - 2026-08-16 10:30（Asia/Shanghai），测评机已启动两轮评测接力 watcher，PID 为 `1623716`，日志为 `data/logs/rae_dinov2_etpnav_cls_768/second_sft_eval_handoff/watch.log`。启动后确认第一轮已有 61/75 份有效结果，日志明确为 `reason=first_eval_incomplete`；第一轮 watcher PID `1489031` 继续单独评测 `ckpt.iter12400.pth`，第二轮 watcher 仍停止，已有 1 个同步 checkpoint、0 份结果，没有提前占用 GPU。第一轮达到 75 份有效 JSON 且 GPU 低于 1 GiB 后，接力脚本会以同样的单卡、8 环境和完整 1,839 episode 参数按正序启动第二轮评测。
 - 2026-08-13 已修复离线 RAE/DINOv2 全景生成的俯仰相机漂移；生成器现在使用 ETPNav 的零传感器偏移方案。训练机当前使用的 10,567 视点 `RAE-DINOv2-B-14-RAW-CLS-views-habitat.hdf5` 仍是修复前旧逻辑采集的，本次按用户要求不重新生成。
 - 2026-08-13 SFT 检查点保存支持通过 `IL.checkpoint_sync_enabled` 和 `IL.checkpoint_sync_destination` 异步原子同步；两机间使用 `10.10.10.1/10.10.10.2` 的 2.5 GbE 直连。持续监控和批量评测通过 `EVAL.checkpoint_order` 选择正序或倒序，并从同一配置的同步目标推导本地监控目录。
-- 2026-08-13 运行状态：训练机的双卡 R2R SFT 已按用户要求正常停止，checkpoint 同步守护进程也已停止；最后一对完整模型/训练状态为第 14,200 次迭代。测评机的 R2R `val_unseen` 监控和正在执行的第 14,200 次迭代 checkpoint 评测也已停止，已完成的 70 份评测结果保持不变。停止后两台机器均无训练/测评计算进程：训练机两张 A6000 的计算显存占用为空，测评机 4090 仅保留约 130 MiB 桌面基础占用。训练机 TensorBoard 和测评机日志查看器不是计算任务，仍保持运行。
+- 2026-08-13 运行状态：训练机的双卡 R2R SFT 已按用户要求正常停止，checkpoint 同步守护进程也已停止；最后一对完整模型/训练状态为第 14,200 次迭代。测评机的 R2R `val_unseen` 监控和正在执行的第 14,200 次迭代 checkpoint 评测也已停止，已完成的 70 份评测结果保持不变。停止后两台机器均无训练/测评计算进程：训练机两张 A6000 的计算显存占用为空，测评机 旧测评GPU 仅保留约 130 MiB 桌面基础占用。训练机 TensorBoard 和测评机日志查看器不是计算任务，仍保持运行。
 - 2026-08-12 训练机实时状态：新的双卡 A6000 联合预训练实验 `rae_dinov2_etpnav_cls_768_raw_cls_20260810` 正在 `/home/gwl/project/etpr1/ETP-R1` 运行，产物位于 `/mnt/data2tb/ETP-R1_data/pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768_raw_cls_20260810`。任务从第 10,000 步恢复，目标 500,000 步；只读核验时 TensorBoard 已到第 224,346 步，最近完整恢复点为第 222,500 步，当前最佳模型为第 220,000 步。配置为双卡、每卡 batch 32、梯度累积 1、`n_workers=0`、`pin_mem=false`、`thread_prefetch=true`。两个训练进程持续存活约 48 小时，日志未发现报错，输出盘尚余约 1.4 TB。两卡温度为 85--86°C，但核验时没有处于软/硬件热降频状态。
 - 上一次 `rae_dinov2_cls_mlp` 联合预训练已于 2026-07-29 完成 500,000 步；按“R2R/RxR 的 MLM 准确率均值 + SAP 准确率均值”选择出的最佳点为第 452,500 步，总分 `1.6833923785864027`（MLM 均值 `0.8731406970197786`，SAP 均值 `0.8102516815666241`）。原始 `best_metrics.json` 保存在测评机对应实验目录，训练机保留了最佳模型本体。
 - `pip check` 会报告 `tensorflow 1.13.1` 声明要求 `tensorboard<1.14`，但 PyTorch 1.9 的 tensorboard 接口要求 `tensorboard>=1.15`。当前选择 `tensorboard==1.15.0`，因为这是项目入口能导入的最低可用折中。
@@ -473,11 +475,11 @@ checkpoint，以原高层上下文语义、单卡、8 环境完整复跑 1,839 �
 SR 为 `0.6329526917/0.6318651441`，SPL 为
 `0.5417617617/0.5415429860`，分别偏移 `+0.1088/+0.0219` 个百分点；nDTW、
 SDTW 分别偏移 `+0.0754/+0.0898` 个百分点，未见严重平台偏移。新结果和日志
-位于测评机 `data/logs/platform3090_validation/`。旧 4090 同一检查点评测耗时
+位于测评机 `data/logs/platform3090_validation/`。旧测评平台 同一检查点评测耗时
 29 分 27 秒；新 3090 本次耗时 53 分 29 秒，表面上慢约 81.6%。但旧结果运行
 时测评机仍停在提交 `0e82d27`，新结果使用提交 `e46832d` 并显式把后来新增的
 上下文参数恢复为旧值 `high_level_nav_latent`。因此 checkpoint 和评测语义相同，
-但可执行代码并非同一提交；这组耗时不能作为纯 4090/3090 硬件对照。若要严格
+但可执行代码并非同一提交；这组耗时不能作为纯新旧平台硬件对照。若要严格
 归因，需要在 3090 上使用 `0e82d27` 的代码原样复跑。
 
 2026-09-02，测评机更换平台但保留原硬盘后，重新核验三机网络。新平台只检测到
@@ -486,7 +488,7 @@ RTL8125 2.5GbE 网卡 `enp6s0`，固定为 `10.10.10.2/24`，没有独立默认�
 协商为 2.5 Gbps 全双工，专线无丢包，笔记本通过 `server` 跳板登录测评机成功。
 笔记本到测评机的标准入口改为 `ssh -J server a6000@10.10.10.2`。测评机受限
 部署密钥已只读验证可通过 `10.10.10.1` 读取中央裸仓库；全局和项目
-`AGENTS.md` 已同步移除旧 `ssh eval`/Tailscale 入口并更新 Docker、GPU、管理员
+`AGENTS.md` 已同步移除旧 Tailscale 入口并更新 Docker、GPU、管理员
 授权和 Git 同步示例。
 
 2026-09-02，按用户要求启动新的 R2R 原生 CLS RGB-only SFT 与升序完整测评，
@@ -510,14 +512,14 @@ supervisor PID `3364601`。
 `etpr1_native_cls_rgb_fusion_eval_lowlevel_bs16_watch`，固定单卡 8 环境、完整
 1,839 个 `val_unseen` episode、按 checkpoint 升序执行。交接时尚未到第 200
 次保存点，watcher 正常处于 `reason=no_checkpoints`；受保护的 ETPNav 容器未
-运行，4090 空闲。旧 RGB-only 完成态 watcher 仅保留 30 秒空轮询且无评测子进程。
+运行，当时测评GPU空闲。旧 RGB-only 完成态 watcher 仅保留 30 秒空轮询且无评测子进程。
 
 2026-09-02，按用户要求停止低级移动上下文 batch-16 原生 CLS E24 joint SFT，
 并同时停止测评机对应的升序 watcher 和当时正在执行的 `iter1600` 全量评测。
 训练机 supervisor、torchrun 和两个训练 rank 均已退出，两张 A6000 显存降至
 45/16 MiB、利用率为 0%；最后完整模型/训练状态对均为 `iter1600`。测评机
 watcher 退出后，Docker 内评测因位于独立进程组而未随 watcher 的 TERM 信号
-退出，随后按完整实验名精确终止该评测进程组；4090 降至 142 MiB、利用率为
+退出，随后按完整实验名精确终止该评测进程组；当时测评GPU降至 142 MiB、利用率为
 0%。两个 TensorBoard 和低级上下文指标归一化进程按用户范围保留运行。
 
 2026-09-01，将本轮低级上下文 batch-16 joint SFT 的增量评测接入笔记本
@@ -552,7 +554,7 @@ Habitat 环境、梯度累积 1，因此全局有效 batch 为 16；每 200 次�
 `256545`，等待 50 个 checkpoint 并逐个完成全部 1,839 个 R2R `val_unseen`
 episode；输出根为
 `data/logs/active_lookahead/native_cls_e24_joint_eval_lowlevel_bs16_20260901/`。
-启动时受保护的 `gwl-etpnav` 容器未运行，4090 仅有约 142 MiB 桌面占用；尚无
+启动时受保护的 `gwl-etpnav` 容器未运行，当时测评GPU仅有约 142 MiB 桌面占用；尚无
 第 200 次 checkpoint，因此 watcher 正常处于 `reason=no_checkpoints`。
 
 2026-09-01，任务上下文：在不改变 `r1_low_level_move_rgb_anchor_v1`、checkpoint
@@ -677,7 +679,7 @@ RGB-fusion 全量评测；2026-09-01 12:32 检查时已完成 42/50 个 checkpoi
 
 上述审计的第 1、5 点已由提交 `c9c7cd3`、`cc11e01` 修复：新增独立的原生 CLS RGB-only 配置、作业脚本、托管入口和工作流测试，不再校验或加载 E24/DINO-CWP；训练日志按每次优化更新跨轨迹步、梯度累积和 rank 汇总查询成功率、候选覆盖率、gate/余弦/注入范数分布、NWM 耗时及去除 AMP scale 后的融合层梯度范数。本机配置/脚本测试 `12 passed`；训练机 `etpnav_unified` 针对性测试 `38 passed, 2 warnings`。训练机单卡单环境 2 次 smoke 退出 0，覆盖率 `0.521`、注入范数约 `0.001`、融合层梯度范数 `0.008`；双卡每 rank 4 环境 2 次 smoke 退出 0，覆盖率 `0.570`、注入范数约 `0.001`、梯度范数 `0.034`，checkpoint 含 10 个已更新的融合张量且 training-state 含两份 rank 状态。正式任务于 2026-08-30 16:57 启动，训练机 supervisor PID `1077372`，日志 `data/logs/raenwm_rgb_fusion/native_cls_sft/supervisor_server/start_20260830T165653.log`；源提交 `cc11e01`，从 SHA256 `1694b175...c61` 的 `base_iter14200.pth` weights-only 启动，10,000 次、每 200 次保存、双卡×每 rank 4 环境、全局 batch 8、LR `1e-5`、DAgger 时间偏移 14,200，前瞻关闭，RGB 注入开启。确认两个 rank 存活、两卡 100% 利用率并进入第 1 次更新；正式训练仍在进行，尚未启动测评。审计中未获授权的 generator 恢复、provenance 和 Q0 语义差异仍保持原状。
 
-同日 20:13，提交 `0e82d27` 新增 RGB-only 专用 `val_unseen` watcher，固定匹配训练配置、同步目录、465k 预训练资产、升序 checkpoint 和独立结果根，并复用共享 GPU 锁及受保护 ETPNav 检查。测评机专用容器针对性测试 `23 passed, 3 warnings`；第 200 次 checkpoint 的单 episode 冒烟退出 0，NWM `314/314` 严格匹配，SR/SPL/ NDTW/SDTW 为 `1/1/0.900898/0.900898`，结果位于 `data/logs/raenwm_rgb_fusion/native_cls_eval_smoke/iter200_episode1/`。正式 watcher PID `3849794`，日志 `data/logs/raenwm_rgb_fusion/native_cls_eval/watch.log`；启动时已有 6 个 checkpoint，已领取第 200 次并开始完整 1,839 episode 评测，4090 约占 13.0 GiB、利用率 63%。受保护的 `gwl-etpnav` 容器未运行；正式结果目录为 `data/logs/raenwm_rgb_fusion/native_cls_eval/results/etpr1_native_cls_rgb_fusion_eval_watch/eval_results/`。
+同日 20:13，提交 `0e82d27` 新增 RGB-only 专用 `val_unseen` watcher，固定匹配训练配置、同步目录、465k 预训练资产、升序 checkpoint 和独立结果根，并复用共享 GPU 锁及受保护 ETPNav 检查。测评机专用容器针对性测试 `23 passed, 3 warnings`；第 200 次 checkpoint 的单 episode 冒烟退出 0，NWM `314/314` 严格匹配，SR/SPL/ NDTW/SDTW 为 `1/1/0.900898/0.900898`，结果位于 `data/logs/raenwm_rgb_fusion/native_cls_eval_smoke/iter200_episode1/`。正式 watcher PID `3849794`，日志 `data/logs/raenwm_rgb_fusion/native_cls_eval/watch.log`；启动时已有 6 个 checkpoint，已领取第 200 次并开始完整 1,839 episode 评测，当时测评GPU约占 13.0 GiB、利用率 63%。受保护的 `gwl-etpnav` 容器未运行；正式结果目录为 `data/logs/raenwm_rgb_fusion/native_cls_eval/results/etpr1_native_cls_rgb_fusion_eval_watch/eval_results/`。
 
 第 200 次完整结果于 20:44 落盘，SR/SPL 为 `0.6242523/0.5224532`。增量转换器 PID `3852518` 每 10 秒把 11 项正式指标写为联合面板中的 `native_cls_rgb_fusion_sft` run。笔记本当前打开的 `127.0.0.1:6008` 实际映射到测评容器 6009，读取目录 `data/logs/active_lookahead/native_cls_e24_joint_eval/metrics_tensorboard_20260828`；本机 6007 才映射容器 6008 的旧联合目录。已通过当前 6008 数据接口和页面 DOM 确认新 run、step 200 的 SR/SPL 与全部 11 个标签可见。
 
@@ -761,7 +763,7 @@ RGB-fusion 全量评测；2026-09-01 12:32 检查时已完成 42/50 个 checkpoi
 
 2026-07-10，为分析将 CLIP 更换为本地 RAE-NWM 的 RAE/DINOv2-B 编码器而检查。主要检查了离线特征生成脚本、`R1Policy.py`、`CLIPEncoder`、预训练与在线 `ImageEmbeddings`、预训练 checkpoint 键名、路点预测器，以及 `/home/gwl/project/RAE-NWM/raenwm` 中的 DINOv2-with-registers-base、RAE 编码与 native 224 预处理链路。
 
-2026-07-10，为把 RAE/DINOv2 的全部运行工作迁移到测评机而复查。只读核验了 `ssh 4090` 对应主机的 GPU、磁盘、Docker 容器、远端 `raenwm` 包版本、`etpnav-local-deps.pth` 和 RAE-NWM 权重位置；确定使用独立容器 `gwl-etpr1-rae`、独立环境 `etpr1_rae` 和 ETP-R1 自有 Habitat 依赖目录。本轮只更新约定与设计，没有创建远端环境或运行实验。用户随后明确授权停止当时正在运行的一个 ETPNav 评测任务；已向其 `torchrun` 主进程发送正常终止信号，任务进程树退出、GPU 释放，`gwl-etpnav` 容器未停止。该授权只适用于这个具体任务，后续仍默认禁止停止 ETPNav 进程。
+2026-07-10，为把 RAE/DINOv2 的全部运行工作迁移到测评机而复查。只读核验了 当时的测评主机的 GPU、磁盘、Docker 容器、远端 `raenwm` 包版本、`etpnav-local-deps.pth` 和 RAE-NWM 权重位置；确定使用独立容器 `gwl-etpr1-rae`、独立环境 `etpr1_rae` 和 ETP-R1 自有 Habitat 依赖目录。本轮只更新约定与设计，没有创建远端环境或运行实验。用户随后明确授权停止当时正在运行的一个 ETPNav 评测任务；已向其 `torchrun` 主进程发送正常终止信号，任务进程树退出、GPU 释放，`gwl-etpnav` 容器未停止。该授权只适用于这个具体任务，后续仍默认禁止停止 ETPNav 进程。
 
 2026-07-10，在设计获批后编写 RAE/DINOv2 实施计划。计划位于 `docs/superpowers/plans/2026-07-10-rae-dinov2-visual-encoder.md`，依次覆盖测评机隔离环境、现代 Habitat 兼容、三层投影、冻结编码器、离线预训练、在线 SFT/GRPO、checkpoint 过滤、全量 HDF5、CLIP 回归和最终冒烟。本阶段只形成计划，尚未创建 `gwl-etpr1-rae`、`etpr1_rae` 或开始模型实现。
 

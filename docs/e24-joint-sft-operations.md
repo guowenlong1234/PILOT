@@ -146,7 +146,7 @@ episode 性能结论。pilot 验收完成后，正式 10,000 次训练仍须从�
 
 ## 测评与最佳点
 
-测评机先按项目规则检查 RTX 4090、受保护的 ETPNav 容器和计算进程，再启动：
+测评机先按项目规则检查 RTX 3090、受保护的 ETPNav 容器和计算进程，再启动：
 
 ```bash
 bash scripts/manage_e24_joint_eval_watch_host.sh start

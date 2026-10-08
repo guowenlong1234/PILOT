@@ -30,6 +30,6 @@
 
 其他近期任务：9月20日9200成对导航评测正常完成；6400旧导航首轮在358/1839报`ValueError: base_logits must not contain NaN`，其后`navigation_v2_geometry`成功结束（9月20日13:46）。
 
-当前无训练、采集或导航评测进程，GPU空闲；仅旧TensorBoard和指标整理进程仍在运行。项目容器`gwl-etpr1-rae`运行，ETPNav容器已停止。磁盘93%、余67G。指定专线入口实际报告GPU为RTX3090 24GB，非约定俗称的4090；9月21日实验记录也已记载3090。
+当前无训练、采集或导航评测进程，GPU空闲；仅旧TensorBoard和指标整理进程仍在运行。项目容器`gwl-etpr1-rae`运行，ETPNav容器已停止。磁盘93%、余67G。指定专线入口实际报告GPU为RTX3090 24GB；9月21日实验记录也已记载3090。
 
 证据根：`/home/a6000/gwl/ETP-R1-stage2-e24/data/logs/stage2_9200_future_ablation_20260921/`。主要证据：`navigation_latest.json`、`formal_v1/navigation_full_20260922/pipeline.json`、各组`status.json`、`final_report/report.md`与`summary.json`。旧实验根：`stage2_online_9200_20260920/`及`stage2_online_20260920/`。

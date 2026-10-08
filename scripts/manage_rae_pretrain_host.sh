@@ -15,8 +15,8 @@ case "$ACTION" in
         ;;
 esac
 
-ip -br addr | grep -Eq '^eno1[[:space:]]+UP[[:space:]]+10\.10\.10\.2/24' || {
-    echo "This script must run on the 4090 host with eno1=10.10.10.2" >&2
+ip -br addr | grep -Eq '^enp6s0[[:space:]]+UP[[:space:]]+10\.10\.10\.2/24' || {
+    echo "This script must run on the 3090 host with enp6s0=10.10.10.2" >&2
     exit 1
 }
 docker inspect "$CONTAINER" >/dev/null

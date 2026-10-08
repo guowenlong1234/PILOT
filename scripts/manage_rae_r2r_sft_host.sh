@@ -20,8 +20,8 @@ esac
     exit 1
 }
 nvidia-smi --query-gpu=name --format=csv,noheader \
-    | grep -Fxq 'NVIDIA GeForce RTX 4090' || {
-    echo "This script must run on the RTX 4090 evaluation host." >&2
+    | grep -Fxq 'NVIDIA GeForce RTX 3090' || {
+    echo "This script must run on the RTX 3090 evaluation host." >&2
     exit 1
 }
 docker inspect "$CONTAINER" >/dev/null

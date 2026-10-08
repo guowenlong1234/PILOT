@@ -6,12 +6,12 @@
 
 ## 结论
 
-RAE/DINOv2 视觉分支已在 4090 测评机的独立容器 `gwl-etpr1-rae`、独立环境 `etpr1_rae` 和 ETP-R1 自有 Habitat 0.3.3 运行目录中完成正式验收。原 CLIP 分支仍能加载旧 checkpoint 并完成单 episode。当前完成的是正式冒烟，不代表完整规模训练或完整数据集指标已经完成。
+RAE/DINOv2 视觉分支已在旧测评平台的独立容器 `gwl-etpr1-rae`、独立环境 `etpr1_rae` 和 ETP-R1 自有 Habitat 0.3.3 运行目录中完成正式验收。原 CLIP 分支仍能加载旧 checkpoint 并完成单 episode。当前完成的是正式冒烟，不代表完整规模训练或完整数据集指标已经完成。
 
 ## 环境与源码
 
 - 日期：2026-07-15。
-- 测评机：`eno1=10.10.10.2`，RTX 4090 24GB。
+- 测评机：历史验收使用旧平台；当前为 `enp6s0=10.10.10.2`、RTX 3090 24GB。
 - Python：3.11.15。
 - PyTorch：2.2.2+cu121。
 - Transformers：4.49.0。
@@ -67,7 +67,7 @@ CLIP 回归使用原 `run_r2r/iter_train.yaml`、原 DAgger checkpoint `ckpt.ite
 - 完成 1 个 R2R `val_unseen` episode，退出码 0。
 - 日志：`data/logs/rae_dino_final_validation/clip_regression_final.log`。
 
-## RTX 4090 性能基线
+## 旧测评平台性能基线
 
 RAE 编码器使用 float32，对 12 张 `224x224 uint8 RGB` 图像预热 5 次后测量 50 次：
 
@@ -103,7 +103,7 @@ RAE 编码器使用 float32，对 12 张 `224x224 uint8 RGB` 图像预热 5 次�
 
 ## 完整数据 batch 实测
 
-2026-07-15 在测评机单张 RTX 4090 上，使用完整 3,210,737 条真实联合预训练数据、RAE RGB 特征、原深度特征和 float32，进行了三组独立短跑。每组都实际执行前向、反向和参数更新，并在结束时完成 1 条验证样本和 checkpoint 写入；测试 checkpoint 在确认写入成功后已删除，只保留配置、控制台输出、退出码、耗时和 GPU 监控日志。
+2026-07-15 在旧测评平台单卡上，使用完整 3,210,737 条真实联合预训练数据、RAE RGB 特征、原深度特征和 float32，进行了三组独立短跑。每组都实际执行前向、反向和参数更新，并在结束时完成 1 条验证样本和 checkpoint 写入；测试 checkpoint 在确认写入成功后已删除，只保留配置、控制台输出、退出码、耗时和 GPU 监控日志。
 
 | 单卡 batch | 梯度累积 | 有效 batch | 参数更新数 | 峰值显存 | 结果 |
 |---:|---:|---:|---:|---:|---|
