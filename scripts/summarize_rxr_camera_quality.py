@@ -60,5 +60,17 @@ def main():
    boot=np.array(differences)[rng.integers(0,len(scenes),size=(10000,len(scenes)))].mean(1)
    result['paired'][cam][key]={'delta':float(np.mean(differences)),'scene_deltas':dict(zip(scenes,differences)),
       'scene_bootstrap_95':np.quantile(boot,[.025,.975]).tolist()}
+ result['cwp_paired']={}
+ for cam in cameras[1:]:
+  result['cwp_paired'][cam]={}
+  for kind in ['real','predicted']:
+   result['cwp_paired'][cam][kind]={}
+   for key in ['none_rate','clear_and_proposed_rate','clear_given_proposal']:
+    old=result['cwp_scene_macro']['original'][kind]['per_scene'];new=result['cwp_scene_macro'][cam][kind]['per_scene']
+    ds={s:new[s][key]-old[s][key] for s in scenes if new[s][key] is not None and old[s][key] is not None}
+    values=np.array(list(ds.values()))
+    if not len(values):continue
+    boot=values[rng.integers(0,len(values),size=(10000,len(values)))].mean(1)
+    result['cwp_paired'][cam][kind][key]={'delta':float(values.mean()),'scene_deltas':ds,'scene_bootstrap_95':np.quantile(boot,[.025,.975]).tolist()}
  Path(a.output).write_text(json.dumps(result,indent=2));print(json.dumps(result,indent=2))
 if __name__=='__main__':main()
