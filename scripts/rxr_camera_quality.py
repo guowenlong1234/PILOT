@@ -59,12 +59,12 @@ class Renderer:
         from vlnce_baselines.nwm.active_lookahead.dino_cwp_future import waypoint_to_world_position
         if not p.valid or p.pred_none:return None
         target=waypoint_to_world_position(pos,heading_deg=math.degrees(yaw-math.pi),local_angle_deg=p.local_angle_deg,distance_m=p.distance_m)
-        pf=self.sim.pathfinder;current=pf.snap_point(np.asarray(pos,dtype=np.float32))
+        pf=self.sim.pathfinder;current=np.asarray(pf.snap_point(np.asarray(pos,dtype=np.float32))).copy()
         if not np.isfinite(current).all():return False
         origin=current.copy()
         for frac in np.linspace(0,1,max(2,int(p.distance_m/.05)+1))[1:]:
             wish=origin+(target-origin)*frac
-            step=pf.try_step_no_sliding(current,wish)
+            step=np.asarray(pf.try_step_no_sliding(current,wish)).copy()
             if np.linalg.norm((step-wish)[[0,2]])>.08:return False
             current=step
         return bool(np.linalg.norm((current-target)[[0,2]])<.08)
