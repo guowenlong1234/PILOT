@@ -6,13 +6,16 @@ REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
 DATASET=${1:-}
 ACTION=${2:-status}
 case "$DATASET" in r2r|rxr) ;; *) echo "Usage: $0 <r2r|rxr> {start|resume|status|logs|tail|stop}" >&2; exit 2 ;; esac
+LOOKAHEAD_HORIZON=${ETPR1_LOOKAHEAD_HORIZON_STEPS:-1}
+ROLLOUT_NOISE_POLICY=${ETPR1_ROLLOUT_NOISE_POLICY:-per_query_v1}
+ROLLOUT_TAG=h${LOOKAHEAD_HORIZON}_${ROLLOUT_NOISE_POLICY}
 
 if [ "$DATASET" = r2r ]; then
-    EXP_NAME=${ETPR1_R2R_ACTIVE_GRPO_EXP_NAME:-r2r_native_cls_e24_frozen_grpo}
-    OUTPUT_ROOT=${ETPR1_R2R_ACTIVE_GRPO_OUTPUT_ROOT:-data/logs/active_lookahead/r2r_native_cls_e24_grpo}
+    EXP_NAME=${ETPR1_R2R_ACTIVE_GRPO_EXP_NAME:-r2r_native_cls_e24_frozen_grpo}_${ROLLOUT_TAG}
+    OUTPUT_ROOT=${ETPR1_R2R_ACTIVE_GRPO_OUTPUT_ROOT:-data/logs/active_lookahead/r2r_native_cls_e24_grpo}/${ROLLOUT_TAG}
 else
-    EXP_NAME=${ETPR1_RXR_ACTIVE_GRPO_EXP_NAME:-rxr_native_cls_e24_frozen_grpo}
-    OUTPUT_ROOT=${ETPR1_RXR_ACTIVE_GRPO_OUTPUT_ROOT:-data/logs/active_lookahead/rxr_native_cls_e24_grpo}
+    EXP_NAME=${ETPR1_RXR_ACTIVE_GRPO_EXP_NAME:-rxr_native_cls_e24_frozen_grpo}_${ROLLOUT_TAG}
+    OUTPUT_ROOT=${ETPR1_RXR_ACTIVE_GRPO_OUTPUT_ROOT:-data/logs/active_lookahead/rxr_native_cls_e24_grpo}/${ROLLOUT_TAG}
 fi
 [[ "$OUTPUT_ROOT" = /* ]] && OUTPUT_PATH=$OUTPUT_ROOT || OUTPUT_PATH=${REPO_ROOT}/${OUTPUT_ROOT}
 CHECKPOINT_DIR=${OUTPUT_PATH}/checkpoints/${EXP_NAME}

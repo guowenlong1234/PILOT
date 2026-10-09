@@ -179,7 +179,25 @@ evaluate_checkpoint() {
             export MPLCONFIGDIR=/tmp/matplotlib-etpr1-eval-watch
             export GLOG_minloglevel=2 MAGNUM_LOG=quiet HABITAT_SIM_LOG=quiet
             export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8
-            extra_config_args=()
+            mapfile -t rollout_fields < <(
+                python - "$CKPT_PATH" <<'PY'
+import sys
+import torch
+checkpoint = torch.load(sys.argv[1], map_location="cpu")
+provenance = checkpoint.get("e24_joint_provenance") or {}
+print(provenance.get("lookahead_horizon_steps", 1))
+print(provenance.get("future_aggregation", "endpoint"))
+print(provenance.get("rollout_failure_policy", "deepest_valid"))
+print(provenance.get("rollout_noise_policy", "legacy_stream"))
+PY
+            )
+            [ "${#rollout_fields[@]}" -eq 4 ]
+            extra_config_args=(
+                MODEL.ACTIVE_LOOKAHEAD.lookahead_horizon_steps "${rollout_fields[0]}"
+                MODEL.ACTIVE_LOOKAHEAD.future_aggregation "${rollout_fields[1]}"
+                MODEL.ACTIVE_LOOKAHEAD.rollout_failure_policy "${rollout_fields[2]}"
+                MODEL.ACTIVE_LOOKAHEAD.rollout_noise_policy "${rollout_fields[3]}"
+            )
             case "$CONFIG_FILE" in
                 *run_rxr/*)
                     mapfile -t provenance_fields < <(
@@ -200,7 +218,7 @@ for name in (
 PY
                     )
                     [ "${#provenance_fields[@]}" -eq 4 ]
-                    extra_config_args=(
+                    extra_config_args+=(
                         TASK_CONFIG.DATASET.SUFFIX ""
                         TASK_CONFIG.DATASET.ROLES "['guide']"
                         TASK_CONFIG.DATASET.LANGUAGES "['en-US','en-IN','hi-IN','te-IN']"

@@ -141,11 +141,15 @@ MODEL:
     dino_cwp_none_threshold: 0.3
     dino_cwp_context_strategy: fixed_initial
     dino_cwp_heading_policy: face_motion
+    lookahead_horizon_steps: 1
+    future_aggregation: endpoint
+    rollout_failure_policy: deepest_valid
+    rollout_noise_policy: legacy_stream
     warm_start_checkpoint_path: ''
     warm_start_checkpoint_sha256: ''
     warm_start_source_context_contract: ''
     warm_start_expected_q0_contract: temporary_action_same_island_navmesh
-    checkpoint_format_version: etpr1-native-cls-e24-joint-q0-cache-v4
+    checkpoint_format_version: etpr1-native-cls-e24-joint-rollout-v4
     smoke_freeze_check: False
     diagnostics_enabled: True
   DEPTH_ENCODER:

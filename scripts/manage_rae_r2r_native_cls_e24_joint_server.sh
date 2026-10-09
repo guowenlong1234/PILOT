@@ -4,11 +4,12 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ACTION=${1:-status}
 RUN_ID=${ETPR1_NATIVE_CLS_RUN_ID:-$(date +%Y%m%dT%H%M%S)}
+ROLLOUT_TAG=h${ETPR1_LOOKAHEAD_HORIZON_STEPS:-1}_${ETPR1_ROLLOUT_NOISE_POLICY:-per_query_v1}
 
 export ETPR1_E24_JOINT_CONFIG_FILE=run_r2r/iter_train_rae_dino_native_cls_e24_joint.yaml
 export ETPR1_E24_JOINT_EXP_NAME=${ETPR1_NATIVE_CLS_EXP_NAME:-etpr1_native_cls_e24_joint_sft}
 export ETPR1_E24_JOINT_OUTPUT_ROOT=${ETPR1_NATIVE_CLS_OUTPUT_ROOT:-data/logs/active_lookahead/native_cls_e24_joint_sft}
-export ETPR1_E24_JOINT_SYNC_DESTINATION=${ETPR1_NATIVE_CLS_SYNC_DESTINATION:-a6000@10.10.10.2:/home/a6000/gwl/ETP-R1/data/logs/active_lookahead/native_cls_e24_joint_sft/checkpoints/${ETPR1_E24_JOINT_EXP_NAME}}
+export ETPR1_E24_JOINT_SYNC_DESTINATION=${ETPR1_NATIVE_CLS_SYNC_DESTINATION:-a6000@10.10.10.2:/home/a6000/gwl/ETP-R1/data/logs/active_lookahead/native_cls_e24_joint_sft/${ROLLOUT_TAG}/checkpoints/${ETPR1_E24_JOINT_EXP_NAME}_${ROLLOUT_TAG}}
 
 case "$ACTION" in
     smoke-single)

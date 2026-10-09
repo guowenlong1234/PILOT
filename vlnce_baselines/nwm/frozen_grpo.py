@@ -15,7 +15,9 @@ from vlnce_baselines.nwm.active_lookahead.base_freeze import (
     compare_base_tensor_manifests,
 )
 from vlnce_baselines.nwm.active_lookahead.dino_cwp_future import (
+    build_per_query_initial_noise,
     load_dino_cwp_predictor,
+    validate_future_rollout_config,
 )
 from vlnce_baselines.nwm.active_lookahead.joint_e24 import (
     E24JointTrainModule,
@@ -140,6 +142,7 @@ class FrozenLookaheadController:
                 "first-stage frozen GRPO requires update_epochs=1 so the "
                 "rollout Top-5 context is consumed once"
             )
+        validate_future_rollout_config(active)
 
     def _validate_checkpoint(self, checkpoint: Mapping):
         required = {
@@ -156,9 +159,26 @@ class FrozenLookaheadController:
                 f"frozen GRPO source checkpoint is incomplete; missing {missing}"
             )
         active = self._active_lookahead_config()
-        if checkpoint["e24_joint_format_version"] != str(
-            active.checkpoint_format_version
-        ):
+        saved_format = checkpoint["e24_joint_format_version"]
+        current_format = str(active.checkpoint_format_version)
+        legacy_formats = {
+            "etpr1-native-cls-e24-joint-v2",
+            "etpr1-rxr-native-cls-e24-joint-v1",
+            "etpr1-native-cls-e24-joint-q0-cache-v3",
+            "etpr1-rxr-native-cls-e24-joint-q0-cache-v2",
+            "etpr1-native-cls-e24-joint-q0-cache-v4",
+            "etpr1-rxr-native-cls-e24-joint-q0-cache-v3",
+        }
+        legacy_load = saved_format in legacy_formats and saved_format != current_format
+        legacy_compatible = (
+            int(getattr(active, "lookahead_horizon_steps", 1)) == 1
+            and str(getattr(active, "future_aggregation", "endpoint")) == "endpoint"
+            and str(getattr(active, "rollout_failure_policy", "deepest_valid"))
+            == "deepest_valid"
+            and str(getattr(active, "rollout_noise_policy", "legacy_stream"))
+            == "legacy_stream"
+        )
+        if saved_format != current_format and not (legacy_load and legacy_compatible):
             raise ValueError("frozen GRPO source has the wrong joint format")
         provenance = checkpoint["e24_joint_provenance"]
         if not isinstance(provenance, Mapping):
@@ -195,6 +215,20 @@ class FrozenLookaheadController:
             "q0_reuse_required": True,
             "q0_cache_precision": "cpu_fp16",
             "q0_recompute_forbidden": True,
+            "rollout_format_version": "etpr1-active-lookahead-rollout-v2",
+            "lookahead_horizon_steps": int(
+                getattr(active, "lookahead_horizon_steps", 1)
+            ),
+            "future_aggregation": str(
+                getattr(active, "future_aggregation", "endpoint")
+            ),
+            "rollout_failure_policy": str(
+                getattr(active, "rollout_failure_policy", "deepest_valid")
+            ),
+            "rollout_noise_policy": str(
+                getattr(active, "rollout_noise_policy", "legacy_stream")
+            ),
+            "nwm_horizon_policy": "clip_64_continue",
         }
         context_metadata = context_metadata_from_config(
             self.config.MODEL.RAENWM
@@ -215,6 +249,25 @@ class FrozenLookaheadController:
                     ],
                 }
             )
+        if legacy_load:
+            for name in (
+                "rollout_format_version",
+                "lookahead_horizon_steps",
+                "future_aggregation",
+                "rollout_failure_policy",
+                "rollout_noise_policy",
+                "nwm_horizon_policy",
+            ):
+                expected.pop(name, None)
+            if provenance.get("q0_contract") != expected["q0_contract"]:
+                for name in (
+                    "q0_contract",
+                    "q0_position_source",
+                    "q0_reuse_required",
+                    "q0_cache_precision",
+                    "q0_recompute_forbidden",
+                ):
+                    expected.pop(name, None)
         mismatches = {
             key: (provenance.get(key), value)
             for key, value in expected.items()
@@ -391,6 +444,7 @@ class FrozenLookaheadController:
         cur_ori,
         candidate_previews,
         wp_outputs,
+        high_level_step=0,
     ):
         if self.raenwm_runtime is None:
             raise RuntimeError("frozen GRPO NWM runtime is not initialized")
@@ -412,7 +466,29 @@ class FrozenLookaheadController:
             cur_pos, cur_ori, candidate_previews
         )
         started = time.perf_counter()
-        prediction = self.raenwm_runtime.predict(queries)
+        _horizon, noise_policy = validate_future_rollout_config(
+            self._active_lookahead_config()
+        )
+        initial_noise = None
+        if queries and noise_policy == "per_query_v1":
+            initial_noise = build_per_query_initial_noise(
+                self,
+                [
+                    (
+                        query.env_index,
+                        int(high_level_step),
+                        query.query_id,
+                        0,
+                    )
+                    for query in queries
+                ],
+            )
+        if initial_noise is None:
+            prediction = self.raenwm_runtime.predict(queries)
+        else:
+            prediction = self.raenwm_runtime.predict(
+                queries, initial_noise=initial_noise
+            )
         elapsed = time.perf_counter() - started
         success = len((prediction.meta or {}).get("records", ()))
         self.last_candidate_q0_prediction_diagnostics = {

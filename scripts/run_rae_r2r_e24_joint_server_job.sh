@@ -6,8 +6,11 @@ REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
 MODE=${1:?Usage: run_rae_r2r_e24_joint_server_job.sh <start|resume> <log_file>}
 LOG_FILE=${2:?Usage: run_rae_r2r_e24_joint_server_job.sh <start|resume> <log_file>}
 CONFIG_FILE=${ETPR1_E24_JOINT_CONFIG_FILE:-run_r2r/iter_train_rae_dino_e24_joint.yaml}
-EXP_NAME=${ETPR1_E24_JOINT_EXP_NAME:-etpr1_e24_joint_sft}
-OUTPUT_ROOT=${ETPR1_E24_JOINT_OUTPUT_ROOT:-data/logs/active_lookahead/e24_joint_sft}
+LOOKAHEAD_HORIZON=${ETPR1_LOOKAHEAD_HORIZON_STEPS:-1}
+ROLLOUT_NOISE_POLICY=${ETPR1_ROLLOUT_NOISE_POLICY:-per_query_v1}
+ROLLOUT_TAG=h${LOOKAHEAD_HORIZON}_${ROLLOUT_NOISE_POLICY}
+EXP_NAME=${ETPR1_E24_JOINT_EXP_NAME:-etpr1_e24_joint_sft}_${ROLLOUT_TAG}
+OUTPUT_ROOT=${ETPR1_E24_JOINT_OUTPUT_ROOT:-data/logs/active_lookahead/e24_joint_sft}/${ROLLOUT_TAG}
 START_CKPT=${ETPR1_E24_JOINT_START_CKPT:-${REPO_ROOT}/pretrained/active_lookahead/base_iter14200.pth}
 START_CKPT_SHA=${ETPR1_E24_JOINT_START_CKPT_SHA:-1694b175d913404bfef8a53519d6f405db5de7f8b051e8343700125e43f05c61}
 BASE_ITERATION=${ETPR1_E24_JOINT_BASE_ITERATION:-14200}
@@ -101,6 +104,12 @@ for integer_setting in "$TRAIN_ITERS" "$LOG_EVERY"; do
         exit 2
     }
 done
+case "$LOOKAHEAD_HORIZON" in 1|2|3) ;; *)
+    echo "ETPR1_LOOKAHEAD_HORIZON_STEPS must be 1, 2, or 3" >&2; exit 2 ;;
+esac
+case "$ROLLOUT_NOISE_POLICY" in legacy_stream|per_query_v1) ;; *)
+    echo "ETPR1_ROLLOUT_NOISE_POLICY must be legacy_stream or per_query_v1" >&2; exit 2 ;;
+esac
 [ -z "$WARM_START_CKPT" ] || [ -e "$WARM_START_CKPT" ] || {
     echo "Missing lookahead warm-start checkpoint: $WARM_START_CKPT" >&2
     exit 1
@@ -213,6 +222,8 @@ esac
     echo "gradient_accumulation_steps=$GRADIENT_ACCUMULATION_STEPS"
     echo "global_batch_size=$((NPROC_PER_NODE * NUM_ENVIRONMENTS * GRADIENT_ACCUMULATION_STEPS))"
     echo "task_seed=${TASK_SEED:-config_default}"
+    echo "lookahead_horizon_steps=$LOOKAHEAD_HORIZON"
+    echo "rollout_noise_policy=$ROLLOUT_NOISE_POLICY"
     "$PYTHON_BIN" -c 'import sys, torch, transformers, habitat, habitat_sim; habitat_version=getattr(habitat, "__version__", "unknown"); habitat_sim_version=getattr(habitat_sim, "__version__", "unknown"); print(f"versions=python:{sys.version.split()[0]} torch:{torch.__version__} cuda:{torch.version.cuda} transformers:{transformers.__version__} habitat:{habitat_version} habitat_sim:{habitat_sim_version}")'
     nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu --format=csv,noheader
 } >>"$LOG_FILE"
@@ -257,6 +268,8 @@ fi
     MODEL.ACTIVE_LOOKAHEAD.base_selection_manifest_sha256 "$BASE_SELECTION_MANIFEST_SHA" \
     IL.sample_ratio_iteration_offset "$BASE_ITERATION" \
     MODEL.ACTIVE_LOOKAHEAD.smoke_freeze_check "$SMOKE_FREEZE_CHECK" \
+    MODEL.ACTIVE_LOOKAHEAD.lookahead_horizon_steps "$LOOKAHEAD_HORIZON" \
+    MODEL.ACTIVE_LOOKAHEAD.rollout_noise_policy "$ROLLOUT_NOISE_POLICY" \
     2>&1 \
     | "$PYTHON_BIN" -u scripts/filter_habitat_startup_noise.py \
     | tee -a "$LOG_FILE"

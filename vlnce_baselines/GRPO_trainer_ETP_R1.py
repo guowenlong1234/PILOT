@@ -1626,6 +1626,7 @@ class RLTrainer(BaseVLNCETrainer):
                     cur_ori,
                     candidate_previews,
                     wp_outputs,
+                    high_level_step=stepk,
                 )
                 self._lookahead_diagnostic_totals[
                     "rgb_fused_candidates"

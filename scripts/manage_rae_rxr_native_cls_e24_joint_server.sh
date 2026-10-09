@@ -4,13 +4,14 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ACTION=${1:-status}
 RUN_ID=${ETPR1_RXR_JOINT_RUN_ID:-$(date +%Y%m%dT%H%M%S)}
+ROLLOUT_TAG=h${ETPR1_LOOKAHEAD_HORIZON_STEPS:-1}_${ETPR1_ROLLOUT_NOISE_POLICY:-per_query_v1}
 
 export ETPR1_E24_JOINT_CONFIG_FILE=run_rxr/iter_train_rae_dino_native_cls_e24_joint.yaml
 export ETPR1_E24_JOINT_EXP_NAME=${ETPR1_RXR_JOINT_EXP_NAME:-etpr1_rxr_native_cls_e24_joint_sft}
 export ETPR1_E24_JOINT_OUTPUT_ROOT=${ETPR1_RXR_JOINT_OUTPUT_ROOT:-data/logs/active_lookahead/rxr_native_cls_e24_joint_sft}
 export ETPR1_E24_JOINT_PRETRAIN_PATH=${ETPR1_RXR_JOINT_PRETRAIN_PATH:-/home/gwl/project/etpr1/ETP-R1/pretrained/r2r_rxr_ce/rae_dinov2_etpnav_cls_768_eval_final_best/model_best_step_465000.pt}
 export ETPR1_E24_JOINT_SYNC_ENABLED=${ETPR1_RXR_JOINT_SYNC_ENABLED:-False}
-export ETPR1_E24_JOINT_SYNC_DESTINATION=${ETPR1_RXR_JOINT_SYNC_DESTINATION:-a6000@10.10.10.2:/home/a6000/gwl/ETP-R1/data/logs/active_lookahead/rxr_native_cls_e24_joint_sft/checkpoints/etpr1_rxr_native_cls_e24_joint_sft}
+export ETPR1_E24_JOINT_SYNC_DESTINATION=${ETPR1_RXR_JOINT_SYNC_DESTINATION:-a6000@10.10.10.2:/home/a6000/gwl/ETP-R1/data/logs/active_lookahead/rxr_native_cls_e24_joint_sft/${ROLLOUT_TAG}/checkpoints/etpr1_rxr_native_cls_e24_joint_sft_${ROLLOUT_TAG}}
 export ETPR1_E24_JOINT_ITERS=${ETPR1_RXR_JOINT_ITERS:-10000}
 export ETPR1_E24_JOINT_LOG_EVERY=${ETPR1_RXR_JOINT_LOG_EVERY:-200}
 export ETPR1_E24_JOINT_NPROC_PER_NODE=${ETPR1_RXR_JOINT_NPROC_PER_NODE:-2}

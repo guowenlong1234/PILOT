@@ -6,7 +6,9 @@ import torch
 
 from vlnce_baselines.nwm.active_lookahead.dino_cwp_future import (
     SingleViewDinoCwpPredictor,
+    build_dino_cwp_nwm_future_rollout,
     build_dino_cwp_nwm_future_tokens,
+    build_per_query_initial_noise,
     decode_dino_cwp_top1,
     latent_to_patch_tokens,
     load_dino_cwp_predictor,
@@ -41,6 +43,8 @@ def _record(ghost, front, step, x, *, marker=None, native=False):
         source_front_vp=front,
         source_high_level_step=step,
         canonical_q0_position=np.asarray([x, 0.0, 1.0], dtype=np.float32),
+        condition=(0.0, 0.0, 0.0, 1.0 / 128.0),
+        horizon=1.0,
         source_context=snapshot,
         predicted_patch_cpu_fp16=torch.full(
             (768, 16, 16), marker, dtype=torch.float16
@@ -86,9 +90,15 @@ class _FakeRuntime:
         self.predictor = _FakeNwm(native=native)
         self.predict_cls_token = native
         self.requests = []
+        self.initial_noises = []
+        self.device = torch.device("cpu")
+        self.config = SimpleNamespace(noise_seed=17)
 
-    def predict_latent_targets(self, requests):
+    def predict_latent_targets(self, requests, *, initial_noise=None):
         self.requests.append(list(requests))
+        self.initial_noises.append(
+            None if initial_noise is None else initial_noise.detach().clone()
+        )
         batch = self.adapter.build_raenwm_latent_batch(requests, device="cpu")
         return self.predictor.predict_time_with_heads_from_etp_batch(batch)
 
@@ -107,7 +117,14 @@ class _FakeCwp:
         return {"heatmap_logits": heatmap, "none_logit": none}
 
 
-def _trainer(snapshots, *, none_rows=(), native=False):
+def _trainer(
+    snapshots,
+    *,
+    none_rows=(),
+    native=False,
+    horizon=1,
+    noise_policy="legacy_stream",
+):
     adapter = NwmEtpAdapter(RaeEtpAdapterConfig())
     adapter.reset(1)
     runtime = _FakeRuntime(adapter, native=native)
@@ -116,8 +133,28 @@ def _trainer(snapshots, *, none_rows=(), native=False):
         raenwm_runtime=runtime,
         dino_cwp_future_predictor=_FakeCwp(none_rows),
         gmaps=[SimpleNamespace()],
-        _active_lookahead_config=lambda: SimpleNamespace(dino_cwp_none_threshold=0.3),
+        _active_lookahead_config=lambda: SimpleNamespace(
+            dino_cwp_none_threshold=0.3,
+            lookahead_horizon_steps=horizon,
+            future_aggregation="endpoint",
+            rollout_failure_policy="deepest_valid",
+            rollout_noise_policy=noise_policy,
+        ),
     )
+
+
+class _DepthFakeCwp(_FakeCwp):
+    def __init__(self, *, none_calls=()):
+        super().__init__()
+        self.none_calls = set(none_calls)
+        self.calls = 0
+
+    def __call__(self, patch_tokens):
+        self.calls += 1
+        output = super().__call__(patch_tokens)
+        if self.calls in self.none_calls:
+            output["none_logit"].fill_(10.0)
+        return output
 
 
 def test_predicted_future_batches_distinct_historical_contexts_and_reuses_them_for_q1():
@@ -131,7 +168,7 @@ def test_predicted_future_batches_distinct_historical_contexts_and_reuses_them_f
         _record("g1", "front4", 4, 1.0),
     ]]
 
-    future, q1_conditions, valid, diagnostics = build_dino_cwp_nwm_future_tokens(
+    future, future_conditions, valid, diagnostics = build_dino_cwp_nwm_future_tokens(
         trainer,
         active_envs=[0],
         records_by_env=records,
@@ -142,7 +179,7 @@ def test_predicted_future_batches_distinct_historical_contexts_and_reuses_them_f
 
     assert valid.tolist() == [[True, True]]
     assert tuple(future.shape) == (1, 2, 257, 768)
-    assert tuple(q1_conditions.shape) == (1, 2, 4)
+    assert tuple(future_conditions.shape) == (1, 2, 4)
     assert trainer.raenwm_runtime.predictor.context_markers == [[1.0, 4.0]]
     assert future[0, 0, 0, 0].item() == pytest.approx(101.0)
     assert future[0, 1, 0, 0].item() == pytest.approx(104.0)
@@ -165,7 +202,7 @@ def test_missing_context_and_cwp_none_invalidate_only_their_slots():
     missing.source_context = None
     records = [[_record("g0", "front0", 0, 0.0), missing]]
 
-    future, q1_conditions, valid, diagnostics = build_dino_cwp_nwm_future_tokens(
+    future, future_conditions, valid, diagnostics = build_dino_cwp_nwm_future_tokens(
         trainer,
         active_envs=[0],
         records_by_env=records,
@@ -176,7 +213,7 @@ def test_missing_context_and_cwp_none_invalidate_only_their_slots():
 
     assert valid.tolist() == [[False, False]]
     assert torch.count_nonzero(future) == 0
-    assert torch.count_nonzero(q1_conditions) == 0
+    assert torch.count_nonzero(future_conditions) == 0
     assert diagnostics["q0_record_present"] == 2.0
     assert diagnostics["q0_context_present"] == 1.0
     assert diagnostics["cwp_none"] == 1.0
@@ -189,7 +226,7 @@ def test_native_q1_uses_raw_cls_and_preserves_native_patch_tokens():
     }
     trainer = _trainer(snapshots, native=True)
 
-    future, q1_conditions, valid, diagnostics = (
+    future, future_conditions, valid, diagnostics = (
         build_dino_cwp_nwm_future_tokens(
             trainer,
             active_envs=[0],
@@ -205,8 +242,8 @@ def test_native_q1_uses_raw_cls_and_preserves_native_patch_tokens():
     assert valid.tolist() == [[True]]
     assert future[0, 0, 0, 0].item() == pytest.approx(103.0)
     assert future[0, 0, 1, 0].item() == pytest.approx(3.0)
-    assert q1_conditions.shape == (1, 1, 4)
-    assert torch.isfinite(q1_conditions).all()
+    assert future_conditions.shape == (1, 1, 4)
+    assert torch.isfinite(future_conditions).all()
     assert diagnostics["future_valid"] == 1.0
 
 
@@ -322,3 +359,92 @@ def test_predicted_future_diagnostic_summary_preserves_counts_and_rates():
     assert summary["q1_latent_norm"] == pytest.approx(3.0)
     assert summary["q0_cache_live_records_mean"] == 0.0
     assert summary["q0_cache_mebibytes_mean"] == 0.0
+
+
+def test_recursive_h3_uses_fixed_history_and_returns_only_full_endpoint():
+    trainer = _trainer(
+        {}, native=True, horizon=3, noise_policy="per_query_v1"
+    )
+    result = build_dino_cwp_nwm_future_rollout(
+        trainer,
+        active_envs=[0],
+        records_by_env=[[
+            _record("g0", "front0", 7, 0.0, marker=3.0, native=True)
+        ]],
+        topk=1,
+        feature_dim=768,
+        reference=torch.zeros(1),
+    )
+
+    assert result.future_valid_mask.tolist() == [[True]]
+    assert result.full_horizon_mask.tolist() == [[True]]
+    assert result.fallback_mask.tolist() == [[False]]
+    assert result.realized_depths.tolist() == [[3]]
+    assert len(trainer.raenwm_runtime.requests) == 3
+    assert trainer.raenwm_runtime.predictor.context_markers == [
+        [3.0], [3.0], [3.0]
+    ]
+    state = result.states[0]
+    assert state.realized_depth == 3
+    assert [layer.depth for layer in state.layers] == [1, 2, 3]
+    assert state.cumulative_path_m == pytest.approx(4.0, abs=1.0e-5)
+    assert result.diagnostics["rollout_success_depth_3"] == 1.0
+    assert result.diagnostics["cwp_requested"] == 1.0
+    assert result.diagnostics["q1_requested"] == 1.0
+    assert result.diagnostics["q1_nwm_success"] == 1.0
+
+
+def test_recursive_failure_falls_back_to_deepest_successful_endpoint():
+    trainer = _trainer({}, native=True, horizon=3)
+    trainer.dino_cwp_future_predictor = _DepthFakeCwp(none_calls=(2,))
+    result = build_dino_cwp_nwm_future_rollout(
+        trainer,
+        active_envs=[0],
+        records_by_env=[[
+            _record("g0", "front0", 2, 0.0, marker=2.0, native=True)
+        ]],
+        topk=1,
+        feature_dim=768,
+        reference=torch.zeros(1),
+    )
+
+    assert result.future_valid_mask.tolist() == [[True]]
+    assert result.full_horizon_mask.tolist() == [[False]]
+    assert result.fallback_mask.tolist() == [[True]]
+    assert result.realized_depths.tolist() == [[1]]
+    assert len(trainer.raenwm_runtime.requests) == 1
+    assert result.diagnostics["rollout_fallback"] == 1.0
+    assert result.diagnostics["rollout_failure_cwp_none"] == 1.0
+
+
+def test_per_query_noise_is_stable_across_batch_membership_and_order():
+    trainer = _trainer({}, native=True, horizon=2, noise_policy="per_query_v1")
+    identities = [(0, 4, "g0", 1), (0, 4, "g1", 1)]
+    both = build_per_query_initial_noise(trainer, identities)
+    second_only = build_per_query_initial_noise(trainer, [identities[1]])
+    reversed_rows = build_per_query_initial_noise(trainer, identities[::-1])
+
+    assert torch.equal(both[1], second_only[0])
+    assert torch.equal(both[0], reversed_rows[1])
+    assert torch.equal(both[1], reversed_rows[0])
+
+
+def test_rollout_records_raw_horizon_beyond_64_while_effective_value_saturates():
+    trainer = _trainer({}, native=True, horizon=2)
+    result = build_dino_cwp_nwm_future_rollout(
+        trainer,
+        active_envs=[0],
+        records_by_env=[[
+            _record("g0", "front0", 1, 100.0, marker=1.0, native=True)
+        ]],
+        topk=1,
+        feature_dim=768,
+        reference=torch.zeros(1),
+    )
+
+    state = result.states[0]
+    assert state.layers[0].raw_nwm_horizon > 64.0
+    assert state.layers[0].effective_nwm_horizon == 64.0
+    assert state.layers[1].raw_nwm_horizon > state.layers[0].raw_nwm_horizon
+    assert state.layers[1].effective_nwm_horizon == 64.0
+    assert result.diagnostics["rollout_horizon_truncated"] == 1.0

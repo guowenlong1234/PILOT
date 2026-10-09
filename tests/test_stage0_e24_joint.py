@@ -431,7 +431,7 @@ def test_native_adjusted_ce_covers_stop_top5_outside_and_padding():
         "future_tokens": torch.zeros(4, 2, 257, 8),
         "topk_valid_mask": torch.ones(4, 2, dtype=torch.bool),
         "candidate_q0_geometry": torch.zeros(4, 2, 3),
-        "q1_conditions": torch.zeros(4, 2, 4),
+        "future_conditions": torch.zeros(4, 2, 4),
         "full_base_logits": full_base,
         "full_valid_mask": torch.tensor(
             [
@@ -493,7 +493,7 @@ def test_native_adjusted_loss_only_updates_adapter_and_e24():
         "future_tokens": future,
         "topk_valid_mask": torch.ones(2, 2, dtype=torch.bool),
         "candidate_q0_geometry": geometry,
-        "q1_conditions": torch.randn(2, 2, 4, requires_grad=True),
+        "future_conditions": torch.randn(2, 2, 4, requires_grad=True),
         "full_base_logits": full_base,
         "full_valid_mask": torch.ones(2, 4, dtype=torch.bool),
         "topk_global_indices": torch.tensor([[1, 2], [1, 2]]),
@@ -511,7 +511,7 @@ def test_native_adjusted_loss_only_updates_adapter_and_e24():
     assert any(parameter.grad is not None for parameter in module.head.parameters())
     assert module.cls_adapter.fusion[-1].weight.grad is not None
     assert torch.count_nonzero(module.cls_adapter.fusion[-1].weight.grad) > 0
-    for value in (owner, text, future, geometry, full_base, batch["q1_conditions"]):
+    for value in (owner, text, future, geometry, full_base, batch["future_conditions"]):
         assert value.grad is None
 
 

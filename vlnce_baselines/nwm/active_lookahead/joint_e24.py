@@ -48,7 +48,7 @@ class E24JointDecisionPack:
     ghost_global_indices: torch.Tensor
     topk_base_indices: torch.Tensor
     topk_global_indices: torch.Tensor
-    q1_conditions: torch.Tensor | None = None
+    future_conditions: torch.Tensor | None = None
     full_base_logits: torch.Tensor | None = None
     full_valid_mask: torch.Tensor | None = None
     teacher_actions: torch.Tensor | None = None
@@ -105,14 +105,14 @@ class E24JointTrainModule(nn.Module):
         candidate_mask: torch.Tensor,
         text_token_mask: torch.Tensor,
         candidate_geometry: torch.Tensor,
-        q1_conditions: torch.Tensor | None = None,
+        future_conditions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.cls_adapter is not None:
-            if q1_conditions is None:
+            if future_conditions is None:
                 raise ValueError("native CLS E24 forward requires q1 conditions")
             future_tokens, _diagnostics = self.cls_adapter.adapt_tokens(
                 future_tokens,
-                q1_conditions,
+                future_conditions,
             )
         delta = self.head.forward_topk_from_log_probs(
             owner_embeddings,
@@ -274,8 +274,8 @@ def _forward_head(head, pack: E24JointDecisionPack) -> torch.Tensor:
             pack.text_token_mask,
             pack.candidate_geometry.to(dtype=head_dtype),
             None
-            if pack.q1_conditions is None
-            else pack.q1_conditions.to(dtype=head_dtype),
+            if pack.future_conditions is None
+            else pack.future_conditions.to(dtype=head_dtype),
         )
     return output.masked_fill(~valid, 0.0)
 
@@ -345,7 +345,7 @@ def build_e24_joint_step(
     feature_dim = int(txt_embeds.shape[-1])
     future = base_logits.new_zeros((batch, topk, 257, feature_dim))
     future_valid = torch.zeros((batch, topk), dtype=torch.bool, device=trainer.device)
-    future, q1_conditions, future_valid, source_diagnostics = (
+    future, future_conditions, future_valid, source_diagnostics = (
         build_dino_cwp_nwm_future_tokens(
         trainer,
         active_envs=active_envs,
@@ -416,7 +416,7 @@ def build_e24_joint_step(
         ghost_global_indices=ghost_globals,
         topk_base_indices=topk_local,
         topk_global_indices=topk_global,
-        q1_conditions=q1_conditions.detach() if native_cls else None,
+        future_conditions=future_conditions.detach() if native_cls else None,
         full_base_logits=full_base_logits,
         full_valid_mask=full_valid_mask,
     )
@@ -549,11 +549,11 @@ def collate_e24_joint_packs(
             [pack.teacher_base_index for pack in packs]
         ),
     }
-    if any(pack.q1_conditions is not None for pack in packs):
-        if not all(pack.q1_conditions is not None for pack in packs):
+    if any(pack.future_conditions is not None for pack in packs):
+        if not all(pack.future_conditions is not None for pack in packs):
             raise ValueError("cannot mix native and legacy E24 replay packs")
-        batch["q1_conditions"] = torch.cat(
-            [pack.q1_conditions for pack in packs]
+        batch["future_conditions"] = torch.cat(
+            [pack.future_conditions for pack in packs]
         )
     if any(pack.full_base_logits is not None for pack in packs):
         if not all(
@@ -638,7 +638,7 @@ def forward_e24_joint_batch(
             candidate_mask,
             batch["text_token_mask"],
             batch["candidate_q0_geometry"],
-            batch.get("q1_conditions"),
+            batch.get("future_conditions"),
         )
     else:
         # Still call the DDP wrapper so ranks without eligible decisions join
@@ -651,7 +651,7 @@ def forward_e24_joint_batch(
             candidate_mask,
             batch["text_token_mask"],
             batch["candidate_q0_geometry"],
-            batch.get("q1_conditions"),
+            batch.get("future_conditions"),
         )
     result = offline_decision_aware_loss(
         deltas,
@@ -691,7 +691,7 @@ def forward_native_adjusted_batch(
         "full_valid_mask",
         "topk_global_indices",
         "teacher_actions",
-        "q1_conditions",
+        "future_conditions",
     )
     missing = [name for name in required if name not in batch]
     if missing:
@@ -723,7 +723,7 @@ def forward_native_adjusted_batch(
         candidate_mask,
         batch["text_token_mask"],
         batch["candidate_q0_geometry"].detach(),
-        batch["q1_conditions"].detach(),
+        batch["future_conditions"].detach(),
     )
     module = getattr(train_module, "module", train_module)
     delta_max = float(module.delta_max)
@@ -827,7 +827,7 @@ def make_e24_joint_dummy_batch(
         "teacher_base_index": torch.full((1,), -1, dtype=torch.long),
     }
     if native_cls:
-        batch["q1_conditions"] = torch.zeros(1, topk, 4)
+        batch["future_conditions"] = torch.zeros(1, topk, 4)
         batch["full_base_logits"] = torch.zeros(1, 1)
         batch["full_valid_mask"] = torch.ones(1, 1, dtype=torch.bool)
         batch["topk_global_indices"] = torch.full(

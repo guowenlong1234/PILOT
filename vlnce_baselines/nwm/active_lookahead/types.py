@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Optional, Tuple
 import numpy as np
 import torch
@@ -46,6 +47,70 @@ class CandidateQ0:
         """Compatibility name used by the E24 geometry/future path."""
 
         return self.target_position
+
+
+class FutureRolloutFailureReason(str, Enum):
+    """Stable, checkpoint-safe reason for stopping one recursive query."""
+
+    NONE = "none"
+    INVALID_Q0 = "invalid_q0"
+    CWP_INVALID = "cwp_invalid"
+    CWP_NONE = "cwp_none"
+    CWP_FAILURE = "cwp_failure"
+    NWM_FAILURE = "nwm_failure"
+
+
+@dataclass(frozen=True)
+class FutureRolloutLayer:
+    """Small diagnostic record for one requested future depth."""
+
+    depth: int
+    position: np.ndarray
+    motion_heading_deg: float
+    habitat_yaw: float
+    segment_distance_m: float
+    cumulative_path_m: float
+    raw_nwm_horizon: float
+    effective_nwm_horizon: float
+    condition: Tuple[float, float, float, float]
+    horizon_truncated: bool
+    failure_reason: FutureRolloutFailureReason = FutureRolloutFailureReason.NONE
+
+
+@dataclass(frozen=True)
+class FutureRolloutState:
+    """Current endpoint of one query; only the latest large tensors are kept."""
+
+    row: int
+    slot: int
+    env_index: int
+    ghost_vp: str
+    requested_depth: int
+    realized_depth: int
+    position: np.ndarray
+    motion_heading_deg: float
+    cumulative_path_m: float
+    raw_nwm_horizon: float
+    condition: Tuple[float, float, float, float]
+    pred_latent: torch.Tensor
+    pred_cls: Optional[torch.Tensor]
+    pred_tokens: Optional[torch.Tensor]
+    layers: Tuple[FutureRolloutLayer, ...]
+    failure_reason: FutureRolloutFailureReason = FutureRolloutFailureReason.NONE
+
+
+@dataclass(frozen=True)
+class FutureRolloutResult:
+    """Fixed endpoint-only tensor contract consumed by E24."""
+
+    future_tokens: torch.Tensor
+    future_conditions: torch.Tensor
+    future_valid_mask: torch.Tensor
+    full_horizon_mask: torch.Tensor
+    fallback_mask: torch.Tensor
+    realized_depths: torch.Tensor
+    states: Tuple[FutureRolloutState, ...]
+    diagnostics: dict[str, float]
 
 
 @dataclass(frozen=True)

@@ -121,6 +121,8 @@ def test_active_grpo_launcher_pins_reference_and_joint_configs():
         'GRPO.reference_checkpoint_sha256 "$SOURCE_SHA"',
         "MODEL.RAENWM.rgb_fusion_trainable False",
         'CHECKPOINT_FOLDER "$OUTPUT_ROOT/checkpoints/"',
+        'MODEL.ACTIVE_LOOKAHEAD.lookahead_horizon_steps "$LOOKAHEAD_HORIZON"',
+        'MODEL.ACTIVE_LOOKAHEAD.rollout_noise_policy "$ROLLOUT_NOISE_POLICY"',
     ):
         assert token in launcher
     assert "<r2r|rxr>" in manager

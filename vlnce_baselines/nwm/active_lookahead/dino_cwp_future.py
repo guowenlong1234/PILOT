@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import math
 from pathlib import Path
 import time
@@ -16,6 +17,12 @@ from vlnce_baselines.nwm.etp_adapter import RaeLatentTargetRequest
 
 from .offline_checkpoint import sha256_file
 from .online_e24 import quantize_like_offline_cache
+from .types import (
+    FutureRolloutFailureReason,
+    FutureRolloutLayer,
+    FutureRolloutResult,
+    FutureRolloutState,
+)
 
 
 DEFAULT_NONE_THRESHOLD = 0.3
@@ -33,6 +40,25 @@ PREDICTED_FUTURE_DIAGNOSTIC_NAMES = (
     "q0_latent_rows", "q0_latent_mean_sum", "q0_latent_std_sum", "q0_latent_norm_sum",
     "q1_latent_rows", "q1_latent_mean_sum", "q1_latent_std_sum", "q1_latent_norm_sum",
     "action_rows", "action_flips",
+    "rollout_requested_depth_1", "rollout_requested_depth_2",
+    "rollout_requested_depth_3", "rollout_success_depth_1",
+    "rollout_success_depth_2", "rollout_success_depth_3",
+    "rollout_seconds_depth_1", "rollout_seconds_depth_2",
+    "rollout_seconds_depth_3", "rollout_full_horizon",
+    "rollout_fallback", "rollout_horizon_truncated",
+    "rollout_realized_depth_0", "rollout_realized_depth_1",
+    "rollout_realized_depth_2", "rollout_realized_depth_3",
+    "rollout_failure_invalid_q0", "rollout_failure_cwp_invalid",
+    "rollout_failure_cwp_none", "rollout_failure_cwp_failure",
+    "rollout_failure_nwm_failure",
+    "rollout_failure_depth_1_invalid_q0", "rollout_failure_depth_1_cwp_invalid",
+    "rollout_failure_depth_1_cwp_none", "rollout_failure_depth_1_cwp_failure",
+    "rollout_failure_depth_1_nwm_failure", "rollout_failure_depth_2_invalid_q0",
+    "rollout_failure_depth_2_cwp_invalid", "rollout_failure_depth_2_cwp_none",
+    "rollout_failure_depth_2_cwp_failure", "rollout_failure_depth_2_nwm_failure",
+    "rollout_failure_depth_3_invalid_q0", "rollout_failure_depth_3_cwp_invalid",
+    "rollout_failure_depth_3_cwp_none", "rollout_failure_depth_3_cwp_failure",
+    "rollout_failure_depth_3_nwm_failure",
 )
 
 
@@ -85,6 +111,38 @@ def summarize_predicted_future_diagnostics(totals: Mapping[str, float]) -> dict[
     summary["q0_cache_mebibytes_mean"] = (
         values["q0_cache_bytes_sum"] / cache_samples / (1024.0 ** 2)
     )
+    for depth in (1, 2, 3):
+        requested = values[f"rollout_requested_depth_{depth}"]
+        summary[f"rollout_requested_depth_{depth}"] = requested
+        summary[f"rollout_success_depth_{depth}"] = values[
+            f"rollout_success_depth_{depth}"
+        ]
+        summary[f"rollout_success_rate_depth_{depth}"] = (
+            values[f"rollout_success_depth_{depth}"] / max(1.0, requested)
+        )
+        summary[f"rollout_seconds_depth_{depth}"] = values[
+            f"rollout_seconds_depth_{depth}"
+        ]
+        summary[f"rollout_realized_depth_{depth}"] = values[
+            f"rollout_realized_depth_{depth}"
+        ]
+    summary["rollout_realized_depth_0"] = values["rollout_realized_depth_0"]
+    valid_endpoints = max(1.0, values["future_valid"])
+    summary["rollout_full_horizon_rate"] = (
+        values["rollout_full_horizon"] / valid_endpoints
+    )
+    summary["rollout_fallback_rate"] = values["rollout_fallback"] / valid_endpoints
+    summary["rollout_horizon_truncated_rate"] = (
+        values["rollout_horizon_truncated"] / valid_endpoints
+    )
+    for reason in FutureRolloutFailureReason:
+        if reason is FutureRolloutFailureReason.NONE:
+            continue
+        name = f"rollout_failure_{reason.value}"
+        summary[name] = values[name]
+        for depth in (1, 2, 3):
+            depth_name = f"rollout_failure_depth_{depth}_{reason.value}"
+            summary[depth_name] = values[depth_name]
     return summary
 
 
@@ -396,19 +454,35 @@ def _predict_nwm_rows(
     *,
     stage: str,
     diagnostics: dict[str, float],
+    initial_noise: torch.Tensor | None = None,
 ) -> dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]]:
     if not requests:
         return {}
     started = time.perf_counter()
     try:
-        prediction = trainer.raenwm_runtime.predict_latent_targets(requests)
+        if initial_noise is None:
+            prediction = trainer.raenwm_runtime.predict_latent_targets(requests)
+        else:
+            prediction = trainer.raenwm_runtime.predict_latent_targets(
+                requests, initial_noise=initial_noise
+            )
         rows = _validated_prediction_rows(prediction, len(requests))
     except (RuntimeError, FloatingPointError, ValueError):
         diagnostics[f"{stage}_batch_failures"] += 1.0
         rows = {}
         for index, request in enumerate(requests):
             try:
-                prediction = trainer.raenwm_runtime.predict_latent_targets([request])
+                row_noise = None
+                if initial_noise is not None:
+                    row_noise = initial_noise[index : index + 1]
+                if row_noise is None:
+                    prediction = trainer.raenwm_runtime.predict_latent_targets(
+                        [request]
+                    )
+                else:
+                    prediction = trainer.raenwm_runtime.predict_latent_targets(
+                        [request], initial_noise=row_noise
+                    )
                 single = _validated_prediction_rows(prediction, 1)
                 if 0 in single:
                     rows[index] = single[0]
@@ -425,7 +499,133 @@ def _predict_nwm_rows(
     return rows
 
 
-def build_dino_cwp_nwm_future_tokens(
+def validate_future_rollout_config(config: Any) -> tuple[int, str]:
+    """Validate the intentionally small public rollout configuration."""
+
+    horizon = int(getattr(config, "lookahead_horizon_steps", 1))
+    aggregation = str(getattr(config, "future_aggregation", "endpoint"))
+    failure_policy = str(
+        getattr(config, "rollout_failure_policy", "deepest_valid")
+    )
+    noise_policy = str(getattr(config, "rollout_noise_policy", "legacy_stream"))
+    if horizon not in (1, 2, 3):
+        raise ValueError("lookahead_horizon_steps must be one of {1,2,3}")
+    if aggregation != "endpoint":
+        raise ValueError("future_aggregation must be endpoint")
+    if failure_policy != "deepest_valid":
+        raise ValueError("rollout_failure_policy must be deepest_valid")
+    if noise_policy not in ("legacy_stream", "per_query_v1"):
+        raise ValueError(
+            "rollout_noise_policy must be legacy_stream or per_query_v1"
+        )
+    return horizon, noise_policy
+
+
+def stable_future_query_seed(
+    *,
+    task: str,
+    scene: str,
+    episode: str,
+    high_level_step: int,
+    ghost_vp: str,
+    depth: int,
+    base_seed: int,
+) -> int:
+    """Derive a stable positive 63-bit seed without Python hash randomization."""
+
+    fields = (
+        "etpr1-per-query-v1",
+        str(task),
+        str(scene),
+        str(episode),
+        str(int(high_level_step)),
+        str(ghost_vp),
+        str(int(depth)),
+        str(int(base_seed)),
+    )
+    digest = hashlib.sha256("\x1f".join(fields).encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") & ((1 << 63) - 1)
+
+
+def _episode_identity(trainer: Any, env_index: int) -> tuple[str, str, str]:
+    task = str(
+        getattr(getattr(getattr(trainer, "config", None), "MODEL", None),
+                "task_type", "unknown")
+    )
+    scene = "unknown"
+    episode = str(env_index)
+    envs = getattr(trainer, "envs", None)
+    current = getattr(envs, "current_episodes", None)
+    if callable(current):
+        try:
+            item = current()[int(env_index)]
+            scene = str(getattr(item, "scene_id", scene))
+            episode = str(getattr(item, "episode_id", episode))
+        except (IndexError, RuntimeError, TypeError, AttributeError):
+            pass
+    return task, scene, episode
+
+
+def _per_query_noise(
+    trainer: Any,
+    requests: Sequence[RaeLatentTargetRequest],
+    identities: Sequence[tuple[int, str, int]],
+) -> torch.Tensor:
+    query_identities = [
+        (request.env_index, high_level_step, ghost_vp, depth)
+        for request, (high_level_step, ghost_vp, depth) in zip(requests, identities)
+    ]
+    return build_per_query_initial_noise(trainer, query_identities)
+
+
+def build_per_query_initial_noise(
+    trainer: Any,
+    identities: Sequence[tuple[int, int, str, int]],
+) -> torch.Tensor:
+    """Create row-stable NWM noise for q0 or recursive future queries."""
+
+    runtime = trainer.raenwm_runtime
+    device = torch.device(getattr(runtime, "device", trainer.device))
+    base_seed = int(getattr(runtime.config, "noise_seed", 0))
+    rows = []
+    native = bool(getattr(runtime, "predict_cls_token", False))
+    shape = (1, 257, 768) if native else (1, 768, 16, 16)
+    for env_index, high_level_step, ghost_vp, depth in identities:
+        task, scene, episode = _episode_identity(trainer, env_index)
+        seed = stable_future_query_seed(
+            task=task,
+            scene=scene,
+            episode=episode,
+            high_level_step=high_level_step,
+            ghost_vp=ghost_vp,
+            depth=depth,
+            base_seed=base_seed,
+        )
+        generator = torch.Generator(device=device)
+        generator.manual_seed(seed)
+        rows.append(
+            torch.randn(
+                shape,
+                device=device,
+                dtype=torch.float32,
+                generator=generator,
+            )
+        )
+    return torch.cat(rows, dim=0)
+
+
+def _encoded_endpoint(state: FutureRolloutState) -> torch.Tensor:
+    patch_tokens = latent_to_patch_tokens(state.pred_latent.unsqueeze(0))[0]
+    if state.pred_cls is None:
+        raise ValueError("future endpoint lacks a complete CLS token")
+    if state.pred_tokens is not None and not torch.equal(
+        state.pred_tokens[1:], patch_tokens
+    ):
+        raise ValueError("native NWM token patch and pred_latent patch differ")
+    return torch.cat((state.pred_cls.reshape(1, 768), patch_tokens), dim=0)
+
+
+def _build_dino_cwp_nwm_future_tokens_legacy(
     trainer: Any,
     *,
     active_envs: Sequence[int],
@@ -475,7 +675,7 @@ def build_dino_cwp_nwm_future_tokens(
     valid = torch.zeros(
         (len(active_envs), int(topk)), dtype=torch.bool, device=reference.device
     )
-    q1_conditions = reference.new_zeros((len(active_envs), int(topk), 4))
+    future_conditions = reference.new_zeros((len(active_envs), int(topk), 4))
     prepared = []
     for row, (env_index, records) in enumerate(zip(active_envs, records_by_env)):
         diagnostics["topk_slots"] += float(len(records))
@@ -511,7 +711,7 @@ def build_dino_cwp_nwm_future_tokens(
     diagnostics["q0_requested"] = 0.0
     diagnostics["q0_nwm_success"] = 0.0
     if not prepared:
-        return future, q1_conditions, valid, diagnostics
+        return future, future_conditions, valid, diagnostics
 
     ordered_q0 = list(range(len(prepared)))
     cached_latents = torch.stack(
@@ -628,7 +828,7 @@ def build_dino_cwp_nwm_future_tokens(
     )
     diagnostics["q1_nwm_success"] = float(len(q1_rows))
     if not q1_rows:
-        return future, q1_conditions, valid, diagnostics
+        return future, future_conditions, valid, diagnostics
 
     encoded_rows = []
     encoded_destinations = []
@@ -654,7 +854,424 @@ def build_dino_cwp_nwm_future_tokens(
         )
     for encoded_row, (row, slot, condition) in enumerate(encoded_destinations):
         future[row, slot] = encoded[encoded_row]
-        q1_conditions[row, slot] = reference.new_tensor(condition)
+        future_conditions[row, slot] = reference.new_tensor(condition)
         valid[row, slot] = True
     diagnostics["future_valid"] = float(len(encoded_destinations))
-    return future, q1_conditions, valid, diagnostics
+    return future, future_conditions, valid, diagnostics
+
+
+def build_dino_cwp_nwm_future_rollout(
+    trainer: Any,
+    *,
+    active_envs: Sequence[int],
+    records_by_env: Sequence[Sequence[Any | None]],
+    topk: int,
+    feature_dim: int,
+    reference: torch.Tensor,
+) -> FutureRolloutResult:
+    """Recursively expand CWP→NWM queries against one fixed history snapshot."""
+
+    cfg = trainer._active_lookahead_config()
+    horizon_steps, noise_policy = validate_future_rollout_config(cfg)
+    diagnostics = {key: 0.0 for key in PREDICTED_FUTURE_DIAGNOSTIC_NAMES}
+    first_stage = getattr(
+        trainer, "last_candidate_q0_prediction_diagnostics", None
+    ) or {}
+    for name in (
+        "q0_first_stage_requested",
+        "q0_first_stage_success",
+        "q0_first_stage_nwm_seconds",
+    ):
+        diagnostics[name] = float(first_stage.get(name, 0.0))
+
+    live_records = []
+    for graph in getattr(trainer, "gmaps", ()):
+        live_records.extend(getattr(graph, "ghost_candidate_q0", {}).values())
+    unique_contexts = {}
+    cache_bytes = 0
+    for record in live_records:
+        patch = getattr(record, "predicted_patch_cpu_fp16", None)
+        if torch.is_tensor(patch):
+            cache_bytes += int(patch.numel()) * int(patch.element_size())
+        snapshot = getattr(record, "source_context", None)
+        context = getattr(snapshot, "context_latents", None)
+        if torch.is_tensor(context):
+            unique_contexts.setdefault(id(snapshot), context)
+    cache_bytes += sum(
+        int(context.numel()) * int(context.element_size())
+        for context in unique_contexts.values()
+    )
+    diagnostics["q0_cache_samples"] = 1.0
+    diagnostics["q0_cache_live_records_sum"] = float(len(live_records))
+    diagnostics["q0_cache_bytes_sum"] = float(cache_bytes)
+
+    future = reference.new_zeros(
+        (len(active_envs), int(topk), 257, int(feature_dim))
+    )
+    conditions = reference.new_zeros((len(active_envs), int(topk), 4))
+    valid = torch.zeros(
+        (len(active_envs), int(topk)), dtype=torch.bool, device=reference.device
+    )
+    full = torch.zeros_like(valid)
+    fallback = torch.zeros_like(valid)
+    realized_depths = torch.zeros_like(valid, dtype=torch.long)
+    adapter = trainer.raenwm_runtime.adapter
+    spacing = float(adapter.config.metric_waypoint_spacing)
+    states: dict[tuple[int, int], FutureRolloutState] = {}
+    snapshots: dict[tuple[int, int], Any] = {}
+
+    for row, (env_index, records) in enumerate(zip(active_envs, records_by_env)):
+        diagnostics["topk_slots"] += float(len(records))
+        for slot, record in enumerate(records):
+            if record is None:
+                continue
+            diagnostics["q0_record_present"] += 1.0
+            snapshot = getattr(record, "source_context", None)
+            if snapshot is not None:
+                diagnostics["q0_context_present"] += 1.0
+            patch = getattr(record, "predicted_patch_cpu_fp16", None)
+            cache_valid = (
+                getattr(record, "contract_version", None)
+                == "r1_post_update_ghost_mean_cached_v1"
+                and snapshot is not None
+                and torch.is_tensor(patch)
+                and patch.device.type == "cpu"
+                and patch.dtype == torch.float16
+                and tuple(patch.shape) == (768, 16, 16)
+                and bool(torch.isfinite(patch).all())
+            )
+            if not cache_valid:
+                diagnostics["q0_cache_invalid"] += 1.0
+                diagnostics["rollout_failure_invalid_q0"] += 1.0
+                diagnostics["rollout_failure_depth_1_invalid_q0"] += 1.0
+                continue
+            diagnostics["q0_cache_present"] += 1.0
+            q0_position = np.asarray(record.canonical_q0_position, dtype=np.float32)
+            q0_heading = _face_motion_heading_deg(
+                snapshot.source_position, q0_position, snapshot.source_yaw
+            )
+            q0_path = float(
+                np.linalg.norm(
+                    (q0_position - np.asarray(snapshot.source_position))[[0, 2]]
+                )
+            )
+            q0_raw_horizon = q0_path / spacing
+            key = (row, slot)
+            states[key] = FutureRolloutState(
+                row=row,
+                slot=slot,
+                env_index=int(env_index),
+                ghost_vp=str(record.ghost_vp),
+                requested_depth=horizon_steps,
+                realized_depth=0,
+                position=q0_position,
+                motion_heading_deg=q0_heading,
+                cumulative_path_m=q0_path,
+                raw_nwm_horizon=q0_raw_horizon,
+                condition=tuple(float(value) for value in record.condition),
+                pred_latent=patch.float(),
+                pred_cls=None,
+                pred_tokens=None,
+                layers=(),
+            )
+            snapshots[key] = snapshot
+    diagnostics["q0_requested"] = 0.0
+    diagnostics["q0_nwm_success"] = 0.0
+    if states:
+        _add_latent_stats(
+            diagnostics,
+            "q0",
+            torch.stack([state.pred_latent for state in states.values()]),
+        )
+
+    active_keys = list(states)
+    for depth in range(1, horizon_steps + 1):
+        if not active_keys:
+            break
+        depth_started = time.perf_counter()
+        diagnostics[f"rollout_requested_depth_{depth}"] += float(len(active_keys))
+        patches = latent_to_patch_tokens(
+            torch.stack([states[key].pred_latent for key in active_keys])
+        )
+        cwp_diagnostics = (
+            diagnostics
+            if depth == 1
+            else {key: 0.0 for key in PREDICTED_FUTURE_DIAGNOSTIC_NAMES}
+        )
+        cwp_diagnostics["cwp_requested"] += float(len(active_keys))
+        cwp_started = time.perf_counter()
+        predictions = {}
+        try:
+            with torch.inference_mode():
+                output = trainer.dino_cwp_future_predictor(
+                    patches.to(trainer.device)
+                )
+                decoded = decode_dino_cwp_top1(
+                    output,
+                    none_threshold=float(cfg.dino_cwp_none_threshold),
+                )
+            predictions = dict(enumerate(decoded))
+        except (RuntimeError, FloatingPointError, ValueError):
+            cwp_diagnostics["cwp_batch_failures"] += 1.0
+            for index in range(int(patches.shape[0])):
+                try:
+                    with torch.inference_mode():
+                        output = trainer.dino_cwp_future_predictor(
+                            patches[index : index + 1].to(trainer.device)
+                        )
+                        predictions[index] = decode_dino_cwp_top1(
+                            output,
+                            none_threshold=float(cfg.dino_cwp_none_threshold),
+                        )[0]
+                except (RuntimeError, FloatingPointError, ValueError):
+                    cwp_diagnostics["cwp_row_failures"] += 1.0
+        cwp_diagnostics["cwp_seconds"] += time.perf_counter() - cwp_started
+
+        requests = []
+        request_keys = []
+        request_layers = []
+        request_identities = []
+        failed_keys = set()
+        for index, key in enumerate(active_keys):
+            state = states[key]
+            prediction = predictions.get(index)
+            reason = None
+            if prediction is None:
+                reason = FutureRolloutFailureReason.CWP_FAILURE
+                cwp_diagnostics["cwp_invalid"] += 1.0
+            elif not prediction.valid:
+                reason = FutureRolloutFailureReason.CWP_INVALID
+                cwp_diagnostics["cwp_invalid"] += 1.0
+            elif prediction.pred_none:
+                reason = FutureRolloutFailureReason.CWP_NONE
+                cwp_diagnostics["cwp_none"] += 1.0
+            if reason is not None:
+                diagnostics[f"rollout_failure_{reason.value}"] += 1.0
+                diagnostics[
+                    f"rollout_failure_depth_{depth}_{reason.value}"
+                ] += 1.0
+                states[key] = dataclass_replace_failure(state, depth, reason)
+                failed_keys.add(key)
+                continue
+            target = waypoint_to_world_position(
+                state.position,
+                heading_deg=state.motion_heading_deg,
+                local_angle_deg=prediction.local_angle_deg,
+                distance_m=prediction.distance_m,
+            )
+            motion_heading = state.motion_heading_deg + prediction.local_angle_deg
+            target_yaw = _wrap_to_pi(math.radians(motion_heading) + math.pi)
+            cumulative_path = state.cumulative_path_m + prediction.distance_m
+            raw_horizon = cumulative_path / spacing
+            effective_horizon = min(64.0, max(1.0, raw_horizon))
+            snapshot = snapshots[key]
+            record = adapter.build_target_record(
+                env_index=state.env_index,
+                ghost_vp=state.ghost_vp,
+                source_position=snapshot.source_position,
+                source_yaw=snapshot.source_yaw,
+                target_position=target,
+                target_yaw=target_yaw,
+                horizon_override=raw_horizon,
+            )
+            condition = (
+                record.condition.dx,
+                record.condition.dy,
+                record.condition.dtheta,
+                record.condition.rel_t,
+            )
+            requests.append(RaeLatentTargetRequest(
+                env_index=state.env_index,
+                ghost_vp=state.ghost_vp,
+                snapshot=snapshot,
+                target_position=target,
+                target_yaw=target_yaw,
+                horizon_override=raw_horizon,
+            ))
+            request_keys.append(key)
+            request_layers.append(FutureRolloutLayer(
+                depth=depth,
+                position=target,
+                motion_heading_deg=motion_heading,
+                habitat_yaw=target_yaw,
+                segment_distance_m=prediction.distance_m,
+                cumulative_path_m=cumulative_path,
+                raw_nwm_horizon=raw_horizon,
+                effective_nwm_horizon=effective_horizon,
+                condition=tuple(float(value) for value in condition),
+                horizon_truncated=raw_horizon > 64.0,
+            ))
+            request_identities.append((
+                int(getattr(snapshot, "source_high_level_step", 0)),
+                state.ghost_vp,
+                depth,
+            ))
+            cwp_diagnostics["cwp_top1"] += 1.0
+
+        if depth == 1:
+            diagnostics["q1_requested"] += float(len(requests))
+        initial_noise = None
+        if requests and noise_policy == "per_query_v1":
+            initial_noise = _per_query_noise(
+                trainer, requests, request_identities
+            )
+        nwm_diagnostics = (
+            diagnostics
+            if depth == 1
+            else {key: 0.0 for key in PREDICTED_FUTURE_DIAGNOSTIC_NAMES}
+        )
+        nwm_rows = _predict_nwm_rows(
+            trainer,
+            requests,
+            stage="q1",
+            diagnostics=nwm_diagnostics,
+            initial_noise=initial_noise,
+        )
+        successful_keys = []
+        for request_index, key in enumerate(request_keys):
+            predicted = nwm_rows.get(request_index)
+            if predicted is None:
+                reason = FutureRolloutFailureReason.NWM_FAILURE
+                diagnostics[f"rollout_failure_{reason.value}"] += 1.0
+                diagnostics[
+                    f"rollout_failure_depth_{depth}_{reason.value}"
+                ] += 1.0
+                states[key] = dataclass_replace_failure(
+                    states[key], depth, reason, layer=request_layers[request_index]
+                )
+                failed_keys.add(key)
+                continue
+            pred_latent, pred_cls, pred_tokens = predicted
+            previous = states[key]
+            layer = request_layers[request_index]
+            states[key] = FutureRolloutState(
+                row=previous.row,
+                slot=previous.slot,
+                env_index=previous.env_index,
+                ghost_vp=previous.ghost_vp,
+                requested_depth=horizon_steps,
+                realized_depth=depth,
+                position=layer.position,
+                motion_heading_deg=layer.motion_heading_deg,
+                cumulative_path_m=layer.cumulative_path_m,
+                raw_nwm_horizon=layer.raw_nwm_horizon,
+                condition=layer.condition,
+                pred_latent=pred_latent,
+                pred_cls=pred_cls,
+                pred_tokens=pred_tokens,
+                layers=previous.layers + (layer,),
+            )
+            diagnostics[f"rollout_success_depth_{depth}"] += 1.0
+            successful_keys.append(key)
+        diagnostics[f"rollout_seconds_depth_{depth}"] += (
+            time.perf_counter() - depth_started
+        )
+        active_keys = successful_keys
+
+    endpoint_states = tuple(states[key] for key in sorted(states))
+    encodable = [state for state in endpoint_states if state.realized_depth >= 1]
+    if encodable:
+        encoded = quantize_like_offline_cache(
+            torch.stack([_encoded_endpoint(state) for state in encodable])
+        ).to(device=reference.device, dtype=reference.dtype)
+        if tuple(encoded.shape[1:]) != (257, feature_dim):
+            raise ValueError(
+                "predicted future tokens violate E24 endpoint contract: "
+                f"{tuple(encoded.shape[1:])} vs {(257, feature_dim)}"
+            )
+        for value, state in zip(encoded, encodable):
+            key = (state.row, state.slot)
+            future[key] = value
+            conditions[key] = reference.new_tensor(state.condition)
+            valid[key] = True
+            realized_depths[key] = state.realized_depth
+            full[key] = state.realized_depth == horizon_steps
+            fallback[key] = 0 < state.realized_depth < horizon_steps
+            diagnostics[f"rollout_realized_depth_{state.realized_depth}"] += 1.0
+            if full[key]:
+                diagnostics["rollout_full_horizon"] += 1.0
+            if fallback[key]:
+                diagnostics["rollout_fallback"] += 1.0
+            if any(layer.horizon_truncated for layer in state.layers):
+                diagnostics["rollout_horizon_truncated"] += 1.0
+    invalid_count = int(diagnostics["topk_slots"] - valid.sum().item())
+    diagnostics["rollout_realized_depth_0"] += float(invalid_count)
+    diagnostics["future_valid"] = float(valid.sum())
+    return FutureRolloutResult(
+        future_tokens=future,
+        future_conditions=conditions,
+        future_valid_mask=valid,
+        full_horizon_mask=full,
+        fallback_mask=fallback,
+        realized_depths=realized_depths,
+        states=endpoint_states,
+        diagnostics=diagnostics,
+    )
+
+
+def dataclass_replace_failure(
+    state: FutureRolloutState,
+    depth: int,
+    reason: FutureRolloutFailureReason,
+    *,
+    layer: FutureRolloutLayer | None = None,
+) -> FutureRolloutState:
+    """Append compact failure metadata while retaining the deepest endpoint."""
+
+    if layer is None:
+        layer = FutureRolloutLayer(
+            depth=depth,
+            position=state.position.copy(),
+            motion_heading_deg=state.motion_heading_deg,
+            habitat_yaw=_wrap_to_pi(
+                math.radians(state.motion_heading_deg) + math.pi
+            ),
+            segment_distance_m=0.0,
+            cumulative_path_m=state.cumulative_path_m,
+            raw_nwm_horizon=state.raw_nwm_horizon,
+            effective_nwm_horizon=min(64.0, max(1.0, state.raw_nwm_horizon)),
+            condition=state.condition,
+            horizon_truncated=state.raw_nwm_horizon > 64.0,
+            failure_reason=reason,
+        )
+    else:
+        layer = FutureRolloutLayer(
+            **{
+                **layer.__dict__,
+                "failure_reason": reason,
+            }
+        )
+    return FutureRolloutState(
+        **{
+            **state.__dict__,
+            "layers": state.layers + (layer,),
+            "failure_reason": reason,
+        }
+    )
+
+
+def build_dino_cwp_nwm_future_tokens(
+    trainer: Any,
+    *,
+    active_envs: Sequence[int],
+    records_by_env: Sequence[Sequence[Any | None]],
+    topk: int,
+    feature_dim: int,
+    reference: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float]]:
+    """Backward-compatible h=1-shaped wrapper around the endpoint rollout."""
+
+    result = build_dino_cwp_nwm_future_rollout(
+        trainer,
+        active_envs=active_envs,
+        records_by_env=records_by_env,
+        topk=topk,
+        feature_dim=feature_dim,
+        reference=reference,
+    )
+    return (
+        result.future_tokens,
+        result.future_conditions,
+        result.future_valid_mask,
+        result.diagnostics,
+    )

@@ -6,6 +6,9 @@ REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
 DATASET=${1:?Usage: run_native_cls_e24_grpo_server_job.sh <r2r|rxr> <start|resume> <log_file>}
 MODE=${2:?Usage: run_native_cls_e24_grpo_server_job.sh <r2r|rxr> <start|resume> <log_file>}
 LOG_FILE=${3:?Usage: run_native_cls_e24_grpo_server_job.sh <r2r|rxr> <start|resume> <log_file>}
+LOOKAHEAD_HORIZON=${ETPR1_LOOKAHEAD_HORIZON_STEPS:-1}
+ROLLOUT_NOISE_POLICY=${ETPR1_ROLLOUT_NOISE_POLICY:-per_query_v1}
+ROLLOUT_TAG=h${LOOKAHEAD_HORIZON}_${ROLLOUT_NOISE_POLICY}
 
 case "$DATASET:$MODE" in
     r2r:start|r2r:resume|rxr:start|rxr:resume) ;;
@@ -16,8 +19,8 @@ if [ "$DATASET" = r2r ]; then
     JOINT_CONFIG=run_r2r/iter_train_rae_dino_native_cls_e24_joint.yaml
     GRPO_CONFIG=run_r2r/grpo_native_cls_e24_frozen.yaml
     SOURCE_CHECKPOINT=${ETPR1_R2R_ACTIVE_GRPO_SOURCE_CHECKPOINT:-}
-    EXP_NAME=${ETPR1_R2R_ACTIVE_GRPO_EXP_NAME:-r2r_native_cls_e24_frozen_grpo}
-    OUTPUT_ROOT=${ETPR1_R2R_ACTIVE_GRPO_OUTPUT_ROOT:-data/logs/active_lookahead/r2r_native_cls_e24_grpo}
+    EXP_NAME=${ETPR1_R2R_ACTIVE_GRPO_EXP_NAME:-r2r_native_cls_e24_frozen_grpo}_${ROLLOUT_TAG}
+    OUTPUT_ROOT=${ETPR1_R2R_ACTIVE_GRPO_OUTPUT_ROOT:-data/logs/active_lookahead/r2r_native_cls_e24_grpo}/${ROLLOUT_TAG}
     MAX_TRAJ_LEN=15
     MAX_TEXT_LEN=150
     CWP_PATH=data/wp_pred/check_cwp_bestdist_hfov90
@@ -25,12 +28,14 @@ else
     JOINT_CONFIG=run_rxr/iter_train_rae_dino_native_cls_e24_joint.yaml
     GRPO_CONFIG=run_rxr/grpo_native_cls_e24_frozen.yaml
     SOURCE_CHECKPOINT=${ETPR1_RXR_ACTIVE_GRPO_SOURCE_CHECKPOINT:-}
-    EXP_NAME=${ETPR1_RXR_ACTIVE_GRPO_EXP_NAME:-rxr_native_cls_e24_frozen_grpo}
-    OUTPUT_ROOT=${ETPR1_RXR_ACTIVE_GRPO_OUTPUT_ROOT:-data/logs/active_lookahead/rxr_native_cls_e24_grpo}
+    EXP_NAME=${ETPR1_RXR_ACTIVE_GRPO_EXP_NAME:-rxr_native_cls_e24_frozen_grpo}_${ROLLOUT_TAG}
+    OUTPUT_ROOT=${ETPR1_RXR_ACTIVE_GRPO_OUTPUT_ROOT:-data/logs/active_lookahead/rxr_native_cls_e24_grpo}/${ROLLOUT_TAG}
     MAX_TRAJ_LEN=25
     MAX_TEXT_LEN=250
     CWP_PATH=data/wp_pred/check_cwp_bestdist_hfov63
 fi
+case "$LOOKAHEAD_HORIZON" in 1|2|3) ;; *) echo "Invalid lookahead horizon" >&2; exit 2 ;; esac
+case "$ROLLOUT_NOISE_POLICY" in legacy_stream|per_query_v1) ;; *) echo "Invalid rollout noise policy" >&2; exit 2 ;; esac
 
 if [ -z "$SOURCE_CHECKPOINT" ] || [ ! -f "$SOURCE_CHECKPOINT" ]; then
     echo "Set the dataset-specific ACTIVE_GRPO_SOURCE_CHECKPOINT to a native joint-SFT checkpoint." >&2
@@ -83,6 +88,8 @@ export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:Tr
     echo "source_checkpoint_sha256=$SOURCE_SHA"
     echo "nwm_context_contract=r1_low_level_move_rgb_anchor_v1"
     echo "nwm_context_encode_batch_size=64"
+    echo "lookahead_horizon_steps=$LOOKAHEAD_HORIZON"
+    echo "rollout_noise_policy=$ROLLOUT_NOISE_POLICY"
     "$PYTHON_BIN" -c 'import sys, torch, transformers, habitat, habitat_sim; print(f"versions=python:{sys.version.split()[0]} torch:{torch.__version__} cuda:{torch.version.cuda} transformers:{transformers.__version__} habitat:{habitat.__version__} habitat_sim:{habitat_sim.__version__}")'
 } >>"$LOG_FILE"
 
@@ -109,6 +116,8 @@ set +e
     GRPO.reference_checkpoint_sha256 "$SOURCE_SHA" \
     "${resume_args[@]}" \
     MODEL.RAENWM.rgb_fusion_trainable False \
+    MODEL.ACTIVE_LOOKAHEAD.lookahead_horizon_steps "$LOOKAHEAD_HORIZON" \
+    MODEL.ACTIVE_LOOKAHEAD.rollout_noise_policy "$ROLLOUT_NOISE_POLICY" \
     TASK_CONFIG.SIMULATOR.HABITAT_SIM_V0.ALLOW_SLIDING True \
     TASK_CONFIG.DATASET.SUFFIX _10 \
     CHECKPOINT_FOLDER "$OUTPUT_ROOT/checkpoints/" \

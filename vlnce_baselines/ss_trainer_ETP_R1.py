@@ -73,8 +73,10 @@ from vlnce_baselines.nwm.active_lookahead.candidate_q0 import (
 )
 from vlnce_baselines.nwm.active_lookahead.dino_cwp_future import (
     PREDICTED_FUTURE_DIAGNOSTIC_NAMES,
+    build_per_query_initial_noise,
     load_dino_cwp_predictor,
     summarize_predicted_future_diagnostics,
+    validate_future_rollout_config,
 )
 from vlnce_baselines.nwm.active_lookahead.joint_e24 import (
     E24JointTrainModule,
@@ -368,6 +370,7 @@ class RLTrainer(BaseVLNCETrainer):
             "etpr1-rxr-native-cls-e24-joint-v1",
             "etpr1-rxr-native-cls-e24-joint-q0-cache-v2",
             "etpr1-rxr-native-cls-e24-joint-q0-cache-v3",
+            "etpr1-rxr-native-cls-e24-joint-rollout-v3",
         }
 
     def _e24_joint_head_state_module(self):
@@ -397,6 +400,7 @@ class RLTrainer(BaseVLNCETrainer):
             raise ValueError("predicted q1 requires fixed_initial context")
         if str(cfg.dino_cwp_heading_policy) != "face_motion":
             raise ValueError("predicted q1 requires face_motion heading")
+        validate_future_rollout_config(cfg)
         if self.dino_cwp_future_predictor is None:
             model, metadata = load_dino_cwp_predictor(
                 cfg.dino_cwp_checkpoint_path,
@@ -426,10 +430,31 @@ class RLTrainer(BaseVLNCETrainer):
 
     def _validate_e24_joint_provenance(self, checkpoint):
         cfg = self._active_lookahead_config()
-        if checkpoint.get("e24_joint_format_version") != str(
-            cfg.checkpoint_format_version
-        ):
+        saved_format = checkpoint.get("e24_joint_format_version")
+        current_format = str(cfg.checkpoint_format_version)
+        legacy_formats = {
+            "etpr1-native-cls-e24-joint-v2",
+            "etpr1-rxr-native-cls-e24-joint-v1",
+            "etpr1-native-cls-e24-joint-q0-cache-v3",
+            "etpr1-rxr-native-cls-e24-joint-q0-cache-v2",
+            "etpr1-native-cls-e24-joint-q0-cache-v4",
+            "etpr1-rxr-native-cls-e24-joint-q0-cache-v3",
+        }
+        legacy_compatible = (
+            int(getattr(cfg, "lookahead_horizon_steps", 1)) == 1
+            and str(getattr(cfg, "future_aggregation", "endpoint")) == "endpoint"
+            and str(getattr(cfg, "rollout_failure_policy", "deepest_valid"))
+            == "deepest_valid"
+            and str(getattr(cfg, "rollout_noise_policy", "legacy_stream"))
+            == "legacy_stream"
+        )
+        legacy_load = saved_format in legacy_formats and saved_format != current_format
+        if saved_format != current_format and not (legacy_load and legacy_compatible):
             raise ValueError("joint checkpoint has the wrong format version")
+        if legacy_load and bool(getattr(self.config.IL, "is_requeue", False)):
+            raise ValueError(
+                "legacy joint checkpoint cannot resume optimizer/scheduler state"
+            )
         provenance = checkpoint.get("e24_joint_provenance")
         if not isinstance(provenance, dict):
             raise ValueError("joint checkpoint is missing provenance")
@@ -461,7 +486,40 @@ class RLTrainer(BaseVLNCETrainer):
             "q0_reuse_required": True,
             "q0_cache_precision": "cpu_fp16",
             "q0_recompute_forbidden": True,
+            "rollout_format_version": "etpr1-active-lookahead-rollout-v2",
+            "lookahead_horizon_steps": int(
+                getattr(cfg, "lookahead_horizon_steps", 1)
+            ),
+            "future_aggregation": str(
+                getattr(cfg, "future_aggregation", "endpoint")
+            ),
+            "rollout_failure_policy": str(
+                getattr(cfg, "rollout_failure_policy", "deepest_valid")
+            ),
+            "rollout_noise_policy": str(
+                getattr(cfg, "rollout_noise_policy", "legacy_stream")
+            ),
+            "nwm_horizon_policy": "clip_64_continue",
         }
+        if legacy_load:
+            for name in (
+                "rollout_format_version",
+                "lookahead_horizon_steps",
+                "future_aggregation",
+                "rollout_failure_policy",
+                "rollout_noise_policy",
+                "nwm_horizon_policy",
+            ):
+                expected.pop(name, None)
+            if provenance.get("q0_contract") != expected["q0_contract"]:
+                for name in (
+                    "q0_contract",
+                    "q0_position_source",
+                    "q0_reuse_required",
+                    "q0_cache_precision",
+                    "q0_recompute_forbidden",
+                ):
+                    expected.pop(name, None)
         if self._native_cls_joint_enabled():
             expected.update(self._native_cls_provenance_fields())
             if self._rxr_native_cls_joint_enabled():
@@ -515,6 +573,20 @@ class RLTrainer(BaseVLNCETrainer):
             "q0_cache_precision": "cpu_fp16",
             "q0_recompute_forbidden": True,
             "q1_contract": "nwm_predicted_no_simulator_query",
+            "rollout_format_version": "etpr1-active-lookahead-rollout-v2",
+            "lookahead_horizon_steps": int(
+                getattr(cfg, "lookahead_horizon_steps", 1)
+            ),
+            "future_aggregation": str(
+                getattr(cfg, "future_aggregation", "endpoint")
+            ),
+            "rollout_failure_policy": str(
+                getattr(cfg, "rollout_failure_policy", "deepest_valid")
+            ),
+            "rollout_noise_policy": str(
+                getattr(cfg, "rollout_noise_policy", "legacy_stream")
+            ),
+            "nwm_horizon_policy": "clip_64_continue",
             "context_strategy": "fixed_initial",
             "heading_policy": "face_motion",
             "topk": 5,
@@ -599,6 +671,18 @@ class RLTrainer(BaseVLNCETrainer):
         source_provenance = checkpoint.get("e24_joint_provenance")
         if not isinstance(source_provenance, dict):
             raise ValueError("lookahead warm-start checkpoint lacks provenance")
+        if checkpoint.get("e24_joint_format_version") in {
+            "etpr1-native-cls-e24-joint-q0-cache-v3",
+            "etpr1-rxr-native-cls-e24-joint-q0-cache-v2",
+            "etpr1-native-cls-e24-joint-q0-cache-v4",
+            "etpr1-rxr-native-cls-e24-joint-q0-cache-v3",
+        }:
+            horizon, noise_policy = validate_future_rollout_config(cfg)
+            if horizon != 1 or noise_policy != "legacy_stream":
+                raise ValueError(
+                    "legacy q0-cache warm start is restricted to h=1 "
+                    "endpoint + legacy_stream"
+                )
         actual_contract = str(source_provenance.get("q0_contract", ""))
         if actual_contract != provenance["source_q0_contract"]:
             raise ValueError(
@@ -1310,6 +1394,7 @@ class RLTrainer(BaseVLNCETrainer):
         candidate_previews,
         wp_outputs,
         front_cls=None,
+        high_level_step=0,
     ):
         runtime = self.raenwm_runtime
         self.last_raenwm_rgb_fusion_diagnostics = None
@@ -1338,7 +1423,27 @@ class RLTrainer(BaseVLNCETrainer):
             cur_pos, cur_ori, candidate_previews
         )
         started = time.perf_counter()
-        prediction = runtime.predict(queries)
+        _horizon, noise_policy = validate_future_rollout_config(
+            self._active_lookahead_config()
+        )
+        initial_noise = None
+        if queries and noise_policy == "per_query_v1":
+            initial_noise = build_per_query_initial_noise(
+                self,
+                [
+                    (
+                        query.env_index,
+                        int(high_level_step),
+                        query.query_id,
+                        0,
+                    )
+                    for query in queries
+                ],
+            )
+        if initial_noise is None:
+            prediction = runtime.predict(queries)
+        else:
+            prediction = runtime.predict(queries, initial_noise=initial_noise)
         elapsed = time.perf_counter() - started
         success = len((prediction.meta or {}).get("records", ()))
         self.last_candidate_q0_prediction_diagnostics = {
@@ -3739,6 +3844,7 @@ class RLTrainer(BaseVLNCETrainer):
                     candidate_previews,
                     wp_outputs,
                     front_cls=raenwm_front_cls,
+                    high_level_step=stepk,
                 )
                 vp_inputs = self._vp_feature_variable(wp_outputs)
                 vp_inputs.update({'mode': 'panorama'})

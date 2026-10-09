@@ -57,8 +57,12 @@ def test_rxr_baseline_and_joint_configs_preserve_task_contract():
     assert nwm["token_count"] == 257
     active = joint["MODEL"]["ACTIVE_LOOKAHEAD"]
     assert active["checkpoint_format_version"] == (
-        "etpr1-rxr-native-cls-e24-joint-q0-cache-v3"
+        "etpr1-rxr-native-cls-e24-joint-rollout-v3"
     )
+    assert active["lookahead_horizon_steps"] == 1
+    assert active["future_aggregation"] == "endpoint"
+    assert active["rollout_failure_policy"] == "deepest_valid"
+    assert active["rollout_noise_policy"] == "legacy_stream"
     assert nwm["context_source"] == "low_level_move_rgb_anchor"
     assert nwm["low_level_encode_batch_size"] == 64
     assert active["warm_start_expected_q0_contract"] == (

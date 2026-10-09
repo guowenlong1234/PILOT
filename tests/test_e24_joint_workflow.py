@@ -29,8 +29,12 @@ def test_native_cls_config_uses_reusable_q0_cache_contract():
         "native_cls_e24_joint_sft/checkpoints/etpr1_native_cls_e24_joint_sft"
     )
     assert active["checkpoint_format_version"] == (
-        "etpr1-native-cls-e24-joint-q0-cache-v4"
+        "etpr1-native-cls-e24-joint-rollout-v4"
     )
+    assert active["lookahead_horizon_steps"] == 1
+    assert active["future_aggregation"] == "endpoint"
+    assert active["rollout_failure_policy"] == "deepest_valid"
+    assert active["rollout_noise_policy"] == "legacy_stream"
     assert active["warm_start_checkpoint_path"] == ""
     assert active["warm_start_checkpoint_sha256"] == ""
     assert active["warm_start_source_context_contract"] == ""
@@ -70,7 +74,7 @@ def test_native_cls_smoke_and_single_episode_wrappers_are_isolated():
         "iter_train_rae_dino_native_cls_e24_joint.yaml",
         "native_cls_e24_joint_smoke",
         "ETPR1_NATIVE_CLS_SYNC_DESTINATION",
-        "native_cls_e24_joint_sft/checkpoints/${ETPR1_E24_JOINT_EXP_NAME}",
+        "native_cls_e24_joint_sft/${ROLLOUT_TAG}/checkpoints/${ETPR1_E24_JOINT_EXP_NAME}_${ROLLOUT_TAG}",
         "ETPR1_E24_JOINT_ITERS=2",
         "ETPR1_E24_JOINT_SYNC_ENABLED=False",
         "ETPR1_E24_JOINT_SMOKE_FREEZE_CHECK=True",
@@ -154,6 +158,10 @@ def test_joint_config_and_launchers_fix_the_formal_contract():
     assert "e24_head_gradient_clip_norm: 10.0" in config
     assert "dino_cwp_context_strategy: fixed_initial" in config
     assert "dino_cwp_heading_policy: face_motion" in config
+    assert "lookahead_horizon_steps: 1" in config
+    assert "future_aggregation: endpoint" in config
+    assert "rollout_failure_policy: deepest_valid" in config
+    assert "rollout_noise_policy: legacy_stream" in config
 
     launcher = (ROOT / "scripts/run_rae_r2r_e24_joint_server_job.sh").read_text()
     for digest in (
@@ -164,9 +172,19 @@ def test_joint_config_and_launchers_fix_the_formal_contract():
         assert digest in launcher
     manager = (ROOT / "scripts/manage_rae_r2r_e24_joint_server.sh").read_text()
     assert "smoke)" in manager and "pilot)" in manager and "resume)" in manager
+    assert "ROLLOUT_TAG=h${LOOKAHEAD_HORIZON}_${ROLLOUT_NOISE_POLICY}" in manager
     status_body = manager.split("show_status() {", 1)[1].split("\n}", 1)[0]
     assert "return 0" in status_body
     assert 'habitat_version=getattr(habitat, "__version__", "unknown")' in launcher
+
+
+def test_active_eval_reads_current_candidate_positions_without_future_oracle():
+    source = (ROOT / "vlnce_baselines/ss_trainer_ETP_R1.py").read_text()
+    current_state_guard = source.split("navigation_states = self.envs.call", 1)[0]
+    current_state_guard = current_state_guard.rsplit("if (", 1)[1]
+    assert "or self._active_lookahead_enabled()" in current_state_guard
+    assert '"get_navigation_state"' in source
+    assert "get_future" not in current_state_guard
 
 
 def test_eval_watcher_requires_metrics_diagnostics_space_and_protected_gpu():
