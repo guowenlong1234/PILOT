@@ -1,12 +1,32 @@
 # Project Research
 
+2026-10-09 16:39，progressive 测评机真实验收完成：通过Git bundle快进交付（未推送），修复PyTorch2.2布尔组合索引兼容问题后142项回归通过；2路线真实采集12记录、q1/q2查询28/20、971个基座相关tensor及314个世界模型tensor冻结一致；GPU训练2步并恢复第3步、两种缓存重放通过。同一新head未见场景2路线完整/认证各16决策，实际动作及逐路线指标一致，9个证书独立复核通过；世界模型查询85→41。仅小规模功能验收，不是导航收益或正式测速。16:38:54 GPU0显存、无残留任务；产物保留测评机`data/logs/progressive_acceptance_20261009/`。真实执行代码`e22f084`，审计`4b1b1cb`；详见`docs/progressive-lookahead-acceptance-20261009.md`。
+
+2026-10-09，本地实现可选 `progressive_e24_v1`：独立有序后继证据、共享 E24 融合/比较与跨深度记忆、FP32 有界逐层增量、全移动候选区间认证停止；默认仍关闭。新 `progressive_*` 模块接通完整深度采集、独立 schema/严格来源校验、离线训练/保存恢复、缓存重放、逐层在线预测和 trainer 的精确动作接入；`stage2_e24_job.py --progressive none/certified` 使用同一新 checkpoint。首版 D2、预算1、比例[0.5,0.5]，独立样例位于 `configs/progressive/`。本机隔离 CPU 测试142项通过（含旧路径回归、模拟预测和CLI合成训练恢复），真实Habitat/GPU/导航尚未验收，不代表导航收益。原历史产物、未提交文档修改保留，未提交推送或运行长任务。数学、mask、坐标、资产路径、准确运行命令及文件清单见 `docs/progressive_lookahead.md`。主要核查入口：`residual_head.py`、`stage2_collect.py`、`stage2_data.py`、`stage2_training.py`、`stage2_online.py`、`inference_gate.py`、`topk_query.py`、`dino_cwp_future.py`、`offline_objective.py`、`ss_trainer_ETP_R1.py`。
+
 2026-10-09，多步递归前瞻已接入主线：三方移植独立递归实现，并针对当前Stage2全景q0缓存另接q2/q3扩展，默认仍一步。保留q1朝向/历史/种子，后层复用真实源历史、累计位姿与跨度，最深有效端点评分；记录实际深度和回退，拒绝混深度训练数据，旧一步头多步推理需显式迁移。代码`8453867`在3090专用容器/环境183项回归通过；一步16路线125次动作/逐路线指标与合并前一致；两步/三步各4路线实际达到对应深度；三步采集4路线28记录、完整性校验和评分头前向损失检查通过。15:06:15全部退出0，GPU已释放；未训练新头、未证明多步收益，也未实现逐层决策自适应停止。详见`docs/recursive-rollout-integration-20261009.md`。下方同日“未接入”是本次合入前的核查记录。
 
+2026-10-09，首图多步递归实现边界复核（本地源码，只读核查未运行实验）：当前主分支 `feature/e24-joint-sft` 的 `Stage2Online.score_step → Stage2Collector.predict_step` 仅从缓存 q0 提议并预测一次 q1，随后直接评分，没有 q1→q2 的反馈展开。多步实现位于独立工作区 `ETP-R1-recursive-future-rollout`：`dino_cwp_future.py` 按深度循环、更新预测状态，使用终端/最深有效层评分，尚未接入当前 Stage2 主线。当前 drawio 首页有“One-step iterative lookahead”标注；若按重复展开理解为多步能力，应明确它是独立扩展，不能作为当前主线实验已使用多步的证据。论文方法段默认 k=1，并将 k>1 标为待另行验证，与此边界一致。
+
 2026-10-09，前瞻分差阈值超参数完成（`721b0cd`）：`MODEL.STAGE2_ONLINE.margin_threshold`默认1.0、-1恢复严格证书模式，`bounded_skip=False`完整前瞻。经验跳过与数学证书分开记录；28项测评机测试通过。全量1839路线离线分析：τ=1保留431/431次改选，预计查询9710（相对严格剪枝16757再减42.05%）；τ=.75漏4次、τ=.5漏36次。最大改选分差0.789534，11次留一场景均选1；这是探索性开发集分析，不是独立测试。测评机τ=1的128路线实际验证退出0，1105次动作和全部逐路线指标与完整前瞻一致，查询710（原严格组1224），导航405.43秒；不同日志版本的单次验证不能当作正式成对测速。未重跑τ=1的全量1839路线；GPU已释放，未使用训练机GPU。详见`docs/margin-threshold-analysis-20261009.md`。
+
+2026-10-09，中央底图可见程度折中：imagegen以开放版和全遮挡版为参考，生成左侧露沙发一角、右侧露餐椅及桌沿的部分遮挡版本。仅替换首页home-190，保留最新机器人、语言气泡和alpha羽化，其他对象及页面不变；已备份，drawio导出退出0并目视核查。预览 `paper/figures/review-20261009/center-partial-view-v1-detail.png`。
 
 2026-10-09，R2R全量未见场景逐步分数归档已正常完成：13:09:58（北京时间）监督completed、导航/审计退出0，用时7206.02秒。1839路线/11场景、16184次决策、174860个移动候选分数；trace约24.53MB，现场重算行数和SHA与审计一致。SR63.5672%、SPL54.2770%、nDTW66.5118%；14345次普通MOVE中8417次（58.6755%）可由有界证书跳过，431次实际动作改选。本轮关闭剪枝，记录供离线计数，不能当作开启剪枝全量测速。测评机GPU已空闲，无任务残留；未重启任务。产物`data/logs/full_score_archive_20261009/run_v1/full/`，详见`docs/full-unseen-score-archive-20261009.md`。下方“运行中”为历史启动记录。
 
 2026-10-09，按用户要求重新启动R2R未见场景全量1839路线，测评机3090/4环境，9200原生full评分头，关闭剪枝以完整保存前瞻修正。新增v2逐步记录包含场景/节点身份、基础/修正/最终分数、执行动作、TopK/未来有效性与剪枝证书；27项测试及16路线125决策审计通过，与旧未剪枝短测动作/指标一致。11:09:46（北京时间）进入全量，源码`8ff2b62`，监督PID36539，产物`data/logs/full_score_archive_20261009/run_v1/full/`；启动核查GPU100%且分数文件增长。完成后自动审计1839路线、逐步连续性与分数/动作，并写`score_trace_audit.json`供离线计数；当前仍运行，未有全量最终成绩。未使用训练机GPU。详见`docs/full-unseen-score-archive-20261009.md`。
+
+2026-10-09，中央前瞻示意改为遮挡路口：imagegen生成两侧房间不可见的走廊底图与独立透明机器人素材，首页替换home-190并复用原羽化；移除旧原生机器人及A/B气泡，新增独立机器人图片、阴影和原生可编辑语言云泡“What lies beyond each path?”。底图/机器人/气泡可分别调整，其他原对象及页面不变，已备份；drawio导出退出0并检查局部，预览 `paper/figures/review-20261009/center-occluded-layered-v1-detail.png`，提示词同目录 `center-occluded-and-robot.prompt.txt`。
+
+2026-10-09，用户不满意中央路线标注，改为机器人面临两选择试版：移除center-routes-v1的10个对象，新增原生矢量小机器人背部、左右思考气泡及A/B标记，两个方向均未标为已选。其他原对象、底图羽化和其他页面不变，已备份；drawio导出退出0并目视核查，预览 `paper/figures/review-20261009/center-robot-v1-detail.png`，待审阅。
+
+2026-10-09，中央路线标注试版：按用户采纳的方案，在最新首页底图上新增10个原生可编辑对象：红色当前位置、A蓝色实线路线、B淡蓝虚线路线、候选节点和A选中小勾。尊重用户已调整的底图y=340.96，原对象和其他页面均不变；主文件已备份。drawio导出退出0，局部预览已目视检查，见 `paper/figures/review-20261009/center-routes-v1-detail.png`，待用户审阅。
+
+2026-10-09，按用户要求用imagegen基于原底图重新生成抬高视线版本并替换首页home-190；保留客厅/厨房/餐厅布局，完整复用上一版alpha遮罩，标题和侧边羽化参数不变。主文件已备份，仅中央图片改变，drawio导出退出0并检查局部；当前预览 `paper/figures/review-20261009/center-topology-v4-detail.png`，整图 `pilot-homepage-center-v4.png`。
+
+2026-10-09，中央底图两侧羽化精修：按用户圈选收窄左右透明渐变，只在靠近外椭圆边缘渐隐；上方标题渐变和底部保留，顶部24%像素逐像素一致，RGB内容不变。仅修改首页home-190，其他对象及页面不变，源文件已备份；drawio导出退出0并检查局部，见 `paper/figures/review-20261009/center-topology-v3-detail.png`。
+
+2026-10-09，主图中央底图预览：按首页拓扑红色节点朝A/B方向生成客厅—厨房旁通道—餐厅图，已替换 `paper/figures/pilot-main-v10-editable.drawio` 首页的 `home-190`。顶部对齐裁去约200像素下方地面，复用原椭圆透明羽化及alpha模糊；旧小预览框和三圆点保留对象、设opacity=0。仅5个对象样式改变，其他页面不变，原文件已备份。drawio以 `--page-index 2` 导出退出0并目视核查，预览 `paper/figures/review-20261009/pilot-homepage-center-v2.png`；待用户审阅。
 
 2026-10-09，整段二阶段前瞻剪枝完成（运行源码`e7c2ede`）：Stage2Online在后继提议/世界模型前复用上下界证书，只评分保留环境行，默认开启`bounded_skip`；训练采集、q0持久状态和旧联合/GRPO路径不变，不做逐层停止。测评机专用容器/环境27项测试通过；128路线/11场景两轮开关对照各1105次动作及全部指标一致，q1查询2749→1224（−55.47%）、二阶段时间−39.31%、平均导航519.06→445.78秒（−14.12%，1.164倍速度）。独立审计`eb93e78`重算561×2证书全部通过，动作无变化；保留行残差有最大0.00301的批次浮点差，不能称分数逐位一致。10:33:50（北京时间）全部完成、退出0，GPU释放。见 `docs/bounded-skip-benchmark-20261009.md`；结果属于性能子集，非全量导航结论。全部GPU测试在RTX3090测评机，未占用训练机GPU。下方同日“未实现”为执行前的分析记录。
 
@@ -22,7 +42,7 @@
 
 2026-10-08双机RxR相机诊断完成：6场景12轨迹48查询、四相机条件、3噪声，三个分片退出0。现75k世界模型从90°/1.25m切至63°/0.88m后CLS余弦0.8405→0.7794、patch0.7324→0.6582，六场景均下降；预测图像输入的后继提议可达率93.85%→72.32%。仅改视场影响较大。建议适配微调世界模型及后继预测器，本轮未训练；这是匹配轨迹预测/几何诊断，不是导航SR。见`docs/rxr-camera-quality-experiment-20261008.md`。
 
-2026-10-08 RxR世界模型适配核查：当前RxR为224²/63°/0.88m，现用75k世界模型及二阶段DINO-CWP源于90°/1.25m数据。direct渲染继承RxR传感器，cube投影仍硬编码90°，迁移前需修正；建议先质量对照再从现权重适配微调，不能把已有无世界模型150点测评当作增强方案验证。原采集含多个RxR划分，正式泛化结果前还需审计模型训练列表。详见`docs/rxr-world-model-adaptation-analysis-20261008.md`。本次仅分析，未训练。
+2026-10-08 RxR世界模型适配核查：当前RxR为224²/63°/0.88m，现用75k世界模型及二阶段DINO-CWP源于90°/1.25m数据。direct渲染继承RxR传感器，cube投影仍硬编码90°，迁移前需修正；建议先质量对照再从现权重适配微调，不能把已有无世界模型150点测评当作增强方案验证。详见`docs/rxr-world-model-adaptation-analysis-20261008.md`。本次仅分析，未训练。
 
 2026-10-08称呼统一：当前测评机为 RTX 3090 24GB，笔记本与训练机均使用 `ssh eval-3090`（简写 `ssh 3090`）；笔记本自动经server跳板、训练机直连专线。项目约定、运行文档及宿主机硬件检查同步更新；历史旧平台性能记录和原始日志路径保留其历史含义。
 
@@ -195,6 +215,38 @@ README 原始说明要求创建 `etpr1` conda 环境，核心环境为 Python 3.
 - `habitat_extensions/habitat_simulator.py`: 对 Habitat-Sim simulator 的项目定制封装。
 
 ## Data, Configs, And Artifacts
+
+2026-10-08，用户不采用ImageGen图形化探索，继续当前原生样式。将上下两行候选/指令输入卡高度46.36→59.99，与右侧融合框齐顶齐底；候选卡宽38、指令卡宽69，行总宽204保持，标签和特征条同步放大。主draw.io更新并备份，导出退出0，局部检查 `paper/figures/review-20261008/taller-inputs-detail.png`。
+
+2026-10-08，按用户要求仅优化第四部分视觉层级：去掉两行输入的重复边框、减淡小卡片/模块底色与描边；计算模块使用统一常规字重，策略组名保留粗体；统一评分卡标题/分隔线，基础分数内容居中，图例更轻更紧凑。流程、主要锚点、节点增强样式、十段评分条30单位/分均保留；61个对象调整、504个首页对象及其他两页保持。draw.io导出退出0，局部检查通过；主文件已更新，前后对照 `paper/figures/review-20261008/harmony-before-panel4.png` 与 `harmony-after-panel4.png`，备份审计 `panel4-hierarchy-polish-audit.json`。
+
+2026-10-08，按用户要求加长Base Scores：卡片128→140宽，向左扩展保持右端与加号间距；三组评分条统一比例由26→30单位/分，基础A/B/C长度36/45/24，保证跨卡片数值可比。同步重建圆角/斜线与净分数边界，draw.io导出退出0并核查局部无重叠。预览 `paper/figures/review-20261008/longer-base-scores-detail.png`。
+
+2026-10-08，按用户要求，第四部分拓扑连线直接复用前三部分黑色实/虚线，候选节点完整复用第二部分22px节点＋32px白色衬底/蓝色增强环。基础评分卡114→128宽并保留右边界；最终评分和Next Move合并为208宽单一外框，顶部 `Refined Scores ŝ` 覆盖两列，下方以细线区分分数与动作。原生元素可编辑，537个其他首页对象及其他页不变。draw.io导出退出0并已目视核对，预览 `paper/figures/review-20261008/merged-refined-output-panel4.png`。
+
+2026-10-08，第四部分节点样式统一：三张评分卡A/B/C直径22、17号字，候选配色直接取首页home-22（#7EBEFF/#1452FF），拓扑当前/已访问节点颜色和描边取home-21/home-18；Next Move候选同步蓝色。评分条厚度12→16、保持26单位/分并重建圆角/45°透明斜线；加宽后条形起点适当右移。基础策略输出箭头源绑定虚线外框右中点并水平接入评分卡。524个其他首页对象及其他两页不变，draw.io导出退出0并目视通过。预览 `paper/figures/review-20261008/unified-node-style-panel4.png`。
+
+2026-10-08，加号附近留白精修：按用户反馈将左右间距10增至18，加号直径36减至28，中心x581.8及竖直输入保持不变；只同步移动两侧评分卡和Next Move。draw.io导出退出0，局部预览 `paper/figures/review-20261008/plus-spacing-detail.png` 已检查。
+
+2026-10-08，主图第四部分后续精修：拓扑当前/已访问节点直径20、候选25/外环32；前瞻评分卡y548高160.99与上虚线框齐顶齐底，基础/最终卡y748高153与下框对齐，行距相应调整。加号两侧间距10，保留x581.8竖直前瞻输入；原生恢复旧Next Move胶囊并等比缩至90宽，置最终卡右侧；Base/Added/Removed图例改为(662,658)竖排16字号，避开中央圆环。十段评分条继续核验26单位/分。draw.io 2倍导出退出0，已检查无重叠。预览 `paper/figures/review-20261008/next-move-legend-panel4.png`，审计 `next-move-and-legend-audit.json`。
+
+2026-10-08，按用户要求重排下排：去除地图与策略内部细节，使用保留原连接关系的七节点拓扑图和单一 `Topological Policy` 框，以 `Base Policy` 虚线原生组包住，与上方命名对应。固定用户最终分数卡x=642，前瞻分数卡底边中心x=581.8竖直接入加号；加号左右等距42.2，基础卡x=407.6，水平流程y=825.005。十段分数条核验同为26单位/分，蓝1.5底条叠加0.3斜线表示净1.2。其他页面未改。draw.io 2倍导出退出0，预览 `paper/figures/review-20261008/pilot-homepage-simple-base-policy.png`，审计 `simple-base-policy-audit.json`。
+
+2026-10-08，用户采纳ImageGen分数卡样式并要求透明减分纹理，已原生重绘三张114×127.99分数卡：内置浅色标题带、统一行距和圆角；基础蓝、增加紫，减分为fillColor=none的紫色斜线及轮廓。最终B保留完整蓝1.5底条，尾部0.3叠加透明紫色斜线，净1.2边界清楚；A蓝1.2＋紫0.6，C蓝0.8，均26单位/分。自定义矢量stencil含圆角与裁切后的斜线，可编辑且无位图替代；新增简短图例及基础/最终卡片原生分组。523个其他首页对象及其他页不变。draw.io 2倍导出退出0，整块及局部目视检查通过。预览 `paper/figures/review-20261008/pilot-homepage-rounded-score-cards.png`；备份/审计 `rounded-score-cards-audit.json`。
+
+2026-10-08，前瞻分数卡加入框内两行标题 `Lookahead / Scores Δs`，与下方 `Base Scores s` 在命名上对应。浅紫标题底、细分隔线、共用零轴及紧凑三行分数改善层次；卡片位置/尺寸、分数数值、26单位/分比例和其他模块保持。原生可编辑，draw.io导出退出0，已检查局部及完整第四部分。预览 `paper/figures/review-20261008/lookahead-score-title-panel4.png`。
+
+2026-10-08，按用户最新分数框锚点(524.8,569)调整左侧前瞻模块：新增紫色虚线外框与标题 `Lookahead Policy`（后续下方对应 `Base Policy`，本次未改下方），包住两行候选/指令输入、融合与候选比较。内部列宽204/128/94.8、列间18，原生总组含标题选框，输出分数及其用户分组完全不变；490个其他首页对象与其他页保持。最终draw.io导出退出0，组边界修正前后像素一致，下方内容与用户输入像素一致。预览 `paper/figures/review-20261008/pilot-homepage-lookahead-policy-final.png`，审计 `lookahead-policy-group-audit.json`。
+
+2026-10-08，按最新用户尺寸统一第四部分上行布局：两融合框128×59.99分别对齐两输入行，比较框和修正分数框共用y=569—696.99总高度。基础分数三条统一蓝色#AAC9E0，正负修正统一紫色#AB74D4；Refined A为蓝1.2＋紫0.6拼接，B为蓝色净1.2＋紫色空心虚线扣除0.3并以左箭头表示减法，C蓝0.8不变，所有条形沿用26单位/分。用户期间删除的修正标题和控制器等最新修改保留，520个其他首页对象及其他页不变。draw.io导出退出0，查看局部及评分放大图通过。预览与审计：`paper/figures/review-20261008/pilot-homepage-score-components.png`、`score-components-audit.json`。
+
+2026-10-08，按用户最新简化布局命名并补全第四部分输入：两行框内仅保留 `Instruction-Guided Fusion`，公共框内仅保留 `Candidate Comparison`；A/A₁/A₂和B/B₁/B₂右侧各新增一张原生分组Instruction卡，表示同一条指令在两候选上的读取。输入行、融合框、比较框及残差卡已绑定连线，541个其他首页对象及其他两页保持不变。draw.io导出退出0，局部检查文字/箭头正常；预览 `paper/figures/review-20261008/pilot-homepage-instruction-fusion.png`，审计 `instruction-fusion-audit.json`。
+
+2026-10-08，按用户最新手工删改后的主图修复A/A₁/A₂输入组：旧外层组(27,589,178×54)套住偏移(-2,-19)的132×59.99内组，造成控制框错位。现已移除冗余内组、将整行边界贴合实际内容(25,570,132×59.99)，增加三张卡片的独立子组，原箭头绑定整行。其他514个首页对象及另外两页不变；draw.io前后导出像素完全一致，确认只改变编辑结构。记录 `paper/figures/review-20261008/input-group-fix-audit.json`。
+
+2026-10-08，用户最终选回带Lookahead Residual Scorer、基础评分、残差回加和Low-Level Controller的详细版，要求以此继续调整。已从主文件第三页备份恢复177个原生可编辑对象至“首页图”，替换119个高层概览对象；其余396个首页对象逐对象不变，其他两页字节不变。主文件仍为 `paper/figures/pilot-main-v10-editable.drawio`；整图预览 `paper/figures/review-20261008/pilot-homepage-restored-detailed.png`，draw.io导出退出0，已目视核查中央圆环无内容遮挡。备份和审计见同目录 `restore-detailed-panel4-audit.json`。下方“仅分析/未修改”为此次恢复前的记录。
+
+2026-10-08，主图第四部分分析复核：用户截图对应 `paper/figures/pilot-main-v10-editable.drawio` 的“首页图”；XML实际含3页（根属性pages仍为2），另有详细版备份。已有中等细节图片稿 `paper/figures/review-20260929/imagegen-midlevel/midlevel-design-v2.png`，未合入主图。核对 `residual_head.py`、`stage2_online.py` 与 `paper/drafts/PILOT_方法初稿_v1_20260914.md`：建议主图突出指令条件的候选内融合、跨候选比较、有界分数回加及原候选选择；默认评分读取终端未来，不能把多步特征全部聚合画成当前已实现路径。当前仅分析，未修改主图。
 
 2026-09-29，用户确认高层改图方向后，首页第四部分已重画为“增强拓扑＋候选未来证据→单一Lookahead-Guided Refinement模块→高亮候选A的拓扑”。只保留一个主要计算模块及残差公式；第三页详细版备份保持不变。预览 `paper/figures/pilot-homepage-high-level-panel4-20260929.png`，说明见本地 `paper/notes/pilot-panel4-abstraction-redesign-20260929.md`。
 
