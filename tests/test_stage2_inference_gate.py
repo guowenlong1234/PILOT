@@ -60,11 +60,13 @@ def test_threshold_is_configurable_and_not_a_mathematical_certificate():
             inference_query_plans(*args,bound=1,margin_threshold=value)
 
 
-def test_pruned_predictions_never_read_q0_or_call_world_model():
+@pytest.mark.parametrize('depth', [1, 2, 3])
+def test_pruned_predictions_never_read_q0_or_call_world_model(depth):
     class ForbiddenCache:
         def get(self,*args): raise AssertionError('pruned row read q0')
     obj=object.__new__(Stage2Collector)
     obj.prediction_only=True; obj.counts=Counter()
+    obj.cfg=SimpleNamespace(lookahead_horizon_steps=depth)
     obj.trainer=SimpleNamespace(device='cpu',max_len=10,
         envs=SimpleNamespace(current_episodes=lambda:[SimpleNamespace(episode_id='1')]),
         gmaps=[SimpleNamespace(stage2_q0=ForbiddenCache())])
