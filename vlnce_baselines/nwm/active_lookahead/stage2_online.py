@@ -8,6 +8,7 @@ from .stage2_data import collate_stage2, load, sha256, atomic_json
 from .stage2_training import MODEL_CONFIG
 from .residual_head import InterleavedCrossModalTopKFutureLogitResidualHead
 from .base_freeze import capture_base_tensor_manifest
+from .inference_gate import deployment_residual_bound, inference_query_plans
 
 BASE_SHA = '4c729c84bf4338452da4d459fc82734dcbb5f72ac6a2b574ee8f20e1080bc2fe'
 TRANSFER_9200_SHA = '87bf7ad691a93abfe2d5030c2c314ef4e630c41d3abbe61fea3b38872686055e'
@@ -120,13 +121,24 @@ class Stage2Online(Stage2Collector):
         self.episode_diagnostics={}
         self.head_stream=torch.cuda.Stream(device=trainer.device)
         self.started=time.perf_counter(); self.online_seconds=0.
+        self.step_timings=[]
         Path(cfg.output).mkdir(parents=True,exist_ok=True)
         self.trace_file=(Path(cfg.output)/'decisions.jsonl').open('x') if cfg.trace else None
 
     @torch.no_grad()
     def score_step(self,nav_inputs,nav_outs,text,text_mask,no_vp_left,step):
+        profile=bool(getattr(self.cfg,'profile',False))
+        if profile: torch.cuda.synchronize(self.trainer.device)
         start=time.perf_counter()
-        rows=self.predict_step(nav_inputs,nav_outs,text,text_mask,no_vp_left,step)
+        bound=deployment_residual_bound(self.cfg.gain,self.head.delta_max)
+        plans=inference_query_plans(nav_inputs['gmap_vp_ids'],nav_outs['global_logits'],
+            no_vp_left,step,self.trainer.max_len,bound=bound)
+        enabled=bool(getattr(self.cfg,'bounded_skip',True))
+        reasons=[p['skip_reason'] if enabled else None for p in plans]
+        before_q1=self.counts['q1_requested']
+        rows=self.predict_step(nav_inputs,nav_outs,text,text_mask,no_vp_left,step,skip_reasons=reasons)
+        if profile: torch.cuda.synchronize(self.trainer.device)
+        predicted=time.perf_counter()
         for i,row in enumerate(rows):
             row['text_tokens']=text[i][text_mask[i].bool()].detach().cpu().half()
         cpu_rng=torch.get_rng_state(); cuda_rng=torch.cuda.get_rng_state(self.trainer.device)
@@ -134,10 +146,18 @@ class Stage2Online(Stage2Collector):
                  torch.is_autocast_enabled(),torch.get_autocast_gpu_dtype())
         current=torch.cuda.current_stream(self.trainer.device)
         self.head_stream.wait_stream(current)
-        with torch.cuda.stream(self.head_stream):
-            delta=score_rows(self.head,rows,self.trainer.device,float(self.cfg.gain))
-        current.wait_stream(self.head_stream)
-        delta.record_stream(current)
+        active=[i for i,reason in enumerate(reasons) if reason is None]
+        delta=nav_outs['global_logits'].new_zeros((len(rows),5),dtype=torch.float32)
+        if active:
+            with torch.cuda.stream(self.head_stream):
+                selected=score_rows(self.head,[rows[i] for i in active],self.trainer.device,float(self.cfg.gain))
+            current.wait_stream(self.head_stream)
+            selected.record_stream(current)
+            delta[active]=selected
+            self.counts['head_calls']+=1
+            self.counts['head_rows']+=len(active)
+        if profile: torch.cuda.synchronize(self.trainer.device)
+        scored=time.perf_counter()
         if not torch.equal(cpu_rng,torch.get_rng_state()) or not torch.equal(cuda_rng,torch.cuda.get_rng_state(self.trainer.device)):
             raise RuntimeError('E24 head consumed global RNG')
         if backend!=(torch.backends.cuda.matmul.allow_tf32,torch.backends.cudnn.allow_tf32,
@@ -154,6 +174,11 @@ class Stage2Online(Stage2Collector):
             base=int(scores.argmax()); ghosts=row['global_indices']
             chosen=base if row['base_stop'] else ghosts[int((scores[ghosts]+dense[i,ghosts]).argmax())]
             self.counts['rows']+=1; self.counts['action_flips']+=int(chosen!=base)
+            self.counts['eligible_move_rows']+=int(not row['base_stop'])
+            if plans[i]['skip_reason'] is not None:
+                self.counts['certified_'+plans[i]['skip_reason']]+=1
+            if reasons[i] is not None:
+                self.counts['skipped_'+reasons[i]]+=1
             self.counts['future_valid_slots']+=int(valid.sum())
             episode=str(episodes[i].episode_id)
             diagnostic=self.episode_diagnostics.setdefault(episode,dict(scene=str(episodes[i].scene_id),
@@ -166,10 +191,17 @@ class Stage2Online(Stage2Collector):
             if self.trace_file:
                 self.trace_file.write(json.dumps(dict(episode=episode,
                     step=step,base_action=base,action=chosen,forced_stop=row['forced_stop'],
+                    ghost_indices=ghosts,skip_reason=reasons[i],certificate=plans[i],
+                    future_valid_slots=int(valid.sum()),
                     logits=scores[:len(nav_inputs['gmap_vp_ids'][i])].cpu().tolist(),
                     delta=dense[i,:len(nav_inputs['gmap_vp_ids'][i])].cpu().tolist()))+'\n')
                 self.trace_file.flush()
-        self.online_seconds+=time.perf_counter()-start
+        elapsed=time.perf_counter()-start
+        self.online_seconds+=elapsed
+        if profile:
+            self.step_timings.append(dict(batch=len(rows),seconds=elapsed,
+                prediction_seconds=predicted-start,head_seconds=scored-predicted,
+                q1_requested=self.counts['q1_requested']-before_q1,head_rows=len(active)))
         return dense
 
     def complete_episode(self,episode,metrics):
@@ -186,5 +218,7 @@ class Stage2Online(Stage2Collector):
         if self.trace_file: self.trace_file.close()
         atomic_json(Path(self.cfg.output)/'online_summary.json',dict(counts=dict(self.counts),
             elapsed_seconds=time.perf_counter()-self.started,online_seconds=self.online_seconds,
-            gain=self.cfg.gain,residual_bound=1.,teacher_calls=0,**self.deployment,
+            gain=self.cfg.gain,residual_bound=1.,teacher_calls=0,
+            bounded_skip=bool(getattr(self.cfg,'bounded_skip',True)),
+            profile=bool(getattr(self.cfg,'profile',False)),step_timings=self.step_timings,**self.deployment,
             **self.head_contract))

@@ -82,9 +82,11 @@ class Stage2Collector:
             graph.stage2_q0=cache
 
     @torch.no_grad()
-    def predict_step(self,nav_inputs,nav_outs,text,text_mask,no_vp_left,step):
+    def predict_step(self,nav_inputs,nav_outs,text,text_mask,no_vp_left,step,*,skip_reasons=None):
         tr=self.trainer; rt=self.runtime; episodes=tr.envs.current_episodes()
         logits=nav_outs['global_logits'].detach(); payloads=[]; requests=[]; destinations=[]; noises=[]
+        if skip_reasons is not None and (self.writer is not None or len(skip_reasons)!=len(episodes)):
+            raise ValueError('query pruning is online-only and must cover every environment')
         prepared=[]
         for i,(ids,graph,ep) in enumerate(zip(nav_inputs['gmap_vp_ids'],tr.gmaps,episodes)):
             ghosts=list(executable_ghost_indices(ids)); ranked=list(stable_topk_ghost_indices(ids,logits[i].cpu(),k=5))
@@ -101,6 +103,9 @@ class Stage2Collector:
                 q0_metadata=[None]*k,q1_metadata=[None]*k,invalid_reason=['no_q0']*k,
                 base_action=int(logits[i].argmax()))
             payloads.append(row)
+            if skip_reasons is not None and skip_reasons[i] is not None:
+                row['invalid_reason']=[skip_reasons[i]]*k
+                continue
             for slot,j in enumerate(ranked):
                 self.counts['topk_slots']+=1
                 record=graph.stage2_q0.get(ids[j])
@@ -118,6 +123,7 @@ class Stage2Collector:
                     row['invalid_reason'][slot]='base_stop';continue
                 prepared.append((i,slot,ids[j],record,str(ep.episode_id)))
         if prepared:
+            self.counts['cwp_requested']+=len(prepared)
             # CWP consumes normalized patch features, matching its existing predictor path.
             patches=torch.stack([p[3]['patch'] for p in prepared]).flatten(2).transpose(1,2).to(tr.device).float()
             with torch.autocast(device_type='cuda',enabled=False):
