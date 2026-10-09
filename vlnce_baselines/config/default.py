@@ -279,6 +279,8 @@ _C.MODEL.STAGE2_ONLINE.trace = False
 _C.MODEL.STAGE2_ONLINE.bounded_skip = True
 _C.MODEL.STAGE2_ONLINE.margin_threshold = 1.0  # -1: certificate-only; >=0: logit gap
 _C.MODEL.STAGE2_ONLINE.profile = False
+_C.MODEL.STAGE2_ONLINE.lookahead_horizon_steps = 1
+_C.MODEL.STAGE2_ONLINE.allow_rollout_depth_transfer = False
 
 _C.MODEL.STAGE2_COLLECT = CN()
 _C.MODEL.STAGE2_COLLECT.enabled = False
@@ -286,6 +288,7 @@ _C.MODEL.STAGE2_COLLECT.output = ""
 _C.MODEL.STAGE2_COLLECT.provenance = ""
 _C.MODEL.STAGE2_COLLECT.seed = 20260916
 _C.MODEL.STAGE2_COLLECT.trace = False
+_C.MODEL.STAGE2_COLLECT.lookahead_horizon_steps = 1
 
 _C.MODEL.ACTIVE_LOOKAHEAD = CN()
 _C.MODEL.ACTIVE_LOOKAHEAD.enabled = False

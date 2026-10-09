@@ -6,6 +6,7 @@ import torch
 from .stage2_collect import Stage2Collector
 from .stage2_data import collate_stage2, load, sha256, atomic_json
 from .stage2_training import MODEL_CONFIG
+from .stage2_rollout_contract import deployment_rollout_contract
 from .residual_head import InterleavedCrossModalTopKFutureLogitResidualHead
 from .base_freeze import capture_base_tensor_manifest
 from .inference_gate import deployment_residual_bound, inference_query_plans
@@ -74,7 +75,10 @@ def validate_head_checkpoint(checkpoint, cfg, deployment):
         for path,digest in assets.items():
             if sha256(path)!=digest:
                 raise ValueError('online prediction asset differs: '+path)
-    return dict(head_sha256=actual_head_sha,future_mode=future_mode)
+    rollout = deployment_rollout_contract(dataset,
+        getattr(cfg, 'lookahead_horizon_steps', 1),
+        getattr(cfg, 'allow_rollout_depth_transfer', False))
+    return dict(head_sha256=actual_head_sha,future_mode=future_mode,**rollout)
 
 
 def validate_online_gain(gain, transfer_mode):
@@ -137,6 +141,7 @@ class Stage2Online(Stage2Collector):
         enabled=bool(getattr(self.cfg,'bounded_skip',True))
         reasons=[p['skip_reason'] if enabled else None for p in plans]
         before_q1=self.counts['q1_requested']
+        before_deep=self.counts.get('deep_queries_requested',0)
         rows=self.predict_step(nav_inputs,nav_outs,text,text_mask,no_vp_left,step,skip_reasons=reasons)
         if profile: torch.cuda.synchronize(self.trainer.device)
         predicted=time.perf_counter()
@@ -201,6 +206,12 @@ class Stage2Online(Stage2Collector):
                     gate_plan=plans[i],certificate=dict(plans[i],skip_reason=plans[i]['certified_skip_reason']),
                     topk_global_indices=[ghosts[int(j)] for j in row['topk_base_indices']],
                     future_valid_mask=valid.tolist(),invalid_reason=row['invalid_reason'],
+                    rollout_requested_depth=row.get('rollout_requested_depth',1),
+                    realized_depths=row.get('realized_depths',valid.long()).tolist(),
+                    fallback_mask=row.get('fallback_mask',torch.zeros_like(valid)).tolist(),
+                    full_horizon_mask=row.get('full_horizon_mask',valid).tolist(),
+                    rollout_failure_reason=row.get('rollout_failure_reason',row['invalid_reason']),
+                    endpoint_metadata=row.get('endpoint_metadata',row.get('q1_metadata',[])),
                     effective_residual_bound=bound,
                     future_valid_slots=int(valid.sum()),
                     refined_logits=(scores+dense[i])[:len(nav_inputs['gmap_vp_ids'][i])].cpu().tolist(),
@@ -212,7 +223,10 @@ class Stage2Online(Stage2Collector):
         if profile:
             self.step_timings.append(dict(batch=len(rows),seconds=elapsed,
                 prediction_seconds=predicted-start,head_seconds=scored-predicted,
-                q1_requested=self.counts['q1_requested']-before_q1,head_rows=len(active)))
+                q1_requested=self.counts['q1_requested']-before_q1,
+                deep_queries_requested=self.counts.get('deep_queries_requested',0)-before_deep,
+                world_queries_requested=(self.counts['q1_requested']-before_q1
+                    +self.counts.get('deep_queries_requested',0)-before_deep),head_rows=len(active)))
         return dense
 
     def complete_episode(self,episode,metrics):

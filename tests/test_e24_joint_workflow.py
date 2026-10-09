@@ -104,6 +104,7 @@ def test_active_lookahead_eval_queries_real_candidate_positions():
                 mode == 'train'
                 or self.config.VIDEO_OPTION
                 or self._active_lookahead_enabled()
+                or self._stage2_prediction_enabled()
             ):"""
     assert condition in source
 

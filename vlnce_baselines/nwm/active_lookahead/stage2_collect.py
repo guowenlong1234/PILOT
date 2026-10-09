@@ -16,6 +16,8 @@ from .candidate_q0 import _representative_candidate
 from .dino_cwp_future import load_dino_cwp_predictor, decode_dino_cwp_top1, waypoint_to_world_position
 from .topk_query import executable_ghost_indices, stable_topk_ghost_indices
 from .stage2_data import EpisodeWriter, atomic_json
+from .stage2_rollout import rollout_depth, initialize_rollout_rows, extend_rollout
+from .stage2_rollout_contract import rollout_contract
 from ..etp_adapter import RaeSourceContextSnapshot, RaeLatentTargetRequest
 
 
@@ -26,9 +28,12 @@ class Stage2Collector:
             raise ValueError('stage2 collection requires ghost concat and old E24 disabled')
         if trainer._ghost_concat_memory_mode()!='persistent_node_state':
             raise ValueError('stage2 requires persistent node state')
-        self.cfg=cfg;self.counts=Counter();self.runtime=None;self.runtime_before=None
+        self.cfg=cfg;rollout_depth(cfg);self.counts=Counter();self.runtime=None;self.runtime_before=None
         self.prediction_only=bool(prediction_only)
-        self.writer=None if prediction_only else EpisodeWriter(cfg.output,json.loads(Path(cfg.provenance).read_text()))
+        provenance=None if prediction_only else json.loads(Path(cfg.provenance).read_text())
+        if provenance is not None and rollout_contract(provenance)['lookahead_horizon_steps']!=rollout_depth(cfg):
+            raise ValueError('collection rollout depth differs from provenance')
+        self.writer=None if prediction_only else EpisodeWriter(cfg.output,provenance)
         # Construction can consume global random state; preserve it explicitly.
         rng=torch.get_rng_state(); cuda=torch.cuda.get_rng_state_all()
         try:
@@ -86,6 +91,7 @@ class Stage2Collector:
     def predict_step(self,nav_inputs,nav_outs,text,text_mask,no_vp_left,step,*,skip_reasons=None):
         tr=self.trainer; rt=self.runtime; episodes=tr.envs.current_episodes()
         logits=nav_outs['global_logits'].detach(); payloads=[]; requests=[]; destinations=[]; noises=[]
+        depth=rollout_depth(self.cfg); rollout_states=[]; request_states=[]
         if skip_reasons is not None and (not self.prediction_only or len(skip_reasons)!=len(episodes)):
             raise ValueError('query pruning is online-only and must cover every environment')
         prepared=[]
@@ -151,6 +157,9 @@ class Stage2Collector:
                 generator=torch.Generator(device=tr.device).manual_seed(seed)
                 noises.append(torch.randn(257,768,device=tr.device,generator=generator))
                 row['q1_metadata'][slot]=dict(position=q1.tolist(),yaw=yaw,horizon=horizon,noise_seed=seed)
+                if depth>1:
+                    request_states.append(dict(env=i,slot=slot,ghost=ghost,snapshot=snapshot,
+                        position=q1,yaw=yaw,horizon=horizon,identity=identity))
         # Explicit noise prevents consumption of runtime.generator (stage1).
         rng_before=rt.generator.get_state().clone()
         for start in range(0,len(requests),64):
@@ -164,8 +173,12 @@ class Stage2Collector:
                 payloads[i]['future_valid_mask'][slot]=True
                 payloads[i]['q1_conditions'][slot]=batch.condition_tensor[j].detach().cpu()
                 payloads[i]['invalid_reason'][slot]='valid'
+                if depth>1:
+                    rollout_states.append(dict(request_states[start+j],latent=prediction.pred_latent[j].detach()))
         if not torch.equal(rng_before,rt.generator.get_state()):raise RuntimeError('q1 consumed stage1 RNG')
         self.counts['q1_requested']+=len(requests)
+        initialize_rollout_rows(payloads,depth)
+        extend_rollout(self,payloads,rollout_states,depth)
         return payloads
 
     @torch.no_grad()

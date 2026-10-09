@@ -10,6 +10,7 @@ from collections import OrderedDict
 from pathlib import Path
 import torch
 from torch.utils.data import Dataset
+from .stage2_rollout_contract import rollout_contract, validate_rollout_row
 
 FORMAT = 'etpr1-stage2-predicted-episode-v1'
 SPACE = 'raw_cls+normalized_patch_fp16'
@@ -77,6 +78,7 @@ def _validate_compactable_row(row):
 
 
 def validate_row(row, text):
+    validate_rollout_row(row)
     n = len(row['ghost_ids']); k = len(row['topk_base_indices'])
     if len(set(row['ghost_ids'])) != n or not 0 <= k <= 5:
         raise ValueError('invalid ghost/topk identities')
@@ -106,6 +108,7 @@ class EpisodeWriter:
     def __init__(self, root, provenance):
         self.root = Path(root); self.root.mkdir(parents=True, exist_ok=True)
         self.provenance = provenance
+        self.rollout = rollout_contract(provenance)
         self.storage_schema = provenance.get(STORAGE_PROVENANCE_KEY, FULL_STORAGE)
         if self.storage_schema not in (FULL_STORAGE, COMPACT_STORAGE):
             raise ValueError('unsupported episode storage schema')
@@ -118,6 +121,7 @@ class EpisodeWriter:
     def append(self, episode, scene, text, row):
         text = text.detach().cpu().half().contiguous()
         validate_row(row, text)
+        validate_rollout_row(row, self.rollout["lookahead_horizon_steps"])
         if self.storage_schema == COMPACT_STORAGE:
             _validate_compactable_row(row)
         item = self.pending.setdefault(episode, dict(format=FORMAT, feature_space=SPACE,
@@ -148,6 +152,7 @@ class EpisodeWriter:
 def validate_dataset(root, expected_ids=None):
     root = Path(root); entries = []; ids = set(); failures = []
     provenance = json.loads((root/'provenance.json').read_text())
+    expected_rollout = rollout_contract(provenance)
     expected_storage = provenance.get(STORAGE_PROVENANCE_KEY, FULL_STORAGE)
     if expected_storage not in (FULL_STORAGE, COMPACT_STORAGE):
         raise ValueError('unsupported episode storage schema')
@@ -165,6 +170,7 @@ def validate_dataset(root, expected_ids=None):
         if len(obj['rows']) != r['rows']: raise ValueError('row count mismatch')
         for step, row in enumerate(obj['rows']):
             validate_row(row, obj['text_tokens'])
+            validate_rollout_row(row, expected_rollout['lookahead_horizon_steps'])
             if row['step'] != step: raise ValueError('step order mismatch')
         measured=dict(future_slots=sum(len(x['future_valid_mask']) for x in obj['rows']),
                       future_valid=sum(int(x['future_valid_mask'].sum()) for x in obj['rows']),
@@ -197,6 +203,7 @@ class Stage2Dataset(Dataset):
                 raise ValueError('dataset provenance changed')
             provenance=json.loads((source/'provenance.json').read_text())
             identity={k:provenance.get(k) for k in ('stage1_sha256','assets','split','feature_space','context_contract','behavior')}
+            identity.update(rollout_contract(provenance))
             if contract is not None and contract!=identity:raise ValueError('incompatible dataset roots')
             contract=identity
             for r in manifest['entries']:

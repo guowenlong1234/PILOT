@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from .stage2_rollout_contract import rollout_contract
 from .stage2_data import FORMAT, SPACE, atomic_json, collate_stage2, load, sha256
 from .offline_objective import OfflineDecisionLossConfig, offline_decision_aware_loss
 
@@ -90,6 +91,7 @@ class EpisodeBlockSampler:
             if provenance['split'] != expected_split:
                 raise ValueError('wrong dataset split')
             contract = {k: provenance.get(k) for k in ('stage1_sha256', 'assets', 'split', 'feature_space', 'context_contract', 'behavior')}
+            contract.update(rollout_contract(provenance))
             if identity is not None and identity != contract:
                 raise ValueError('incompatible data roots')
             identity = contract

@@ -59,7 +59,11 @@ def test_native_9200_accepts_explicit_head_sha_and_reports_ablation(tmp_path):
     cfg=SimpleNamespace(head=str(head),head_sha256=sha256(head))
     metadata=validate_head_checkpoint(_native_checkpoint(asset,'none'),cfg,
         validate_deployment_base(TRANSFER_9200_SHA,'native_9200'))
-    assert metadata==dict(head_sha256=sha256(head),future_mode='none')
+    assert metadata['head_sha256']==sha256(head)
+    assert metadata['future_mode']=='none'
+    assert metadata['lookahead_horizon_steps']==1
+    assert metadata['head_training_lookahead_horizon_steps']==1
+    assert metadata['rollout_depth_transfer'] is False
 
 
 @pytest.mark.parametrize('mutation,error',[
@@ -85,3 +89,23 @@ def test_native_and_legacy_gain_contracts_are_distinct():
     with pytest.raises(ValueError):validate_online_gain(1.5,'native_9200')
     for gain in (0.,1.5):validate_online_gain(gain,'same')
     with pytest.raises(ValueError):validate_online_gain(1.,'same')
+
+
+def test_native_head_depth_mismatch_requires_explicit_transfer(tmp_path):
+    from vlnce_baselines.nwm.active_lookahead.stage2_data import sha256
+    from vlnce_baselines.nwm.active_lookahead.stage2_online import (
+        validate_deployment_base, validate_head_checkpoint, TRANSFER_9200_SHA,
+    )
+    head=tmp_path/'head.pt'; head.write_bytes(b'native head')
+    asset=tmp_path/'asset.pt'; asset.write_bytes(b'prediction asset')
+    cfg=SimpleNamespace(head=str(head),head_sha256=sha256(head),lookahead_horizon_steps=3,
+                        allow_rollout_depth_transfer=False)
+    deployment=validate_deployment_base(TRANSFER_9200_SHA,'native_9200')
+    with pytest.raises(ValueError,match='explicit allow_rollout_depth_transfer'):
+        validate_head_checkpoint(_native_checkpoint(asset),cfg,deployment)
+    cfg.allow_rollout_depth_transfer=True
+    metadata=validate_head_checkpoint(_native_checkpoint(asset),cfg,deployment)
+    assert metadata['rollout_depth_transfer'] is True
+    assert metadata['head_training_lookahead_horizon_steps']==1
+    assert metadata['lookahead_horizon_steps']==3
+    assert metadata['head_training_depth_matches_inference'] is False

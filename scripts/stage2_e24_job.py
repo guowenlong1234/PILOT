@@ -32,6 +32,8 @@ def main():
     p.add_argument('--bounded-skip',choices=['on','off'],default='on')
     p.add_argument('--margin-threshold',type=float,default=1.,help='logit gap; -1 keeps certificate-only pruning')
     p.add_argument('--profile',action='store_true')
+    p.add_argument('--lookahead-horizon-steps',type=int,choices=[1,2,3],default=1)
+    p.add_argument('--allow-rollout-depth-transfer',action='store_true')
     p.add_argument('--dry-run',action='store_true');a=p.parse_args()
     if not math.isfinite(a.margin_threshold) or (a.margin_threshold<0 and a.margin_threshold!=-1):
         p.error('margin threshold must be nonnegative or -1')
@@ -68,6 +70,12 @@ def main():
         commit=commit,split=a.split,part=a.part,parts=a.parts,episode_ids=ids,seed=20260916,
         feature_space='raw_cls+normalized_patch_fp16',context_contract='stage2_panorama_q0_snapshot_v1',
         behavior='stage1_argmax',environments=a.environments,compile=not a.no_compile)
+    if a.lookahead_horizon_steps != 1:
+        provenance.update(lookahead_horizon_steps=a.lookahead_horizon_steps,
+            rollout_aggregation='endpoint',rollout_failure_policy='deepest_valid')
+    if a.allow_rollout_depth_transfer:
+        if a.action != 'online':p.error('rollout depth transfer is only valid for online')
+        provenance['allow_rollout_depth_transfer']=True
     if a.compact_storage:
         provenance['storage_format']='valid_future_only_v1'
     if a.base_step!=6400:
@@ -110,6 +118,7 @@ def main():
         'MODEL.ACTIVE_LOOKAHEAD.dino_cwp_checkpoint_path':'pretrained/active_lookahead/dino_cwp_best.pt',
         'MODEL.ACTIVE_LOOKAHEAD.dino_cwp_checkpoint_sha256':'6a45291219907dd027203d224f3f8400631651a83bd01c45b1dea55d93ec0979',
         'MODEL.STAGE2_COLLECT.enabled':a.action=='collect', 'MODEL.STAGE2_COLLECT.output':str(root/'episodes'),
+        'MODEL.STAGE2_COLLECT.lookahead_horizon_steps':a.lookahead_horizon_steps,
         'MODEL.STAGE2_COLLECT.provenance':str(prov),'MODEL.STAGE2_COLLECT.trace':a.trace,
         'EVAL.SPLIT':a.split,'EVAL.EPISODE_ID':todo,'EVAL.EPISODE_COUNT':-1,
         'EVAL.CKPT_PATH_DIR':str(Path(a.checkpoint).resolve()),'EVAL.SAVE_RESULTS':True,
@@ -123,6 +132,8 @@ def main():
             'MODEL.STAGE2_ONLINE.gain':a.gain,'MODEL.STAGE2_ONLINE.trace':a.trace,
             'MODEL.STAGE2_ONLINE.bounded_skip':a.bounded_skip=='on','MODEL.STAGE2_ONLINE.profile':a.profile})
         opts['MODEL.STAGE2_ONLINE.margin_threshold']=a.margin_threshold
+        opts['MODEL.STAGE2_ONLINE.lookahead_horizon_steps']=a.lookahead_horizon_steps
+        opts['MODEL.STAGE2_ONLINE.allow_rollout_depth_transfer']=a.allow_rollout_depth_transfer
     cmd=['run.py','--exp_name','stage2_collect','--run-type','eval','--exp-config','run_r2r/iter_train_rae_dino_ghost_concat_persistent.yaml']
     for key,value in opts.items():cmd.extend([key,str(value)])
     command=runtime(a.machine,cmd,a.gpu)
