@@ -27,6 +27,7 @@ class Stage2Collector:
         if trainer._ghost_concat_memory_mode()!='persistent_node_state':
             raise ValueError('stage2 requires persistent node state')
         self.cfg=cfg;self.counts=Counter();self.runtime=None;self.runtime_before=None
+        self.prediction_only=bool(prediction_only)
         self.writer=None if prediction_only else EpisodeWriter(cfg.output,json.loads(Path(cfg.provenance).read_text()))
         # Construction can consume global random state; preserve it explicitly.
         rng=torch.get_rng_state(); cuda=torch.cuda.get_rng_state_all()
@@ -85,7 +86,7 @@ class Stage2Collector:
     def predict_step(self,nav_inputs,nav_outs,text,text_mask,no_vp_left,step,*,skip_reasons=None):
         tr=self.trainer; rt=self.runtime; episodes=tr.envs.current_episodes()
         logits=nav_outs['global_logits'].detach(); payloads=[]; requests=[]; destinations=[]; noises=[]
-        if skip_reasons is not None and (self.writer is not None or len(skip_reasons)!=len(episodes)):
+        if skip_reasons is not None and (not self.prediction_only or len(skip_reasons)!=len(episodes)):
             raise ValueError('query pruning is online-only and must cover every environment')
         prepared=[]
         for i,(ids,graph,ep) in enumerate(zip(nav_inputs['gmap_vp_ids'],tr.gmaps,episodes)):

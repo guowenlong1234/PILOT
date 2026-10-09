@@ -50,7 +50,7 @@ def test_pruned_predictions_never_read_q0_or_call_world_model():
     class ForbiddenCache:
         def get(self,*args): raise AssertionError('pruned row read q0')
     obj=object.__new__(Stage2Collector)
-    obj.writer=None; obj.counts=Counter()
+    obj.prediction_only=True; obj.counts=Counter()
     obj.trainer=SimpleNamespace(device='cpu',max_len=10,
         envs=SimpleNamespace(current_episodes=lambda:[SimpleNamespace(episode_id='1')]),
         gmaps=[SimpleNamespace(stage2_q0=ForbiddenCache())])
@@ -64,7 +64,7 @@ def test_pruned_predictions_never_read_q0_or_call_world_model():
     assert rows[0]['invalid_reason']==['bounded_invariant']*2
     # Omitting the online plan retains the original collection path.
     with pytest.raises(AssertionError,match='read q0'): obj.predict_step(*args)
-    obj.writer=object()
+    obj.prediction_only=False
     with pytest.raises(ValueError,match='online-only'):
         obj.predict_step(*args,skip_reasons=['bounded_invariant'])
 
