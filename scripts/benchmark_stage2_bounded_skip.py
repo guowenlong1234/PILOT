@@ -79,7 +79,7 @@ def main():
                  '--environments',str(a.environments),'--split','val_unseen','--base-step','9200',
                  '--deployment-mode','native_9200','--checkpoint',a.checkpoint,'--head',a.head,
                  '--gain','1','--episodes',str(episodes),'--output',str(out/name),
-                 '--bounded-skip',mode,'--trace','--profile']
+                 '--bounded-skip',mode,'--margin-threshold','-1','--trace','--profile']
             save(out/'pipeline.json',dict(status='running',stage=name,command=cmd,updated_at=now()))
             with (out/(name+'.log')).open('x') as log:
                 code=subprocess.call(cmd,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT)

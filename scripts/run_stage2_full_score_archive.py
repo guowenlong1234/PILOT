@@ -17,7 +17,7 @@ def main():
             command=[sys.executable,'scripts/stage2_e24_job.py','online','--machine','eval','--gpu','0',
                 '--environments','4','--split','val_unseen','--base-step','9200','--deployment-mode','native_9200',
                 '--checkpoint',a.checkpoint,'--head',a.head,'--gain','1','--episodes',str(episodes),
-                '--output',str(root/name),'--bounded-skip','off','--trace','--profile']
+                '--output',str(root/name),'--bounded-skip','off','--margin-threshold','-1','--trace','--profile']
             save(root/'pipeline.json',dict(status='running',stage=name,command=command,updated_at=now()))
             with (root/(name+'.launcher.log')).open('x') as log:
                 code=subprocess.call(command,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT)

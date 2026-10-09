@@ -132,7 +132,8 @@ class Stage2Online(Stage2Collector):
         start=time.perf_counter()
         bound=deployment_residual_bound(self.cfg.gain,self.head.delta_max)
         plans=inference_query_plans(nav_inputs['gmap_vp_ids'],nav_outs['global_logits'],
-            no_vp_left,step,self.trainer.max_len,bound=bound)
+            no_vp_left,step,self.trainer.max_len,bound=bound,
+            margin_threshold=getattr(self.cfg,'margin_threshold',-1.))
         enabled=bool(getattr(self.cfg,'bounded_skip',True))
         reasons=[p['skip_reason'] if enabled else None for p in plans]
         before_q1=self.counts['q1_requested']
@@ -175,8 +176,10 @@ class Stage2Online(Stage2Collector):
             chosen=base if row['base_stop'] else ghosts[int((scores[ghosts]+dense[i,ghosts]).argmax())]
             self.counts['rows']+=1; self.counts['action_flips']+=int(chosen!=base)
             self.counts['eligible_move_rows']+=int(not row['base_stop'])
-            if plans[i]['skip_reason'] is not None:
-                self.counts['certified_'+plans[i]['skip_reason']]+=1
+            if plans[i]['certified_skip_reason'] is not None:
+                self.counts['certified_'+plans[i]['certified_skip_reason']]+=1
+            if plans[i]['skip_reason']=='margin_threshold':
+                self.counts['threshold_eligible_rows']+=1
             if reasons[i] is not None:
                 self.counts['skipped_'+reasons[i]]+=1
             self.counts['future_valid_slots']+=int(valid.sum())
@@ -194,7 +197,8 @@ class Stage2Online(Stage2Collector):
                     step=step,base_action=base,action=chosen,forced_stop=row['forced_stop'],
                     executed_action=0 if row['forced_stop'] else chosen,
                     global_vp_ids=list(nav_inputs['gmap_vp_ids'][i]),
-                    ghost_indices=ghosts,skip_reason=reasons[i],certificate=plans[i],
+                    ghost_indices=ghosts,skip_reason=reasons[i],
+                    gate_plan=plans[i],certificate=dict(plans[i],skip_reason=plans[i]['certified_skip_reason']),
                     topk_global_indices=[ghosts[int(j)] for j in row['topk_base_indices']],
                     future_valid_mask=valid.tolist(),invalid_reason=row['invalid_reason'],
                     effective_residual_bound=bound,
@@ -227,5 +231,6 @@ class Stage2Online(Stage2Collector):
             elapsed_seconds=time.perf_counter()-self.started,online_seconds=self.online_seconds,
             gain=self.cfg.gain,residual_bound=1.,teacher_calls=0,
             bounded_skip=bool(getattr(self.cfg,'bounded_skip',True)),
+            margin_threshold=float(getattr(self.cfg,'margin_threshold',-1.)),
             profile=bool(getattr(self.cfg,'profile',False)),step_timings=self.step_timings,**self.deployment,
             **self.head_contract))

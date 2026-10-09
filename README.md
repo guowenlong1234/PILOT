@@ -44,7 +44,7 @@ PILOT 让智能体根据自然语言指令，在三维环境中逐步选择路�
 - 从候选到达预测中提出后继路点，再调用世界模型生成后继特征；不使用未来真实图像作为在线输入。
 - 离线训练 E24 评分头，将语言、候选表示、基础分数与后继特征结合，学习候选分数修正。
 - 在线评分不依赖教师标签，并保留基础停止决策；当前在线实现将最终修正限制在 `[-1, 1]`。
-- 在线部署默认启用整段前瞻剪枝：当赢家的最坏修正分数仍超过所有竞争者的最好修正分数时，省略二阶段预测和评分。配置为 `MODEL.STAGE2_ONLINE.bounded_skip`，作对照时可用 `scripts/stage2_e24_job.py --bounded-skip off`；不改变训练采集，也不做逐层自适应停止。
+- 在线部署默认启用整段前瞻门控：`MODEL.STAGE2_ONLINE.margin_threshold=1.0`，仅在移动候选前两名分差不超过阈值（含数值余量）时继续预测；阈值是可调的经验超参数。设为`-1`恢复仅有严格上下界证书的剪枝；`MODEL.STAGE2_ONLINE.bounded_skip=False`关闭整段门控。命令行对应`--margin-threshold`和`--bounded-skip`。证书保证与经验跳过分开记录；训练采集及逐层深度不受影响。
 - 提供零修正一致性检查、权重冻结审计，以及包含／移除未来信息的对照实验。
 
 采集、数据读取、训练和在线接入分别位于 [`stage2_collect.py`](vlnce_baselines/nwm/active_lookahead/stage2_collect.py)、[`stage2_data.py`](vlnce_baselines/nwm/active_lookahead/stage2_data.py)、[`stage2_training.py`](vlnce_baselines/nwm/active_lookahead/stage2_training.py) 和 [`stage2_online.py`](vlnce_baselines/nwm/active_lookahead/stage2_online.py)。

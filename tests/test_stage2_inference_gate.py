@@ -46,6 +46,20 @@ def test_roundoff_guard_stop_single_and_forced_stop():
     assert plan([-1,3,2],bound=0)['skip_reason']=='bounded_invariant'
 
 
+def test_threshold_is_configurable_and_not_a_mathematical_certificate():
+    args=([[None,'g0','g1']],torch.tensor([[-1.,2.5,1.]]),[False],0,10)
+    for threshold in (None,-1,2):
+        assert inference_query_plans(*args,bound=1,margin_threshold=threshold)[0]['skip_reason'] is None
+    result=inference_query_plans(*args,bound=1,margin_threshold=1)[0]
+    assert result['skip_reason']=='margin_threshold'
+    assert result['certified_skip_reason'] is None
+    assert result['base_margin']==1.5
+    assert inference_query_plans(*args,bound=1,margin_threshold=1.5)[0]['skip_reason'] is None
+    for value in (-.1,float('nan'),float('inf')):
+        with pytest.raises(ValueError,match='threshold'):
+            inference_query_plans(*args,bound=1,margin_threshold=value)
+
+
 def test_pruned_predictions_never_read_q0_or_call_world_model():
     class ForbiddenCache:
         def get(self,*args): raise AssertionError('pruned row read q0')
@@ -98,6 +112,11 @@ def test_mixed_and_all_pruned_rows_skip_head_and_scatter_correctly(monkeypatch,t
     assert calls==[['bounded_invariant',None,'base_stop']]
     assert result.cpu().tolist()==[[0,0,0],[0,-1,1],[0,0,0]]
     assert obj.counts['head_rows']==1 and obj.counts['action_flips']==1
+    obj.cfg.margin_threshold=.4
+    result=obj.score_step(inputs,{'global_logits':logits},text,mask,[False]*3,1)
+    assert not result.any() and obj.counts['head_calls']==1
+    assert obj.counts['skipped_margin_threshold']==1
+    assert obj.counts['certified_bounded_invariant']==2
     logits[1,1]=5
     result=obj.score_step(inputs,{'global_logits':logits},text,mask,[False]*3,1)
     assert not result.any() and obj.counts['head_calls']==1

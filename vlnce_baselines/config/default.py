@@ -277,6 +277,7 @@ _C.MODEL.STAGE2_ONLINE.gain = 1.5
 _C.MODEL.STAGE2_ONLINE.seed = 20260916
 _C.MODEL.STAGE2_ONLINE.trace = False
 _C.MODEL.STAGE2_ONLINE.bounded_skip = True
+_C.MODEL.STAGE2_ONLINE.margin_threshold = 1.0  # -1: certificate-only; >=0: logit gap
 _C.MODEL.STAGE2_ONLINE.profile = False
 
 _C.MODEL.STAGE2_COLLECT = CN()
