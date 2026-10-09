@@ -190,9 +190,16 @@ class Stage2Online(Stage2Collector):
             if row['base_stop'] and bool(dense[i].any()): raise RuntimeError('STOP residual must be zero')
             if self.trace_file:
                 self.trace_file.write(json.dumps(dict(episode=episode,
+                    schema='stage2-decision-scores-v2',scene=str(episodes[i].scene_id),
                     step=step,base_action=base,action=chosen,forced_stop=row['forced_stop'],
+                    executed_action=0 if row['forced_stop'] else chosen,
+                    global_vp_ids=list(nav_inputs['gmap_vp_ids'][i]),
                     ghost_indices=ghosts,skip_reason=reasons[i],certificate=plans[i],
+                    topk_global_indices=[ghosts[int(j)] for j in row['topk_base_indices']],
+                    future_valid_mask=valid.tolist(),invalid_reason=row['invalid_reason'],
+                    effective_residual_bound=bound,
                     future_valid_slots=int(valid.sum()),
+                    refined_logits=(scores+dense[i])[:len(nav_inputs['gmap_vp_ids'][i])].cpu().tolist(),
                     logits=scores[:len(nav_inputs['gmap_vp_ids'][i])].cpu().tolist(),
                     delta=dense[i,:len(nav_inputs['gmap_vp_ids'][i])].cpu().tolist()))+'\n')
                 self.trace_file.flush()
