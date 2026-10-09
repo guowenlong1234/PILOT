@@ -103,7 +103,7 @@ class ProgressiveE24Head(nn.Module):
         zero=next(self.parameters()).flatten()[0]*0
         memory=self.owner_proj.weight.new_zeros(b,k,self.config.hidden_dim)+zero
         dtype=self.owner_proj.weight.dtype
-        memory[present]=self.owner_proj(self.owner_norm(owner.to(dtype)))+self.q0_geometry_proj(geom.to(dtype))+self.base_context_proj(lp[present,None].to(dtype))
+        memory[present]=self.owner_proj(self.owner_norm(owner.to(dtype)))+self.q0_geometry_proj(geom.to(dtype))+self.base_context_proj(lp[present].unsqueeze(-1).to(dtype))
         delta=base.new_zeros(b,k)+zero.float()
         return ProgressiveState(0,memory,base,lp,base+delta,delta,delta,present,text_tokens.detach(),None if text_token_mask is None else text_token_mask.detach().bool())
 
