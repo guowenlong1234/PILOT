@@ -1,6 +1,6 @@
 # 有序未来证据与有界渐进修正
 
-2026-10-09。本次是代码与 CPU 单元/模拟测试交付；没有启动正式采集、训练或导航评测，没有新的导航性能结论。默认仍为旧路径。新模型名称 `progressive_e24_v1`；旧 E24 权重不能直接恢复为新模型，未提供隐式 warm start。
+2026-10-09。首次完成代码与 CPU 单元/模拟测试后，已获授权在测评机完成真实小规模验收：142项回归通过、2路线多深度采集、GPU更新与恢复、2路线完整/认证导航16次动作一致，9个证书复核通过。详见 [测评机验收记录](progressive-lookahead-acceptance-20261009.md)。未启动正式长训练或全量评测，没有新的导航性能结论。默认仍为旧路径。新模型名称 `progressive_e24_v1`；旧 E24 权重不能直接恢复为新模型，未提供隐式 warm start。
 
 ## 实际接通的调用链
 
@@ -90,7 +90,7 @@ YAML 是叠加配置，应与 `run_r2r/iter_train_rae_dino_ghost_concat_persiste
 
 ## 后续实际运行命令
 
-代码尚未提交或同步；应先审查，再按项目 Git 规则交付到**实际运行机器**。以下例子在测评机宿主机 `/home/a6000/gwl/ETP-R1` 执行；作业入口自动进入 `gwl-etpr1-rae`/`etpr1_rae` 并检查 GPU/受保护任务。若选择训练机，应在其工程目录改用 `--machine server` 和该机器实际环境，不能把本机 CPU 测试当成远端验收。
+本次代码已提交并通过 Git bundle 同步到测评机，未推送中央仓库。后续继续按项目 Git 规则交付到**实际运行机器**。以下例子在测评机宿主机 `/home/a6000/gwl/ETP-R1` 执行；作业入口自动进入 `gwl-etpr1-rae`/`etpr1_rae` 并检查 GPU/受保护任务。若选择训练机，应在其工程目录改用 `--machine server` 和该机器实际环境，不能把本机 CPU 测试当成远端验收。
 
 须先填写实际基座路径。当前作业入口沿用原工程批准的 9200 SHA `87bf7ad691a93abfe2d5030c2c314ef4e630c41d3abbe61fea3b38872686055e`（也支持原 6400）；不能用其他 checkpoint 冒充。以下其余路径相对于目标工程：
 
@@ -178,7 +178,7 @@ python scripts/test_progressive_cpu.py -q tests/test_progressive* tests/test_sta
 
 该命令涵盖模型/数学/数据/控制器/模拟预测、真实 CLI 合成数据训练2步→恢复第3步→评价/重放、新旧配置/作业生成器及旧路径回归。测试中的世界模型和导航资产明确为 mock，不能当作真实导航结果。曾发现逐列表精确比对因 PyTorch 有/无梯度 attention 路径出现约 1e-8 差异，已改为明确 1e-6 容差；动作认证仍使用独立保守余量。
 
-未执行：真实 Habitat 导入与运行、真实 q0/CWP/世界模型预测、GPU 前向/训练、真实多深度数据采集、真实冻结 manifest 验收、完整导航和性能/耗时对照。没有虚构 SR/SPL 提升。
+上述最初缺少的真实环境检查已在授权后完成小规模验收，见文首链接；仍未执行正式长训练、全量导航和重复性能基准。没有 SR/SPL 提升结论。
 
 
 ## 本次文件清单
@@ -194,4 +194,4 @@ python scripts/test_progressive_cpu.py -q tests/test_progressive* tests/test_sta
 | 新测试 | `tests/test_progressive_core.py`、`test_progressive_head.py`、`test_progressive_data_training.py`、`test_progressive_prediction.py`、`test_progressive_controller.py`、`test_progressive_integration.py` |
 | 文档 | `docs/progressive_lookahead.md`、`research.md`（仅追加本次入口记录，保留原修改） |
 
-原 `residual_head.py`、`stage2_collect.py`、`stage2_data.py`、`stage2_training.py`、`stage2_online.py`、`inference_gate.py`、世界模型和第一阶段实现保持原代码；没有提交、推送或切换分支。
+原 `residual_head.py`、`stage2_collect.py`、`stage2_data.py`、`stage2_training.py`、`stage2_online.py`、`inference_gate.py`、世界模型和第一阶段实现保持原代码；后续授权测试时已提交并通过 Git bundle 快进同步，未推送或切换分支。
