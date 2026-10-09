@@ -62,8 +62,9 @@ def report(root, expected_episodes=None):
                 counts['ordinary_move']+=1
                 if len(g)>1:
                     margin=s[top[0]]-s[top[1]]
-                    bucket=next((str(t) for t in (.5,1,2,3,5) if margin<=t),'over5')
-                    counts['base_margin_le_'+bucket]+=1
+                    for threshold in (.5,1,2,3,5):
+                        counts['base_margin_le_'+str(threshold)]+=int(margin<=threshold)
+                    counts['base_margin_gt_5']+=int(margin>5)
                 if reason=='bounded_invariant':
                     m=s[base]-1-max(s[j]+(1 if j in top else 0) for j in g if j!=base)
                     if not m>r['certificate']['numerical_guard']:raise ValueError('invalid certificate')
