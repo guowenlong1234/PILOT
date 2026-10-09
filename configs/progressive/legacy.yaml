@@ -1,0 +1,11 @@
+# Overlay on run_r2r/iter_train_rae_dino_ghost_concat_persistent.yaml.
+MODEL:
+  PROGRESSIVE:
+    enabled: False
+  STAGE2_ONLINE:
+    enabled: True
+    gain: 1.0
+    transfer_mode: native_9200
+    # Set head and head_sha256 to an existing legacy native-9200 E24 head.
+    head: ''
+    head_sha256: ''

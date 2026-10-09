@@ -3388,11 +3388,19 @@ class RLTrainer(BaseVLNCETrainer):
         if self._stage2_online_enabled():
             if self._stage2_collect_enabled() or self.config.VIDEO_OPTION:
                 raise ValueError('online E24 evaluation excludes collection and teacher visualization')
-            from vlnce_baselines.nwm.active_lookahead.stage2_online import Stage2Online
-            self.stage2_collector = Stage2Online(self)
+            if self._progressive_enabled():
+                from vlnce_baselines.nwm.active_lookahead.progressive_online import ProgressiveOnline
+                self.stage2_collector = ProgressiveOnline(self)
+            else:
+                from vlnce_baselines.nwm.active_lookahead.stage2_online import Stage2Online
+                self.stage2_collector = Stage2Online(self)
         elif self._stage2_collect_enabled():
-            from vlnce_baselines.nwm.active_lookahead.stage2_collect import Stage2Collector
-            self.stage2_collector = Stage2Collector(self)
+            if self._progressive_enabled():
+                from vlnce_baselines.nwm.active_lookahead.progressive_collect import ProgressiveCollector
+                self.stage2_collector = ProgressiveCollector(self)
+            else:
+                from vlnce_baselines.nwm.active_lookahead.stage2_collect import Stage2Collector
+                self.stage2_collector = Stage2Collector(self)
 
         if self.config.EVAL.EPISODE_COUNT == -1:
             eps_to_eval = sum(self.envs.number_of_episodes)
@@ -3624,6 +3632,9 @@ class RLTrainer(BaseVLNCETrainer):
         pos = [x[0] for x in pos_ori]
         ori = [x[1] for x in pos_ori]
         return pos, ori
+
+    def _progressive_enabled(self):
+        return bool(getattr(getattr(self.config.MODEL, "PROGRESSIVE", None), "enabled", False))
 
     def _stage2_online_enabled(self):
         return bool(getattr(getattr(self.config.MODEL, "STAGE2_ONLINE", None), "enabled", False))
@@ -3993,15 +4004,20 @@ class RLTrainer(BaseVLNCETrainer):
                 a_t = torch.where(torch.rand_like(a_t, dtype=torch.float)<=sample_ratio, teacher_actions, a_t)
 
             elif feedback == 'argmax':
-                a_t = (
-                    nav_logits.argmax(dim=-1)
-                    if active_deltas is None
-                    else stop_isolated_e24_actions(
-                        nav_logits,
-                        active_deltas,
-                        nav_inputs['gmap_vp_ids'],
+                if self._stage2_online_enabled() and self._progressive_enabled():
+                    # Use the controller's exact sequential FP32 accumulation.
+                    # Re-adding a rounded residual can change a near-tie argmax.
+                    a_t = self.stage2_collector.actions
+                else:
+                    a_t = (
+                        nav_logits.argmax(dim=-1)
+                        if active_deltas is None
+                        else stop_isolated_e24_actions(
+                            nav_logits,
+                            active_deltas,
+                            nav_inputs['gmap_vp_ids'],
+                        )
                     )
-                )
                 if active_deltas is not None:
                     base_actions = nav_logits.detach().argmax(dim=-1)
                     self._e24_future_diagnostic_totals['action_rows'] += float(

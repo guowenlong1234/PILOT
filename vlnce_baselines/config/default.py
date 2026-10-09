@@ -267,6 +267,19 @@ _C.MODEL.RAENWM.rgb_fusion_align_navigation_cls = False
 
 # Predicted Top-5 q1 lookahead with a jointly trained E24 residual scorer.
 # Every switch is off by default so legacy R1 behavior is unchanged.
+_C.MODEL.PROGRESSIVE = CN()
+_C.MODEL.PROGRESSIVE.enabled = False
+_C.MODEL.PROGRESSIVE.max_future_depth = 2
+_C.MODEL.PROGRESSIVE.total_residual_bound = 1.0
+_C.MODEL.PROGRESSIVE.budget_fractions = [0.5, 0.5]
+_C.MODEL.PROGRESSIVE.share_depth_weights = True
+_C.MODEL.PROGRESSIVE.use_depth_embedding = True
+_C.MODEL.PROGRESSIVE.use_geometry_embedding = True
+_C.MODEL.PROGRESSIVE.distance_scale = 1.0
+_C.MODEL.PROGRESSIVE.pruning_mode = "certified"
+_C.MODEL.PROGRESSIVE.final_loss_weight = 1.0
+_C.MODEL.PROGRESSIVE.prefix_loss_weight = 0.2
+
 _C.MODEL.STAGE2_ONLINE = CN()
 _C.MODEL.STAGE2_ONLINE.enabled = False
 _C.MODEL.STAGE2_ONLINE.transfer_mode = "same"

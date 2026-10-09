@@ -34,7 +34,14 @@ def main():
     p.add_argument('--profile',action='store_true')
     p.add_argument('--lookahead-horizon-steps',type=int,choices=[1,2,3],default=1)
     p.add_argument('--allow-rollout-depth-transfer',action='store_true')
+    p.add_argument('--progressive', choices=['none','certified'], default=None,
+                   help='enable progressive D=2; value selects only inference stopping')
     p.add_argument('--dry-run',action='store_true');a=p.parse_args()
+    if a.progressive is not None:
+        if a.gain != 1. or a.margin_threshold != -1:
+            p.error('progressive requires explicit --gain 1 --margin-threshold -1')
+        if a.lookahead_horizon_steps != 1 or a.allow_rollout_depth_transfer or a.compact_storage:
+            p.error('progressive uses its own depth/schema contract; legacy rollout/storage switches are unsupported')
     if not math.isfinite(a.margin_threshold) or (a.margin_threshold<0 and a.margin_threshold!=-1):
         p.error('margin threshold must be nonnegative or -1')
     if a.deployment_mode=='native_9200' and a.base_step!=9200:p.error('native_9200 requires base-step9200')
@@ -42,7 +49,7 @@ def main():
     root=Path(a.output).resolve()
     if a.action in ('online','baseline') and root.exists() and any(root.iterdir()):
         raise FileExistsError('navigation comparison requires a new empty output directory')
-    if a.action=='online' and (a.split!='val_unseen' or a.gain not in ((0.,1.) if a.deployment_mode=='native_9200' else (0.,1.5))):
+    if a.action=='online' and (a.split!='val_unseen' or a.gain not in ((1.,) if a.progressive is not None else ((0.,1.) if a.deployment_mode=='native_9200' else (0.,1.5)))):
         raise ValueError('online experiment is fixed to val_unseen and gain0/1.5')
     root.mkdir(parents=True,exist_ok=True)
     with gzip.open(ROOT/f'data/datasets/R2R_VLNCE_v1-3_preprocessed_xlmr/{a.split}/{a.split}.json.gz','rt') as f: data=json.load(f)
@@ -58,6 +65,8 @@ def main():
         groups=[sorted(v) for _,v in sorted(groups.items())]
         ids=[g[i] for i in range(max(map(len,groups))) for g in groups if i<len(g)][:a.episodes]
     if a.action=='validate':
+        if a.progressive is not None:
+            return subprocess.call(runtime(a.machine,['scripts/progressive_stage2.py','validate','--data',str(root/'episodes')],a.gpu),cwd=ROOT)
         code='from vlnce_baselines.nwm.active_lookahead.stage2_data import validate_dataset; import json; m=validate_dataset('+repr(str(root/'episodes'))+','+repr(ids)+'); print(json.dumps({k:v for k,v in m.items() if k!="entries"}))'
         return subprocess.call(runtime(a.machine,['-c',code],a.gpu),cwd=ROOT)
     base_sha=BASE_SHAS[a.base_step]
@@ -89,6 +98,17 @@ def main():
         provenance.update(behavior='stage2_argmax_stop_isolated',head_sha256=sha(a.head),gain=a.gain,residual_bound=1.)
         provenance.update(bounded_skip=a.bounded_skip=='on',profile=a.profile)
         provenance['margin_threshold']=a.margin_threshold
+    if a.progressive is not None:
+        # The independent feature contract is shared with the prediction adapter.
+        import runpy
+        contract=runpy.run_path(str(ROOT/'vlnce_baselines/nwm/active_lookahead/progressive_contract.py'))
+        provenance.update(prediction_contract=contract['PREDICTION_CONTRACT'],format=contract['FORMAT'],geometry_definition=contract['GEOMETRY'],
+            feature_contract=contract['FEATURE_CONTRACT'],distance_scale=1.,max_future_depth=2,
+            assets={name:dict(sha256=assets[path]) for name,path in zip(
+                ('world_model','statistics','cwp'),assets)})
+        provenance['assets']['world_config']=dict(sha256=sha(ROOT/'configs/nwm/raenwm_mp3d_fresh_cls.yaml'))
+        if a.action=='online':
+            provenance.update(head_training_base_sha256=base_sha,transfer_mode='same_progressive_base',head_retrained=True)
     prov=root/'provenance.json'
     if prov.exists() and json.loads(prov.read_text())!=provenance:raise ValueError('immutable collection provenance changed')
     save(prov,provenance)
@@ -134,6 +154,10 @@ def main():
         opts['MODEL.STAGE2_ONLINE.margin_threshold']=a.margin_threshold
         opts['MODEL.STAGE2_ONLINE.lookahead_horizon_steps']=a.lookahead_horizon_steps
         opts['MODEL.STAGE2_ONLINE.allow_rollout_depth_transfer']=a.allow_rollout_depth_transfer
+    if a.progressive is not None:
+        opts.update({'MODEL.PROGRESSIVE.enabled':True,'MODEL.PROGRESSIVE.max_future_depth':2,
+            'MODEL.PROGRESSIVE.pruning_mode':a.progressive,'MODEL.STAGE2_ONLINE.gain':1.,
+            'MODEL.STAGE2_ONLINE.margin_threshold':-1.})
     cmd=['run.py','--exp_name','stage2_collect','--run-type','eval','--exp-config','run_r2r/iter_train_rae_dino_ghost_concat_persistent.yaml']
     for key,value in opts.items():cmd.extend([key,str(value)])
     command=runtime(a.machine,cmd,a.gpu)
